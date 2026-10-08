@@ -321,6 +321,7 @@ async function main() {
   function apply(s) {
     const media = bridge.media;
     if (!media || !s) return;
+    eq.setProvider(s.provider);
     updateAttribution(s);
     const soundcloud = s.provider === "soundcloud";
 
