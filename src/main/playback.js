@@ -79,7 +79,23 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
       visited = new Set();
       onProviderChange(provider);
     });
-    switching = task;
+    // Keep the rejected result for this caller, but let later controls reach
+    // the source we still own. A stale failure must not undo a newer choice.
+    switching = task.catch(() => {
+      if (disposed || g !== generation) return;
+      desired = provider;
+      if (provider === "soundcloud" && !hostSession) {
+        // The old audio stopped before Spotify could be paused. Its context
+        // cannot safely resume until a fresh shelf selection pauses Spotify.
+        queue = [];
+        index = -1;
+        contextUri = null;
+        contextLoading = false;
+        loadDispatched = false;
+        state.track = null;
+        state.position = 0;
+      }
+    });
     await task;
     return g;
   }
@@ -291,6 +307,9 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
     disposed = true;
     generation++;
     await switching.catch(() => {});
+    // A native Spotify command may already be running. Drain it before callers
+    // perform final pause/volume cleanup; queued commands see disposed and skip.
+    await spotifyPending.catch(() => {});
     if (hostSession) await audio.send({ type: "stop", session: hostSession }).catch(() => {});
     session = null;
     hostSession = null;

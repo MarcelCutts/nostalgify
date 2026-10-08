@@ -3,16 +3,26 @@
 // (a throwaway settings folder). The modes are listed in the README.
 const fs = require("fs");
 const path = require("path");
-const { execFile } = require("child_process");
 
 module.exports = function runSelfTest(ctx) {
+  if (["real", "focus"].includes(process.env.NOSTALGIFY_SELFTEST)) {
+    return require("./spotify-selftest").runRealSpotifySelftest(ctx);
+  }
+  if (process.env.NOSTALGIFY_SELFTEST === "soundcloud-live-real") {
+    if (ctx.app.isPackaged || process.env.NOSTALGIFY_MOCK || process.platform !== "darwin") {
+      console.error("FAIL soundcloud-live-real requires a development macOS app and NOSTALGIFY_MOCK unset");
+      ctx.app.exit(1);
+      return;
+    }
+    return require("../../tests/helpers/soundcloud-live").runLiveSoundCloudSelftest(ctx);
+  }
   if (process.env.NOSTALGIFY_SELFTEST === "soundcloud-live" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
     return require("../../tests/helpers/soundcloud-live").runLiveSoundCloudSelftest(ctx);
   }
   if (process.env.NOSTALGIFY_SELFTEST === "soundcloud" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
     return require("../../tests/helpers/soundcloud-fixture").runSoundCloudSelftest(ctx);
   }
-  const { win, app, screen, setZoom, cssSize, zoom, readPrefs, listSkins, applySkin, spotifyCommand, getSpotifyState } = ctx;
+  const { win, app, screen, setZoom, cssSize, zoom, readPrefs, listSkins, applySkin } = ctx;
   const D = process.env.NOSTALGIFY_SHOTS || app.getPath("temp");
   const shot = async (name) => {
     const img = await win.webContents.capturePage();
@@ -44,57 +54,6 @@ module.exports = function runSelfTest(ctx) {
       await pause(600);
       const b = win.getBounds();
       console.log(`after moving near the corner and resizing: at ${b.x},${b.y}, fully on screen: ${b.x + b.width <= area.x + area.width && b.y + b.height <= area.y + area.height}`);
-    } else if (process.env.NOSTALGIFY_SELFTEST === "focus") {
-      // Against the real Spotify, muted by the caller: play a shelf entry with Nostalgify in front.
-      const front = () =>
-        new Promise((r) =>
-          execFile("osascript", ["-l", "JavaScript", "-e", 'ObjC.import("AppKit"); const a = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.spotify.client").firstObject; "spotify hidden=" + a.isHidden + " front=" + $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js'], (e, out) => r((out || "").trim()))
-        );
-      await js(`window.__shelf.addFromText("https://open.spotify.com/album/2noRn2Aes5aoNVsU6iWThc")`);
-      await pause(2000);
-      win.show();
-      app.focus({ steal: true });
-      await pause(800);
-      console.log("before double-click:", await front());
-      await js(`[...document.querySelectorAll("#playlist-window .track-cell")].find((x) => x.textContent.includes("Discovery")).dispatchEvent(new MouseEvent("dblclick", { bubbles: true }))`);
-      for (const t of [700, 1500, 3000]) {
-        await pause(t === 700 ? 700 : t - 700);
-        console.log(`+${t}ms:`, await front());
-      }
-      await spotifyCommand("pause");
-    } else if (process.env.NOSTALGIFY_SELFTEST === "real") {
-      // Against the real Spotify. Run with Spotify muted; the caller restores it.
-      const nowPlaying = () =>
-        js(`(() => { const s = window.__webamp.store.getState(); const t = s.tracks[s.playlist.currentTrack]; return t ? t.artist + " - " + t.title + " | " + s.media.status : null; })()`);
-      console.log("marquee before:", await nowPlaying());
-      await js(`window.__shelf.addFromText("https://open.spotify.com/album/2noRn2Aes5aoNVsU6iWThc")`);
-      await pause(2000);
-      console.log("cells:", await js(`JSON.stringify([...document.querySelectorAll("#playlist-window .track-cell")].map((x) => x.textContent))`));
-      console.log("dblclick:", await js(`(() => { const cells = [...document.querySelectorAll("#playlist-window .track-cell")]; const c = cells.find((x) => x.textContent.includes("Discovery")); if (!c) return "no cell"; c.dispatchEvent(new MouseEvent("dblclick", { bubbles: true })); return "sent"; })()`));
-      await pause(4000);
-      console.log("marquee after double-click:", await nowPlaying());
-      console.log("quiet counter:", await js(`window.__bridge.quiet`));
-      console.log("recent actions:", await js(`JSON.stringify(window.__actions.filter((a) => !a.startsWith("UPDATE_TIME") && !a.startsWith("STEP_MARQUEE")).slice(-12))`));
-      const st = await getSpotifyState();
-      console.log("spotify says:", st.state, "|", st.track && st.track.artist + " - " + st.track.name + " | " + st.track.album);
-      await spotifyCommand("pause");
-      await pause(1500);
-      console.log("marquee after pause:", await nowPlaying());
-      await js(`window.__webamp.store.dispatch({ type: "SET_VOLUME", volume: 37 })`);
-      await pause(1500);
-      console.log("volume set to 37 in Webamp, Spotify reads:", (await getSpotifyState()).volume);
-      // Eject round trip: Spotify comes forward, a song gets picked, Spotify hides again.
-      const front = () =>
-        new Promise((r) =>
-          execFile("osascript", ["-l", "JavaScript", "-e", 'ObjC.import("AppKit"); const a = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("com.spotify.client").firstObject; "spotify hidden=" + a.isHidden + " front=" + $.NSWorkspace.sharedWorkspace.frontmostApplication.localizedName.js'], (e, out) => r((out || "").trim()))
-        );
-      await js(`document.getElementById("eject").click()`);
-      await pause(2500);
-      console.log("after eject:", await front());
-      await spotifyCommand("playUri", "spotify:track:4uLU6hMCjMI75M1A2tKUQC");
-      await pause(4000);
-      console.log("after picking a song:", await front());
-      await spotifyCommand("pause");
     } else if (process.env.NOSTALGIFY_SELFTEST === "shelf") {
       const rows = () =>
         js(`JSON.stringify(window.__webamp.store.getState().playlist.trackOrder.map((id) => window.__webamp.store.getState().tracks[id].title))`);

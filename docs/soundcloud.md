@@ -6,13 +6,23 @@ Next/previous navigate the loaded SoundCloud playlist. Shuffle visits each track
 once; repeat restarts the context. Eject/Open Current Source opens the track on
 SoundCloud. Liked Songs remains Spotify-owned.
 
-Live checks on 8 October 2026 authenticated and refreshed application tokens,
-resolved Forss's “Flickermood” and the 11-track “Soulhack” playlist, and played real
-AAC HLS in Electron. The live test passed pause, keyboard seek, volume,
+Live macOS checks on 9 October 2026 authenticated and refreshed application tokens,
+resolved Forss's 11-track “Soulhack” playlist, and decoded real AAC HLS using the
+native Electron network stack. The live test passed pause, keyboard seek, volume,
 next/previous, automatic playlist advancement, shelf persistence and playback
-after renderer reload. Spotify was mocked and physical audio output was not
-verified in the headless container. Packaged macOS validation remains pending.
-The separate offline self-test uses explicit fixtures, including silent AAC/HLS.
+after renderer reload. Both handoffs with the signed-in Spotify desktop app passed:
+Spotify's clock stopped during SoundCloud playback, and switching back stopped and
+released SoundCloud's native audio element before Spotify advanced. Full and compact
+source attribution passed with the Green Dimension skin. The separate offline
+self-test uses explicit fixtures, including silent AAC/HLS. Physical speaker output
+was not verified; application-token checks do not exercise user OAuth/Keychain storage.
+
+The ad-hoc-signed arm64 package passed the real Spotify assertions and signature
+verification. Packaged UI checks also passed SoundCloud clipboard paste, public
+track/playlist resolution, advancing playback, pause, Next, persisted shelf entries
+and switching back to Spotify metadata. The archive was checked for `.env` files
+and the supplied credential values; neither was included. The local suite passes
+163 tests. Compact attribution also passes hit checks with Webamp Double Size.
 
 ## Credentials for local development
 
@@ -27,6 +37,19 @@ to the process; adding an unexported shell variable or a `.env` file does not in
 them. The app does not load `.env` files. Do not commit credentials, put them in
 command arguments, or bundle a shared client secret in a distributed desktop app.
 
+For an existing repository-root `.env` file, Node 24 can load it explicitly without
+printing values or executing it as a shell script:
+
+```sh
+node --env-file=.env scripts/check-soundcloud.js --refresh https://soundcloud.com/forss/sets/soulhack
+npm run build
+node --env-file=.env node_modules/electron/cli.js .
+```
+
+The repository ignores `.env` and `.env.*`, and packaging explicitly excludes those
+root files. Keep the file private (for example, `chmod 600 .env`). Never copy it into
+the app bundle. Normal `npm start` still requires exported credentials.
+
 With both variables set, the main process uses HTTP Basic authentication for the
 client-credentials grant and caches an application token without opening a browser.
 This path has passed the live command-line check using the existing environment
@@ -37,6 +60,9 @@ a fresh token if credentials or authorization changed. Application tokens remain
 in memory and disappear on quit. **Playback → Forget Local SoundCloud Sign-in**
 does not disable developer-owned environment credentials; remove them from the
 environment to do that.
+
+An empty profile does not access Keychain just to check for saved tokens. Existing
+encrypted user-token files still require secure storage before they can be read.
 
 Check environment credentials without printing their values:
 
@@ -138,8 +164,15 @@ NODE_USE_ENV_PROXY=1 npm start
 
 That opt-in makes main-process SoundCloud requests use Electron's bundled Node
 fetch with the existing proxy and CA configuration. Ordinary desktop launches use
-Electron `net.fetch`. Full live Electron playback passed through the Node route
-with certificate verification enabled. No
+Electron's native network stack. Its `net.fetch` rejects manual redirects, including
+SoundCloud's `/resolve` responses ([Electron issue #43715](https://github.com/electron/electron/issues/43715)).
+The native adapter exposes redirect status and headers from `net.request`, then
+aborts that request; the existing API/media allowlists validate each subsequent hop
+before making a new request. It never follows a redirect automatically with credentials.
+Response bodies stream with bounded buffering and cancellation. Token grants keep
+`net.fetch` with redirect rejection and cookies omitted. Full live Electron playback
+has passed through both native macOS and cloud Node routes with certificate
+verification enabled. No
 Chromium trust-store migration or TLS verification bypass is required for this path.
 
 ## Distribution review
@@ -221,22 +254,39 @@ normal launch, approve macOS Automation access for the development app/Electron
 to control Spotify. Check Privacy & Security → Automation if access was denied.
 Quit Nostalgify before each subsequent run.
 
-Mute **macOS output**, not only Spotify, before these diagnostics: `real` changes
-Webamp volume to 37 and starts Spotify tracks. Restore your preferred volumes
-afterward, with playback paused.
+Mute **macOS output** before these diagnostics. Both tests mute Spotify before
+starting tracks; `real` checks volume 37 while paused, then mutes before resuming.
+Cleanup drains pending commands, pauses playback and restores the original Spotify
+volume. Restore your original macOS mute setting afterward.
 
 ```sh
 env -u NOSTALGIFY_MOCK NOSTALGIFY_SELFTEST=real npm start
 env -u NOSTALGIFY_MOCK NOSTALGIFY_SELFTEST=focus npm start
 ```
 
-These modes print observations and exercise controls; they are not assertion-based
-proof that real Spotify passed. Inspect playback/metadata, pause and volume,
-Eject's focus round trip, and whether selecting a shelf entry keeps Nostalgify in
-front. Then relaunch normally with both test variables unset, as above. Play a
+These modes assert observed playback, metadata, clock advancement and shelf focus;
+`real` also asserts Webamp pause, seek, volume, resume and Eject's focus round trip.
+They use bounded waits, exit nonzero on failure and report safe failure diagnostics.
+Keep other apps from taking focus during the checks. Then relaunch normally with
+both test variables unset, as above. Play a
 Spotify track, switch to SoundCloud and back, and verify that the previous source
 pauses with no overlapping audio. Check audible output, seek, playlist navigation,
 source attribution, and shelf persistence after restart.
+
+To assert both handoffs against **real SoundCloud and real Spotify** in development:
+
+```sh
+env -u NOSTALGIFY_MOCK NOSTALGIFY_SELFTEST=soundcloud-live-real \
+  node --env-file=.env node_modules/electron/cli.js .
+```
+
+Use the temporary profile and muted macOS output described above. This exact mode
+requires macOS, rejects mock Spotify and packaged apps, and never installs fixture
+fetch. It checks that Spotify's clock stops while decoded SoundCloud audio advances,
+then that returning to a Spotify shelf entry stops and releases the native
+SoundCloud audio element before Spotify advances. It also exercises live transport,
+playlist navigation, attribution, renderer reload and cleanup. Physical speaker
+output still needs a separate listening check.
 
 Package explicitly for the Node process architecture (`arm64` or `x64`):
 

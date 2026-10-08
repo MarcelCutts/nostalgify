@@ -117,17 +117,20 @@ body.has-soundcloud-track #webamp #main-window .mono-stereo {
   outline: 1px solid #fafafa;
   outline-offset: -1px;
 }
-/* Compact mode leaves room before the clock and transport buttons. */
-#webamp #main-window.shade #soundcloud-attribution {
+/* Compact attribution is an unclipped sibling of the shaped skin window.
+   It leaves room before the clock and transport buttons. */
+#webamp #soundcloud-attribution.soundcloud-attribution-compact {
   left: 20px;
   top: 1px;
   width: 100px;
   height: 12px;
+  z-index: 2;
+  transform-origin: top left;
 }
-#webamp #main-window.shade #soundcloud-attribution img {
+#webamp #soundcloud-attribution.soundcloud-attribution-compact img {
   width: 40px;
   height: 10px;
 }
-#webamp #main-window.shade #soundcloud-attribution span {
+#webamp #soundcloud-attribution.soundcloud-attribution-compact span {
   font-size: 6px;
 }

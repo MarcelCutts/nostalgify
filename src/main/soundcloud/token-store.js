@@ -32,16 +32,19 @@ function createTokenStore({ filePath, safeStorage }) {
 
   return {
     load: () => serialized(async () => {
-      requireEncryption();
       let handle;
       try {
         handle = await fs.open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
         const stat = await handle.stat();
         if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error('invalid token file');
         const encrypted = await handle.readFile();
+        // A fresh profile has no account tokens. Avoid prompting/blocking on
+        // Keychain for application credentials that never persist a user login.
+        requireEncryption();
         return JSON.parse(safeStorage.decryptString(encrypted));
       } catch (error) {
         if (error.code === 'ENOENT') return null;
+        if (error.code === 'storage_unavailable') throw error;
         throw storageError('storage_error', 'SoundCloud credentials could not be read securely. Disconnect SoundCloud and connect again.');
       } finally {
         await handle?.close();

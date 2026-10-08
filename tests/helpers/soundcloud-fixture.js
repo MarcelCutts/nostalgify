@@ -46,6 +46,58 @@ function createFixtureFetch() {
 async function runSoundCloudSelftest({ win, app, playback, readPrefs }) {
   const js = (code) => win.webContents.executeJavaScript(code);
   const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const attributionClickable = () => js(`(() => {
+    const a = document.getElementById('soundcloud-attribution');
+    if (!a || a.hidden) return false;
+    return [a, a.querySelector('img'), a.querySelector('span')].every(element => {
+      if (!element) return false;
+      const r = element.getBoundingClientRect();
+      return r.width > 0 && r.height > 0 && [0.1, 0.5, 0.9].every(fraction =>
+        a.contains(document.elementFromPoint(r.x + r.width * fraction, r.y + r.height / 2)));
+    });
+  })()`);
+  const attributionDiagnostic = () => js(`(() => {
+    const a = document.getElementById('soundcloud-attribution');
+    const main = document.getElementById('main-window');
+    const rect = (element) => {
+      if (!element) return null;
+      const r = element.getBoundingClientRect();
+      return Object.fromEntries(['x', 'y', 'width', 'height', 'top', 'right', 'bottom', 'left'].map(key => [key, Math.round(r[key] * 100) / 100]));
+    };
+    const describe = (element) => {
+      if (!element) return null;
+      const s = getComputedStyle(element);
+      // Only shape references, geometry, and element identifiers: no DOM text,
+      // image URLs, local file paths, or source/authorization values.
+      const clipPath = s.clipPath.includes('url(') ? (s.clipPath.match(/#[^"')]+/)?.[0] || 'url-reference') : s.clipPath;
+      return { tag: element.tagName, id: element.id, classes: [...element.classList], rect: rect(element),
+        display: s.display, visibility: s.visibility, opacity: s.opacity, pointerEvents: s.pointerEvents,
+        position: s.position, zIndex: s.zIndex, overflow: s.overflow, clipPath,
+        appRegion: s.getPropertyValue('-webkit-app-region'), transform: s.transform };
+    };
+    const r = a?.getBoundingClientRect();
+    const points = r ? [[r.x + r.width / 2, r.y + r.height / 2], [r.x + 2, r.y + r.height / 2], [r.right - 2, r.y + r.height / 2]] : [];
+    const ancestors = [];
+    for (let p = a?.parentElement; p && ancestors.length < 5; p = p.parentElement) ancestors.push(describe(p));
+    return { viewport: { width: innerWidth, height: innerHeight, dpr: devicePixelRatio },
+      reduxShade: window.__webamp?.store.getState().windows.genWindows.main.shade,
+      main: describe(main), attribution: { ...describe(a), hidden: a?.hidden, connected: a?.isConnected, parent: a?.parentElement?.id },
+      ancestors, titleBar: describe(document.getElementById('title-bar')),
+      clipGeometry: [...document.querySelectorAll('clipPath')].filter(element => /mainwindow/i.test(element.id)).slice(0, 2).map(element => ({
+        id: element.id, units: element.getAttribute('clipPathUnits'),
+        shapeCount: element.children.length, shapes: [...element.children].slice(0, 2).map(shape => ({ tag: shape.tagName,
+          pointsLength: shape.getAttribute('points')?.length, points: shape.getAttribute('points')?.slice(0, 100),
+          pathLength: shape.getAttribute('d')?.length, d: shape.getAttribute('d')?.slice(0, 100) })) })),
+      hits: points.map(([x, y]) => ({ x, y, attributionContainsHit: !!a?.contains(document.elementFromPoint(x, y)),
+        elements: document.elementsFromPoint(x, y).slice(0, 6).map(describe) })) };
+  })()`);
+  const screenshot = async (name) => {
+    const directory = process.env.NOSTALGIFY_SHOTS || app.getPath("temp");
+    await fs.mkdir(directory, { recursive: true });
+    const file = path.join(directory, `${name}.png`);
+    await fs.writeFile(file, (await win.webContents.capturePage()).toPNG());
+    console.log("SoundCloud offline screenshot:", file);
+  };
   const until = async (label, predicate) => {
     for (let i = 0; i < 100; i++) {
       const value = await predicate();
@@ -66,6 +118,21 @@ async function runSoundCloudSelftest({ win, app, playback, readPrefs }) {
         return state.provider === "soundcloud" && state.state === "playing" && state.position > 0.5;
       });
       await until("decoded duration reaches the seek bar", () => js("(() => { const s=window.__webamp.store.getState(); const d=s.tracks[s.playlist.currentTrack]?.duration; return d > 12 && d < 12.1; })()"));
+      await until("normal source logo and uploader attribution", () => js("(() => { const a=document.getElementById('soundcloud-attribution'); const img=a?.querySelector('img'); return a && !a.hidden && a.getBoundingClientRect().width > 0 && img?.complete && img.naturalWidth > 0 && a.getAttribute('aria-label')?.toLowerCase().includes('uploaded by'); })()"));
+      await js("window.__webamp.store.dispatch({type:'TOGGLE_WINDOW_SHADE_MODE',windowId:'main'})");
+      await until("compact attribution moves outside the skin clip path", () => js("(() => { const a=document.getElementById('soundcloud-attribution'); const m=document.getElementById('main-window'); return m?.classList.contains('shade') && a?.classList.contains('soundcloud-attribution-compact') && a.parentElement === m.parentElement; })()"));
+      await until("compact attribution logo and text remain clickable", attributionClickable);
+      if (process.env.NOSTALGIFY_SHOTS) await screenshot("soundcloud-offline-compact");
+      await js("window.__webamp.store.dispatch({type:'TOGGLE_DOUBLESIZE_MODE'})");
+      await until("compact attribution matches Webamp Double Size", () => js("(() => { const a=document.getElementById('soundcloud-attribution'); const m=document.getElementById('main-window'); const r=a.getBoundingClientRect(); const b=m.getBoundingClientRect(); const img=a.querySelector('img').getBoundingClientRect(); return m.classList.contains('doubled') && m.classList.contains('shade') && Math.abs(r.width-200)<0.1 && Math.abs(r.height-24)<0.1 && Math.abs(r.left-b.left-40)<0.1 && Math.abs(r.top-b.top-2)<0.1 && Math.abs(img.width-80)<0.1; })()"));
+      await until("double-size compact attribution logo and text remain clickable", attributionClickable);
+      if (process.env.NOSTALGIFY_SHOTS) await screenshot("soundcloud-offline-compact-double");
+      await js("window.__webamp.store.dispatch({type:'TOGGLE_WINDOW_SHADE_MODE',windowId:'main'})");
+      await until("normal transport and attribution parent restored after compact mode", () => js("(() => { const a=document.getElementById('soundcloud-attribution'); const m=document.getElementById('main-window'); return !m.classList.contains('shade') && document.getElementById('pause').getBoundingClientRect().height > 0 && a.parentElement === m && !a.classList.contains('soundcloud-attribution-compact') && !a.style.left && !a.style.top && !a.style.transform; })()"));
+      await until("normal double-size attribution logo and text remain clickable", attributionClickable);
+      await js("window.__webamp.store.dispatch({type:'TOGGLE_DOUBLESIZE_MODE'})");
+      await until("normal attribution returns to original size", () => js("!document.getElementById('main-window').classList.contains('doubled') && Math.abs(document.getElementById('soundcloud-attribution').getBoundingClientRect().width-154)<0.1"));
+      await until("normal attribution logo and text remain clickable", attributionClickable);
       await js("document.getElementById('pause').click()");
       await until("pause", async () => (await playback.getState()).state === "paused");
       const paused = (await playback.getState()).position;
@@ -97,6 +164,8 @@ async function runSoundCloudSelftest({ win, app, playback, readPrefs }) {
       app.quit();
     } catch (error) {
       console.error("FAIL SoundCloud offline integration:", error.message);
+      console.error("Fixture attribution geometry:", JSON.stringify(await attributionDiagnostic().catch(() => ({ unavailable: true }))));
+      await screenshot("soundcloud-offline-failure").catch(() => console.error("SoundCloud offline failure screenshot unavailable"));
       console.error("Fixture renderer:", await js("JSON.stringify({ready:!!window.__shelf,cells:document.querySelectorAll('#playlist-window .track-cell').length,body:document.body.innerText.slice(0,300),tracks:window.__webamp?.store.getState().playlist.trackOrder})").catch(() => "unavailable"));
       app.exit(1);
     }

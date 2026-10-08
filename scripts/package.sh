@@ -20,6 +20,7 @@ npx electron-packager . Nostalgify \
   --ignore='^/src/renderer/.*\.js$' \
   --ignore='^/(skins|scripts|build|out|\.github)(/|$)' \
   --ignore='^/tests(/|$)' \
+  --ignore='^/\.env(\..*)?$' \
   --ignore='^/[^/]+\.md$' --ignore='^/LICENSE$' --ignore='^/\.gitignore$' \
   --ignore='^/node_modules/\.package-lock\.json$'
 

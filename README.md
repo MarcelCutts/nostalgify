@@ -142,7 +142,8 @@ Please attach it when you [open an issue](https://github.com/0xchaosbi/nostalgif
 
 SoundCloud support is under development alongside Spotify. It supports public
 track/playlist links and native HLS playback. Live API and Electron playback checks
-passed; packaged macOS, real Spotify and physical audio validation remain pending.
+passed on macOS, including real Spotify handoff and packaged Spotify controls.
+Physical audio and user OAuth/Keychain validation remain separate checks.
 See [SoundCloud setup](docs/soundcloud.md) and the
 [implementation tasks](docs/soundcloud-tasks.md) for credentials, checks and scope.
 
@@ -174,8 +175,11 @@ NOSTALGIFY_MOCK=1 NOSTALGIFY_SELFTEST=buttons npx electron .
 | `size` | The player never grows past the screen | Yes |
 | `shelf` | Pasting, dropping, playing and removing shelf entries | Yes |
 | `eq` | The equalizer shows only for skins with equalizer artwork | Yes |
-| `real` | Shelf playback, volume and Eject against the real Spotify. Mute it first | No |
-| `focus` | Spotify stays hidden after playing from the shelf. Mute it first | No |
+| `real` | Assert real playback, metadata, pause/seek/volume, shelf focus and Eject; restores Spotify volume | No |
+| `focus` | Assert Spotify stays hidden after shelf playback; restores Spotify volume | No |
+| `soundcloud` | Offline AAC/HLS playback, controls, compact attribution and reload | Yes |
+| `soundcloud-live` | Real SoundCloud API/media, controls, playlist advancement and reload | Yes |
+| `soundcloud-live-real` | Live SoundCloud plus both handoffs with real Spotify (development macOS) | No |
 
 ### Project layout
 

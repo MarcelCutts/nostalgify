@@ -30,11 +30,20 @@
       mock buttons/layout/size checks after the implementation changes.
 - [ ] Extend live coverage to restricted previews, long pauses and signed-media
       expiry; these have deterministic contract/recovery tests, not live proof.
-- [ ] Validate on packaged macOS, including real Spotify regression and OS keychain.
+- [x] Validate native macOS SoundCloud playback and both real Spotify handoffs.
+- [x] Build/sign arm64 macOS and verify real Spotify assertions plus packaged
+      SoundCloud paste, playback, pause, navigation and persisted shelves.
+- [x] Fix native manual redirects, asynchronous clipboard reads, failed-switch
+      recovery, compact/Double Size attribution and needless empty-profile Keychain
+      access; run 163 unit tests and offline/live Electron checks.
+- [x] Keep local `.env` credentials out of Git and packaged archives.
+- [ ] Validate user OAuth and encrypted-token persistence through OS Keychain.
 - [ ] Confirm SoundCloud terms/attribution, application quota and public-client
       eligibility before distributing the integration.
 
-Live testing used real SoundCloud credentials/API/media and the prepared Node
-HTTPS proxy route with TLS verification enabled. Spotify and physical audio
-output require macOS validation. Remaining items are extended-service and release
-gates; the passing live checks do not establish permission to distribute.
+Live testing used real SoundCloud credentials/API/media through the cloud Node
+route and the native macOS network stack, with TLS verification enabled. Real
+Spotify handoffs passed on macOS on 9 October 2026. Physical speaker output and
+user-login Keychain persistence remain unverified. Remaining items are
+extended-service and release gates; passing playback checks do not establish
+permission to distribute.

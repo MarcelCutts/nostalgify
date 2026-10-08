@@ -3,6 +3,11 @@ node_modules/
 dist/
 out/
 
+# Local application credentials
+.env
+.env.*
+!.env.example
+
 # Skins you use while developing. Skins belong to their authors and aren't committed.
 skins/*
 !skins/.gitkeep

@@ -315,6 +315,97 @@ test("a failed Spotify pause prevents SoundCloud from starting over it", async (
   assert.equal(f.calls.some((c) => c.type === "load"), false);
 });
 
+test("a failed source switch restores Spotify controls without retrying playback", async (t) => {
+  let pauses = 0;
+  let f;
+  f = fixture(t, { spotify: { async pause() {
+    if (++pauses === 1) throw new Error("Automation denied");
+    f.setSpotifyPlaying(false);
+  } } });
+  const failed = await f.player.command("playShelf", "soundcloud:tracks:1");
+  assert.match(failed.error, /Automation denied/);
+  assert.equal(f.player.getProvider(), "spotify");
+  assert.equal((await f.player.getState()).provider, "spotify");
+  assert.equal(f.spotifyPlaying, true);
+  assert.equal(f.calls.some((call) => call.type === "spotify:command"), false, "recovery must not resume or pause Spotify itself");
+  assert.equal(await f.player.command("pause"), undefined);
+  assert.equal(f.spotifyPlaying, false);
+  assert.equal(await f.player.command("play"), undefined);
+  assert.equal(f.spotifyPlaying, true);
+  assert.equal(pauses, 1, "ordinary Spotify controls must not retry the failed selection");
+  assert.equal(f.calls.some((call) => call.type === "load"), false);
+  await f.player.command("playShelf", "soundcloud:tracks:1");
+  assert.equal(f.spotifyPlaying, false);
+  assert.equal(f.playing, true, "an explicit selection can retry after permission recovers");
+});
+
+test("a failed SoundCloud stop restores its controls without starting Spotify", async (t) => {
+  let rejectStop = true;
+  const f = fixture(t, { onAudio(message) {
+    if (message.type === "stop" && rejectStop) throw new Error("Audio did not acknowledge stop");
+  } });
+  await f.player.command("playShelf", "soundcloud:tracks:1");
+  const failed = await f.player.command("playShelf", "spotify:track:123");
+  assert.match(failed.error, /acknowledge/);
+  assert.equal(f.player.getProvider(), "soundcloud");
+  assert.equal(f.spotifyPlaying, false);
+  assert.equal(await f.player.command("volume", 25), undefined);
+  assert.equal(await f.player.command("pause"), undefined);
+  assert.equal((await f.player.getState()).volume, 25);
+  assert.equal(f.calls.some((call) => call.type === "spotify:command"), false);
+  rejectStop = false;
+  await f.player.command("playShelf", "spotify:track:123");
+  assert.equal(f.player.getProvider(), "spotify");
+  assert.equal(f.playing, false);
+  assert.equal(f.spotifyPlaying, true);
+});
+
+test("SoundCloud stopped before a failed Spotify pause cannot resume over Spotify", async (t) => {
+  let denyPause = false;
+  let f;
+  f = fixture(t, { spotify: { async pause() {
+    if (denyPause) throw new Error("Automation denied");
+    f.setSpotifyPlaying(false);
+  } } });
+  await f.player.command("playShelf", "soundcloud:tracks:1");
+  f.setSpotifyPlaying(true); // Spotify was started outside Nostalgify.
+  denyPause = true;
+  const failed = await f.player.command("playShelf", "soundcloud:tracks:2");
+  assert.match(failed.error, /Automation denied/);
+  assert.equal(f.player.getProvider(), "soundcloud");
+  assert.equal(f.playing, false);
+  assert.equal((await f.player.getState()).track, null);
+  const loads = f.calls.filter((call) => call.type === "load").length;
+  assert.equal(await f.player.command("play"), undefined);
+  assert.equal(await f.player.command("next"), undefined);
+  assert.equal(f.calls.filter((call) => call.type === "load").length, loads, "the discarded context must not resume without a safe source selection");
+  assert.equal(f.spotifyPlaying, true);
+  denyPause = false;
+  await f.player.command("playShelf", "soundcloud:tracks:2");
+  assert.equal(f.spotifyPlaying, false);
+  assert.equal(f.playing, true);
+});
+
+test("a rejected older Spotify pause cannot revert a newer SoundCloud selection", async (t) => {
+  const firstPause = deferred();
+  let pauses = 0;
+  let f;
+  f = fixture(t, { spotify: { async pause() {
+    if (++pauses === 1) return firstPause.promise;
+    f.setSpotifyPlaying(false);
+  } } });
+  const older = f.player.command("playShelf", "soundcloud:tracks:1");
+  await until(() => pauses === 1);
+  const replacement = f.player.command("playShelf", "soundcloud:tracks:2");
+  firstPause.reject(new Error("Obsolete permission error"));
+  await Promise.all([older, replacement]);
+  assert.equal(f.player.getProvider(), "soundcloud");
+  assert.equal(f.spotifyPlaying, false);
+  assert.equal(f.playing, true);
+  assert.equal((await f.player.getState()).error, null);
+  assert.equal(f.calls.filter((call) => call.type === "load").length, 1);
+});
+
 test("an in-flight Spotify play completes before source switching pauses it", async (t) => {
   const started = deferred();
   const finish = deferred();
@@ -383,6 +474,28 @@ test("disposing invalidates pending streams and prevents further playback", asyn
   await pending;
   assert.equal(f.calls.some((c) => c.type === "load"), false);
   assert.match((await f.player.command("play")).error, /closed/);
+});
+
+test("disposing drains an in-flight Spotify command and rejects later playback", async (t) => {
+  const firstPlay = deferred();
+  const commands = [];
+  const f = fixture(t, { spotify: { async command(command) {
+    commands.push(command);
+    if (command === "play") await firstPlay.promise;
+  } } });
+  const playing = f.player.command("play");
+  await until(() => commands.length === 1);
+  const queued = f.player.command("next");
+  await new Promise(setImmediate);
+  let completed = false;
+  const disposing = f.player.dispose().then(() => { completed = true; });
+  await new Promise(setImmediate);
+  assert.equal(completed, false, "cleanup must wait for native playback already in progress");
+  assert.match((await f.player.command("play")).error, /closed/);
+  firstPlay.resolve();
+  await Promise.all([playing, queued, disposing]);
+  assert.deepEqual(commands, ["play"], "queued playback must not run after disposal starts");
+  assert.equal(completed, true);
 });
 
 test("empty playlists expose an actionable playback error", async (t) => {

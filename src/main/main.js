@@ -7,11 +7,13 @@ const fs = require("fs");
 const { execFile } = require("child_process");
 const STARTER_SKINS = require("./starterSkins");
 const { createPlayback } = require("./playback");
+const { spotifyCommandError } = require("./spotify-errors");
 const { cleanShelf } = require("./shelf");
 const { createSoundCloudAuth } = require("./soundcloud/auth");
 const { createTokenStore } = require("./soundcloud/token-store");
 const { createSoundCloudClient } = require("./soundcloud/client");
 const { createMediaProxy } = require("./soundcloud/media-proxy");
+const { createElectronSoundCloudFetch } = require("./soundcloud/electron-fetch");
 
 // In development the skins live next to the code. The packaged app uses a
 // visible folder in ~/Music so dropping skins in is easy.
@@ -474,7 +476,7 @@ async function playShelf(uri) {
   logLine("playing shelf entry", uri);
   if (uri === "liked") {
     const user = spotifyUsername();
-    if (!user) return logLine("can't play Liked Songs: no Spotify username found");
+    if (!user) throw new Error("Could not find your Spotify account. Open Spotify and sign in, then try Liked Songs again.");
     return spotifyCommand("playUri", `spotify:user:${user}:collection`);
   }
   if (!/^spotify:(track|album|playlist|artist):[A-Za-z0-9]+$/.test(uri)) return;
@@ -486,9 +488,10 @@ async function playShelf(uri) {
 async function playOrFallback() {
   await launchSpotifyHidden();
   const s = await getSpotifyState();
+  if (s.error) throw spotifyCommandError(s.error);
   if (s.track) return spotifyCommand("play");
   const user = spotifyUsername();
-  if (!user) return logLine("no song loaded and no Spotify username found");
+  if (!user) throw new Error("Could not find your Spotify account. Open Spotify and sign in, then try Liked Songs again.");
   logLine("nothing loaded, playing Liked Songs");
   await spotifyCommand("playUri", `spotify:user:${user}:collection`);
 }
@@ -522,7 +525,9 @@ async function spotifyCommand(cmd, arg) {
   try {
     await osa(`tell application "Spotify" to ${line}`);
   } catch (e) {
-    logLine("Spotify command failed:", cmd, e.message.trim());
+    const error = spotifyCommandError(e);
+    logLine("Spotify command failed:", cmd, error.message);
+    throw error;
   }
   if (pullsSpotifyForward) keepSpotifyHidden(2, hadFocus);
 }
@@ -886,7 +891,7 @@ ipcMain.handle("links:resolve", async (event, text) => {
     return [...spotify, ...soundcloud];
   } catch (error) { return { error: error.message }; }
 });
-ipcMain.handle("clipboard:read", () => clipboard.readText().slice(0, 20000));
+ipcMain.handle("clipboard:read", async (event) => fromPlayer(event) ? (await clipboard.readText()).slice(0, 20000) : "");
 ipcMain.handle("ui:load", () => {
   const p = readPrefs();
   return { playlistOpen: p.playlistOpen, playlistExtraHeight: p.playlistExtraHeight };
@@ -921,7 +926,7 @@ app.whenReady().then(() => {
     // trust. Native desktop launches retain Electron's system proxy settings.
     : process.env.NODE_USE_ENV_PROXY === "1"
       ? (url, init) => globalThis.fetch(url, init)
-      : (url, init) => net.fetch(url, init);
+      : createElectronSoundCloudFetch(net);
   const authOptions = {
     clientId: offlineSoundCloud ? "offline-fixture-client" : process.env.SOUNDCLOUD_CLIENT_ID || config.clientId,
     clientSecret: offlineSoundCloud ? "offline-fixture-secret" : process.env.SOUNDCLOUD_CLIENT_SECRET,
@@ -946,10 +951,7 @@ app.whenReady().then(() => {
         if (!process.env.NOSTALGIFY_MOCK && (process.platform !== "darwin" || !(await spotifyIsRunning()))) return;
         const state = await getSpotifyState();
         if (state.error) throw new Error("Pause Spotify before switching music sources.");
-        if (state.running) {
-          if (process.env.NOSTALGIFY_MOCK) await spotifyCommand("pause");
-          else await osa('tell application "Spotify" to pause');
-        }
+        if (state.running) await spotifyCommand("pause");
       },
     },
     soundcloud: soundcloudClient, audio: { send: sendAudio }, media: soundcloudMedia,

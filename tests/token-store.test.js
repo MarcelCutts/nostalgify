@@ -45,14 +45,36 @@ test('tokens round trip encrypted with private file permissions', async (t) => {
   await store.clear(); assert.equal(await store.load(), null);
 });
 
-test('plaintext and unavailable encryption backends fail closed before touching files', async (t) => {
+test('plaintext and unavailable backends reject saves and existing token files without decrypting', async (t) => {
   for (const overrides of [{ getSelectedStorageBackend: () => 'basic_text' }, { isEncryptionAvailable: () => false }]) {
-    const { store, filePath } = await fixture(t, overrides);
+    let decrypted = false;
+    const { store, filePath } = await fixture(t, { ...overrides, decryptString() { decrypted = true; } });
     await assert.rejects(store.save({ accessToken: 'secret' }), { code: 'storage_unavailable' });
-    await assert.rejects(store.load(), { code: 'storage_unavailable' });
+    assert.equal(await store.load(), null);
     await assert.rejects(fs.stat(filePath), { code: 'ENOENT' });
+    await fs.mkdir(path.dirname(filePath));
+    await fs.writeFile(filePath, 'test-only-encrypted-data');
+    await assert.rejects(store.load(), { code: 'storage_unavailable' });
+    assert.equal(decrypted, false);
+    assert.equal(await fs.readFile(filePath, 'utf8'), 'test-only-encrypted-data');
     await store.clear();
   }
+});
+
+test('a missing token file never consults safeStorage or Keychain', async (t) => {
+  const { filePath } = await fixture(t);
+  const lookups = [];
+  const safeStorage = new Proxy({}, {
+    get(_target, property) { lookups.push(property); throw new Error('Keychain lookup must not happen'); },
+  });
+  const store = createTokenStore({ filePath, safeStorage });
+  assert.equal(await store.load(), null, 'a missing parent directory is an empty account profile');
+  await fs.mkdir(path.dirname(filePath));
+  assert.equal(await store.load(), null, 'a missing token file is an empty account profile');
+  assert.deepEqual(lookups, []);
+  await fs.writeFile(filePath, 'test-only-encrypted-data');
+  await assert.rejects(store.load(), { code: 'storage_unavailable' });
+  assert.deepEqual(lookups, ['isEncryptionAvailable'], 'existing ciphertext still requires secure storage before decrypting');
 });
 
 test('atomic replacement and concurrent writes leave one complete encrypted file', async (t) => {

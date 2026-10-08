@@ -103,13 +103,48 @@ async function main() {
   const sourceAction = document.createElement("span");
   sourceAction.textContent = "OPEN TRACK";
   attribution.append(sourceLogo, sourceAction);
-  attribution.addEventListener("click", () => { void sendCommand("activate"); });
+  attribution.addEventListener("click", (event) => { event.stopPropagation(); void sendCommand("activate"); });
   // A source-link double click must not shade the title bar in compact mode.
   attribution.addEventListener("dblclick", (event) => event.stopPropagation());
 
-  function updateAttribution(s) {
+  function positionAttribution() {
     const mainWindow = document.getElementById("main-window");
-    if (mainWindow && attribution.parentElement !== mainWindow) mainWindow.appendChild(attribution);
+    if (!mainWindow) return;
+    const compact = mainWindow.classList.contains("shade");
+    // Skins may cut holes through the shade-mode window with an SVG clip path.
+    // Its positioning wrapper is unclipped and moves with the main window, so
+    // only the compact attribution sits alongside that shaped window.
+    const parent = compact ? mainWindow.parentElement : mainWindow;
+    if (!parent) return;
+    attribution.classList.toggle("soundcloud-attribution-compact", compact);
+    if (attribution.parentElement !== parent) parent.appendChild(attribution);
+    if (compact) {
+      // Webamp's Double Size scales the main window itself, not its wrapper.
+      // Match that CSS scale here; Electron's separate View zoom affects both.
+      const scale = mainWindow.classList.contains("doubled") ? 2 : 1;
+      attribution.style.left = `${mainWindow.offsetLeft + Math.max(0, Math.min(20, mainWindow.offsetWidth - 100)) * scale}px`;
+      attribution.style.top = `${mainWindow.offsetTop + Math.max(0, Math.min(1, mainWindow.offsetHeight - 12)) * scale}px`;
+      attribution.style.transform = `scale(${scale})`;
+    } else {
+      attribution.style.removeProperty("left");
+      attribution.style.removeProperty("top");
+      attribution.style.removeProperty("transform");
+    }
+  }
+  let attributionLayoutPending = false;
+  function scheduleAttributionLayout() {
+    if (attributionLayoutPending) return;
+    attributionLayoutPending = true;
+    requestAnimationFrame(() => {
+      attributionLayoutPending = false;
+      positionAttribution();
+    });
+  }
+  webamp.__onStateChange(scheduleAttributionLayout);
+  window.addEventListener("resize", scheduleAttributionLayout);
+
+  function updateAttribution(s) {
+    positionAttribution();
     const visible = s.provider === "soundcloud" && Boolean(s.track);
     attribution.hidden = !visible;
     document.body.classList.toggle("has-soundcloud-track", visible);
