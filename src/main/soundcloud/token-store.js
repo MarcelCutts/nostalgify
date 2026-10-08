@@ -8,7 +8,7 @@ function storageError(code, message) {
 }
 
 /** Tokens are encrypted by the OS keychain; never fall back to plaintext storage. */
-function createTokenStore({ filePath, safeStorage }) {
+function createTokenStore({ filePath, safeStorage, platform = process.platform }) {
   if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
     throw new TypeError('SoundCloud token storage requires an absolute file path.');
   }
@@ -19,14 +19,44 @@ function createTokenStore({ filePath, safeStorage }) {
     return result;
   };
 
-  function requireEncryption() {
+  async function requireEncryption() {
     try {
-      if (!safeStorage?.isEncryptionAvailable() ||
+      if (!await safeStorage?.isAsyncEncryptionAvailable() ||
+          typeof safeStorage.encryptStringAsync !== 'function' ||
+          typeof safeStorage.decryptStringAsync !== 'function' ||
           safeStorage.getSelectedStorageBackend?.() === 'basic_text') {
         throw new Error('unavailable');
       }
     } catch {
       throw storageError('storage_unavailable', 'Secure credential storage is unavailable. Enable your system keychain before connecting SoundCloud.');
+    }
+  }
+
+  async function writeTokens(tokens) {
+    await requireEncryption();
+    const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`;
+    let handle;
+    try {
+      const encrypted = await safeStorage.encryptStringAsync(JSON.stringify(tokens));
+      if (!Buffer.isBuffer(encrypted) || encrypted.length === 0) throw new Error('invalid ciphertext');
+      // Electron's async Linux encryptor can select the hardcoded-key v10
+      // fallback independently of getSelectedStorageBackend(). Never persist it.
+      if (platform === 'linux' && encrypted.subarray(0, 3).toString() === 'v10') {
+        throw storageError('storage_unavailable', 'Secure credential storage is unavailable. Enable your system keychain before connecting SoundCloud.');
+      }
+      await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
+      handle = await fs.open(temporaryPath, 'wx', 0o600);
+      await handle.writeFile(encrypted);
+      await handle.sync();
+      await handle.close();
+      handle = null;
+      await fs.rename(temporaryPath, filePath);
+    } catch (error) {
+      if (error.code === 'storage_unavailable') throw error;
+      throw storageError('storage_error', 'SoundCloud credentials could not be saved securely. Check your system keychain and reconnect.');
+    } finally {
+      await handle?.close().catch(() => {});
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
     }
   }
 
@@ -38,10 +68,20 @@ function createTokenStore({ filePath, safeStorage }) {
         const stat = await handle.stat();
         if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error('invalid token file');
         const encrypted = await handle.readFile();
+        await handle.close();
+        handle = null;
         // A fresh profile has no account tokens. Avoid prompting/blocking on
         // Keychain for application credentials that never persist a user login.
-        requireEncryption();
-        return JSON.parse(safeStorage.decryptString(encrypted));
+        await requireEncryption();
+        const decrypted = await safeStorage.decryptStringAsync(encrypted);
+        if (typeof decrypted?.result !== 'string' || typeof decrypted.shouldReEncrypt !== 'boolean') {
+          throw new Error('invalid decryption result');
+        }
+        const tokens = JSON.parse(decrypted.result);
+        // Stay inside the same queue entry: a queued save/clear must follow the
+        // atomic rotation, and recursively queuing save here would deadlock.
+        if (decrypted.shouldReEncrypt) await writeTokens(tokens);
+        return tokens;
       } catch (error) {
         if (error.code === 'ENOENT') return null;
         if (error.code === 'storage_unavailable') throw error;
@@ -51,27 +91,7 @@ function createTokenStore({ filePath, safeStorage }) {
       }
     }),
 
-    save: (tokens) => serialized(async () => {
-      requireEncryption();
-      const temporaryPath = `${filePath}.${crypto.randomUUID()}.tmp`;
-      let handle;
-      try {
-        const encrypted = safeStorage.encryptString(JSON.stringify(tokens));
-        if (!Buffer.isBuffer(encrypted) || encrypted.length === 0) throw new Error('invalid ciphertext');
-        await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
-        handle = await fs.open(temporaryPath, 'wx', 0o600);
-        await handle.writeFile(encrypted);
-        await handle.sync();
-        await handle.close();
-        handle = null;
-        await fs.rename(temporaryPath, filePath);
-      } catch {
-        throw storageError('storage_error', 'SoundCloud credentials could not be saved securely. Check your system keychain and reconnect.');
-      } finally {
-        await handle?.close().catch(() => {});
-        await fs.rm(temporaryPath, { force: true }).catch(() => {});
-      }
-    }),
+    save: (tokens) => serialized(() => writeTokens(tokens)),
 
     clear: () => serialized(async () => {
       try {
