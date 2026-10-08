@@ -130,9 +130,12 @@ persistence need their own validation; application-token playback cannot verify 
 - **A source switch fails:** check the displayed error. On macOS, Spotify must be
   allowed to pause before SoundCloud can take over.
 
-The equalizer, balance control and visualizer are decorative for both sources;
-they do not process or analyze the selected music. Spotify's quality readouts use
-fixed values, and SoundCloud hides them. The source button and uploader credit
+The equalizer and balance control do not process either source's audio. The EQ
+panel stays flat and OFF with disabled controls; its source-specific explanation
+is available on hover and to assistive technology. Use Spotify Settings →
+Playback → Equalizer to adjust Spotify's own EQ. SoundCloud EQ processing is
+not implemented. The visualizer uses a silent synthesizer and does not analyze
+the music. Spotify's quality readouts use fixed values, and SoundCloud hides them. The source button and uploader credit
 provide a link back to the SoundCloud track.
 
 ## Network behavior
