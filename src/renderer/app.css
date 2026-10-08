@@ -77,3 +77,57 @@ body.has-playlist .resize-corner {
 body.no-eq #webamp #equalizer-button {
   pointer-events: none;
 }
+
+/* SoundCloud attribution replaces decorative bitrate/channel indicators. It
+   fits between the marquee and volume controls in every classic Winamp skin. */
+body.has-soundcloud-track #webamp #main-window #kbps,
+body.has-soundcloud-track #webamp #main-window #khz,
+body.has-soundcloud-track #webamp #main-window .mono-stereo {
+  visibility: hidden;
+}
+#webamp #soundcloud-attribution {
+  position: absolute;
+  left: 111px;
+  top: 39px;
+  width: 154px;
+  height: 16px;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: #121212;
+  color: #fafafa;
+  font: 7px/1 monospace;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+#webamp #soundcloud-attribution[hidden] {
+  display: none;
+}
+#webamp #soundcloud-attribution img {
+  display: block;
+  width: 64px;
+  height: 16px;
+  image-rendering: auto;
+}
+#webamp #soundcloud-attribution:focus-visible {
+  outline: 1px solid #fafafa;
+  outline-offset: -1px;
+}
+/* Compact mode leaves room before the clock and transport buttons. */
+#webamp #main-window.shade #soundcloud-attribution {
+  left: 20px;
+  top: 1px;
+  width: 100px;
+  height: 12px;
+}
+#webamp #main-window.shade #soundcloud-attribution img {
+  width: 40px;
+  height: 10px;
+}
+#webamp #main-window.shade #soundcloud-attribution span {
+  font-size: 6px;
+}

@@ -140,6 +140,12 @@ Please attach it when you [open an issue](https://github.com/0xchaosbi/nostalgif
 
 ## Developing
 
+SoundCloud support is under development alongside Spotify. It supports public
+track/playlist links and native HLS playback. Live API and Electron playback checks
+passed; packaged macOS, real Spotify and physical audio validation remain pending.
+See [SoundCloud setup](docs/soundcloud.md) and the
+[implementation tasks](docs/soundcloud-tasks.md) for credentials, checks and scope.
+
 After cloning and running `npm install`:
 
 ```sh

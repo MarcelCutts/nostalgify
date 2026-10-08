@@ -3,8 +3,15 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("nostalgify", {
   debug: Boolean(process.env.NOSTALGIFY_SELFTEST),
-  getState: () => ipcRenderer.invoke("spotify:state"),
-  command: (cmd, arg) => ipcRenderer.invoke("spotify:command", cmd, arg),
+  getState: () => ipcRenderer.invoke("playback:state"),
+  command: (cmd, arg) => ipcRenderer.invoke("playback:command", cmd, arg),
+  onAudioCommand: (cb) => {
+    const listener = (_event, command) => cb(command);
+    ipcRenderer.on("playback:audio-command", listener);
+    return () => ipcRenderer.removeListener("playback:audio-command", listener);
+  },
+  reportAudioState: (state) => ipcRenderer.send("playback:audio-state", state),
+  audioCommandDone: (result) => ipcRenderer.send("playback:audio-done", result),
   initSkins: () => ipcRenderer.invoke("skins:init"),
   skinChosen: (url) => ipcRenderer.invoke("skins:chosen", url),
   onSetSkin: (cb) => ipcRenderer.on("skin:set", (_e, url) => cb(url)),

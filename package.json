@@ -12,6 +12,8 @@
   },
   "license": "MIT",
   "scripts": {
+    "test": "node --test tests/*.test.js tests/*.test.mjs",
+    "soundcloud:check": "node scripts/check-soundcloud.js",
     "build": "esbuild src/renderer/renderer.js --bundle --format=iife --outfile=dist/renderer.js --log-level=warning",
     "start": "npm run build && electron .",
     "package": "sh scripts/package.sh",
@@ -23,6 +25,7 @@
     "@electron/packager": "^20.3.0",
     "electron": "^44.7.0",
     "esbuild": "^0.28.2",
+    "hls.js": "1.7.3",
     "webamp": "^2.3.1"
   },
   "engines": {

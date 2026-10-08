@@ -6,6 +6,12 @@ const path = require("path");
 const { execFile } = require("child_process");
 
 module.exports = function runSelfTest(ctx) {
+  if (process.env.NOSTALGIFY_SELFTEST === "soundcloud-live" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
+    return require("../../tests/helpers/soundcloud-live").runLiveSoundCloudSelftest(ctx);
+  }
+  if (process.env.NOSTALGIFY_SELFTEST === "soundcloud" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
+    return require("../../tests/helpers/soundcloud-fixture").runSoundCloudSelftest(ctx);
+  }
   const { win, app, screen, setZoom, cssSize, zoom, readPrefs, listSkins, applySkin, spotifyCommand, getSpotifyState } = ctx;
   const D = process.env.NOSTALGIFY_SHOTS || app.getPath("temp");
   const shot = async (name) => {

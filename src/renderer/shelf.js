@@ -1,10 +1,9 @@
-// The shelf: Spotify playlists, albums, artists and songs kept in Winamp's
-// playlist window. No login needed. Links come from drag and drop, paste, or
-// the playlist's ADD > URL button, which reads the clipboard. Double-clicking an
-// entry plays it in Spotify through AppleScript.
+// Saved Spotify and SoundCloud links in Winamp's playlist window. Links come
+// from drag and drop, paste, or ADD > URL, which reads the clipboard.
+import { sendCommand } from "./spotifyMedia.js";
 
 const KIND_LABEL = { album: "album", playlist: "playlist", artist: "artist", track: "song" };
-const LIKED = { kind: "liked", uri: "liked", title: "Liked Songs" };
+const LIKED = { provider: "spotify", kind: "liked", uri: "liked", title: "Liked Songs" };
 
 // Webamp gives tracks small numeric ids. Ours start far above them.
 let nextId = 9_000_000;
@@ -20,9 +19,10 @@ const CHANGES = new Set([
 ]);
 
 export function shelfLabel(item) {
-  if (item.kind === "liked") return "♥ Liked Songs";
+  if (item.kind === "liked") return "♥ Liked Songs (Spotify)";
   const name = item.artist ? `${item.artist} - ${item.title}` : item.title;
-  return `${name} (${KIND_LABEL[item.kind] || item.kind})`;
+  const provider = item.provider === "soundcloud" ? "SoundCloud, " : "";
+  return `${name} (${provider}${KIND_LABEL[item.kind] || item.kind})`;
 }
 
 export function createShelf(webamp, { quietly, flash, onPlay }) {
@@ -48,7 +48,7 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
   }
 
   function save() {
-    window.nostalgify.saveShelf(items());
+    void window.nostalgify.saveShelf(items()).catch(() => flash("Your shelf could not be saved. Try again."));
   }
 
   async function load() {
@@ -61,20 +61,33 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
     [LIKED, ...rest].forEach(addItem);
   }
 
-  // Turn any text containing Spotify links into shelf entries.
+  // The main process resolves supported links and supplies safe metadata.
   async function addFromText(text) {
-    const found = await window.nostalgify.resolveLinks(String(text || ""));
-    if (!found.length) {
-      flash("That isn't a Spotify link. Copy one with Share > Copy link");
-      return;
+    try {
+      const found = await window.nostalgify.resolveLinks(String(text || ""));
+      if (found?.error) {
+        flash(found.error, 6000);
+        return;
+      }
+      if (!Array.isArray(found) || !found.length) {
+        flash("Copy a Spotify or SoundCloud track or playlist link", 3500);
+        return;
+      }
+      const have = new Set(items().map((i) => `${i.provider || "spotify"}:${i.uri}`));
+      const fresh = found.filter((i) => {
+        const key = `${i.provider || "spotify"}:${i.uri}`;
+        if (have.has(key)) return false;
+        have.add(key);
+        return true;
+      });
+      fresh.forEach(addItem);
+      save();
+      if (fresh.length === 1) flash("Added " + shelfLabel(fresh[0]));
+      else if (fresh.length > 1) flash(`Added ${fresh.length} items`);
+      else flash("Already on your shelf");
+    } catch {
+      flash("Could not add that link. Check your connection and SoundCloud settings.", 6000);
     }
-    const have = new Set(items().map((i) => i.uri));
-    const fresh = found.filter((i) => !have.has(i.uri));
-    fresh.forEach(addItem);
-    save();
-    if (fresh.length === 1) flash("Added " + shelfLabel(fresh[0]));
-    else if (fresh.length > 1) flash(`Added ${fresh.length} items`);
-    else flash("Already on your shelf");
   }
 
   // We take every drop ourselves, before Webamp sees it. Webamp would otherwise
@@ -89,14 +102,18 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
       const dt = e.dataTransfer;
       const text = [dt.getData("text/uri-list"), dt.getData("text/plain")].filter(Boolean).join("\n");
       if (text) addFromText(text);
-      else flash("Drag a playlist or album from Spotify");
+      else flash("Drag a Spotify or SoundCloud track or playlist link");
     },
     true
   );
 
   // The playlist's ADD > URL button reads a link from the clipboard.
   async function handleAddUrl() {
-    await addFromText(await window.nostalgify.readClipboard());
+    try {
+      await addFromText(await window.nostalgify.readClipboard());
+    } catch {
+      flash("Could not read the clipboard. Paste a Spotify or SoundCloud link.");
+    }
     return [];
   }
 
@@ -110,11 +127,13 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
     if (action.type === "PLAY_TRACK" && byId.has(action.id)) {
       const item = byId.get(action.id);
       flash("Playing " + shelfLabel(item));
-      window.nostalgify.command("playShelf", item.uri).then(onPlay);
+      void sendCommand("playShelf", item.uri).then((result) => {
+        if (!result?.error) onPlay();
+      });
     }
   }
 
-  // Cmd+V anywhere in the window adds whatever Spotify link is on the clipboard.
+  // Cmd+V anywhere in the window adds a supported link from the clipboard.
   document.addEventListener("paste", (e) => {
     const text = e.clipboardData && e.clipboardData.getData("text");
     if (text) {
