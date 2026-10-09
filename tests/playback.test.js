@@ -780,3 +780,169 @@ for (const outcome of ["resolve", "reject"]) {
     assert.equal((await f.player.getState()).position, 31, "replacement session must remain active");
   });
 }
+
+test("Spotify Stop finishes its rewind before the next native command", async (t) => {
+  const pause = deferred();
+  const commands = [];
+  const f = fixture(t, { spotify: { async command(cmd, arg) {
+    commands.push({ cmd, arg });
+    if (cmd === "pause") await pause.promise;
+  } } });
+  const stopping = f.player.command("stop");
+  await until(() => commands.length === 1);
+  const next = f.player.command("next");
+  await new Promise(setImmediate);
+  assert.deepEqual(commands, [{ cmd: "pause", arg: undefined }]);
+  pause.resolve();
+  await Promise.all([stopping, next]);
+  assert.deepEqual(commands, [
+    { cmd: "pause", arg: undefined },
+    { cmd: "seek", arg: 0 },
+    { cmd: "next", arg: undefined },
+  ]);
+});
+
+test("a Spotify Stop interrupted by a source selection does not rewind later playback", async (t) => {
+  const pause = deferred();
+  const commands = [];
+  const f = fixture(t, { spotify: { async command(cmd) {
+    commands.push(cmd);
+    if (cmd === "pause") await pause.promise;
+  } } });
+  const stopping = f.player.command("stop");
+  await until(() => commands.length === 1);
+  const replacement = f.player.command("playShelf", "spotify:track:new");
+  pause.resolve();
+  await Promise.all([stopping, replacement]);
+  assert.deepEqual(commands, ["pause", "playShelf"]);
+});
+
+test("SoundCloud Stop pauses and rewinds the current track without releasing it", async (t) => {
+  const f = fixture(t);
+  await f.player.command("playShelf", "soundcloud:tracks:1");
+  const session = f.session;
+  f.player.audioState({ session, state: "playing", position: 25 });
+  const start = f.calls.length;
+  await f.player.command("stop");
+  assert.deepEqual(f.calls.slice(start), [
+    { type: "pause", session }, { type: "seek", session, position: 0 },
+  ]);
+  assert.equal(f.playing, false);
+  assert.equal((await f.player.getState()).position, 0);
+  assert.equal(f.handles.size, 1);
+  await f.player.command("play");
+  assert.equal(f.session, session);
+  assert.equal(f.playing, true);
+});
+
+for (const replacement of ["spotify", "next"]) {
+  for (const outcome of ["resolve", "reject"]) {
+    test(`a delayed SoundCloud Stop cannot affect ${replacement} playback when its pause ${outcome}s`, async (t) => {
+      const pause = deferred();
+      let pausing = false;
+      const f = fixture(t, { onAudio(message) {
+        if (message.type === "pause") { pausing = true; return pause.promise; }
+      } });
+      await f.player.command("playShelf", "soundcloud:playlists:1");
+      const stopping = f.player.command("stop");
+      await until(() => pausing);
+      if (replacement === "spotify") await f.player.command("playShelf", "spotify:track:new");
+      else await f.player.command("next");
+      const start = f.calls.length;
+      if (outcome === "resolve") pause.resolve();
+      else pause.reject(new Error("Obsolete pause failed"));
+      assert.equal(await stopping, undefined, "stale Stop errors must not reach replacement playback");
+      assert.equal(f.calls.slice(start).some((call) => call.type === "seek" || call.cmd === "seek"), false);
+      assert.equal((await f.player.getState()).state, "playing");
+      assert.equal(replacement === "spotify" ? f.spotifyPlaying : f.playing, true);
+    });
+  }
+}
+
+test("Stop during a pending SoundCloud stream prevents late autoplay", async (t) => {
+  const stream = deferred();
+  let requested = false;
+  const f = fixture(t, { soundcloud: { getStream() { requested = true; return stream.promise; } } });
+  const loading = f.player.command("playShelf", "soundcloud:tracks:1");
+  await until(() => requested);
+  await f.player.command("seek", 20);
+  await f.player.command("stop");
+  stream.resolve({ url: "https://cdn.example/track", type: "progressive" });
+  await loading;
+  const load = f.calls.find((call) => call.type === "load");
+  assert.equal(load.autoPlay, false);
+  assert.equal(load.position, 0);
+  assert.equal(f.playing, false);
+});
+
+for (const provider of ["spotify", "soundcloud"]) {
+  test(`a failed ${provider} Stop does not rewind and leaves later controls usable`, async (t) => {
+    const nativeCommands = [];
+    const f = fixture(t, {
+      spotify: { async command(cmd) {
+        nativeCommands.push(cmd);
+        if (cmd === "pause") throw new Error("Pause failed");
+      } },
+      onAudio(message) { if (message.type === "pause") throw new Error("Pause failed"); },
+    });
+    if (provider === "soundcloud") await f.player.command("playShelf", "soundcloud:tracks:1");
+    assert.match((await f.player.command("stop")).error, /Pause failed/);
+    assert.equal(f.calls.some((call) => call.type === "seek" || call.cmd === "seek"), false);
+    assert.equal(nativeCommands.includes("seek"), false);
+    assert.equal(await f.player.command("volume", 35), undefined);
+    if (provider === "spotify") assert.deepEqual(nativeCommands, ["pause", "volume"]);
+    else assert.equal(f.calls.at(-1).type, "volume");
+  });
+}
+
+for (const outcome of ["resolve", "reject"]) {
+  test(`reload during a SoundCloud-to-Spotify switch restores consistent controls when stop ${outcome}s`, async (t) => {
+    const stop = deferred();
+    let stopping = false;
+    const f = fixture(t, { onAudio(message) {
+      if (message.type === "stop" && !stopping) { stopping = true; return stop.promise; }
+    } });
+    await f.player.command("playShelf", "soundcloud:tracks:1");
+    const selection = f.player.command("selectProvider", "spotify");
+    await until(() => stopping);
+    f.destroyRenderer();
+    f.player.rendererReset();
+    assert.equal(f.player.getProvider(), "soundcloud");
+    assert.equal((await f.player.getState()).provider, "soundcloud");
+    await f.player.command("volume", 37);
+    assert.equal((await f.player.getState()).volume, 37);
+    if (outcome === "resolve") stop.resolve();
+    else stop.reject(new Error("The old renderer was destroyed"));
+    await selection;
+    assert.equal(f.player.getProvider(), "soundcloud");
+    assert.equal(f.calls.some((call) => call.type === "spotify:start"), false);
+    await f.player.command("playShelf", "spotify:track:new");
+    await f.player.command("pause");
+    assert.equal((await f.player.getState()).provider, "spotify");
+    assert.equal(f.spotifyPlaying, false);
+  });
+}
+
+test("reload during a native handoff pause drains it before replacement Spotify Play", async (t) => {
+  const pause = deferred();
+  let pausing = false;
+  let f;
+  f = fixture(t, { spotify: { async pause() {
+    pausing = true;
+    await pause.promise;
+    f.setSpotifyPlaying(false);
+  } } });
+  const selection = f.player.command("selectProvider", "soundcloud");
+  await until(() => pausing);
+  f.player.rendererReset();
+  assert.equal(f.player.getProvider(), "spotify");
+  assert.equal((await f.player.getState()).provider, "spotify");
+  const playing = f.player.command("play");
+  await new Promise(setImmediate);
+  assert.equal(f.calls.some((call) => call.cmd === "play"), false, "Play must wait for the already-running pause");
+  pause.resolve();
+  await Promise.all([selection, playing]);
+  assert.equal(f.spotifyPlaying, true);
+  assert.equal(f.player.getProvider(), "spotify");
+  assert.equal(f.calls.some((call) => call.type === "provider"), false);
+});

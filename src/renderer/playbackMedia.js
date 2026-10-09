@@ -82,12 +82,10 @@ export class PlaybackMedia {
     if (!bridge.quiet) void sendCommand("pause");
   }
   stop() {
-    // Model Winamp Stop as pause, then seek to the beginning for either provider.
+    // The coordinator pauses and rewinds only the source this Stop belongs to.
     this._visualizer.setPlaying(false);
     if (!bridge.quiet) {
-      void sendCommand("pause").then((result) => {
-        if (!result?.error) return sendCommand("seek", 0);
-      });
+      void sendCommand("stop");
       this.setTiming(0, this._duration);
     }
   }

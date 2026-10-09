@@ -34,8 +34,13 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
   };
 
   function spotifyCommand(cmd, arg, g = generation) {
-    const task = spotifyPending.catch(() => {}).then(() => {
-      if (!disposed && generation === g && desired === "spotify") return spotify.command(cmd, arg);
+    const task = spotifyPending.catch(() => {}).then(async () => {
+      if (disposed || generation !== g || desired !== "spotify") return;
+      if (cmd !== "stop") return spotify.command(cmd, arg);
+      // Keep both halves of Stop ahead of later native commands, and never
+      // rewind a replacement selection after its source changes.
+      await spotify.command("pause");
+      if (!disposed && generation === g && desired === "spotify") return spotify.command("seek", 0);
     });
     spotifyPending = task;
     return task;
@@ -61,7 +66,10 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
         // A reload can release the switch queue while Spotify is still busy.
         // Do not let that obsolete switch pause playback in the new renderer.
         if (disposed || g !== generation) return;
-        await spotify.pause();
+        // A renderer reload releases switching, but this native pause must
+        // still finish before any replacement Spotify command starts.
+        spotifyPending = Promise.resolve(spotify.pause());
+        await spotifyPending;
       }
       if (disposed || g !== generation) return;
       provider = next;
@@ -211,6 +219,26 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
       await switching;
       if (commandGeneration !== generation) return;
       if (provider === "spotify") return await spotifyCommand(cmd, arg);
+      if (cmd === "stop") {
+        wantsPlay = false;
+        pendingPosition = 0;
+        if (!loadDispatched || !session) {
+          state.state = "paused";
+          state.position = 0;
+          state.message = "";
+          return;
+        }
+        const stopping = session;
+        try {
+          await audio.send({ type: "pause", session: stopping });
+          if (current(commandGeneration) && session === stopping) {
+            await audio.send({ type: "seek", session: stopping, position: 0 });
+          }
+        } catch (error) {
+          if (current(commandGeneration) && session === stopping) throw error;
+        }
+        return;
+      }
       if (cmd === "eject" || cmd === "activate") {
         const url = state.track?.sourceUrl || "https://soundcloud.com/";
         const parsed = new URL(url);
@@ -318,6 +346,9 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
 
   function rendererReset() {
     generation++;
+    // An unfinished handoff has been invalidated. State and controls must both
+    // keep using the last source whose selection actually completed.
+    desired = provider;
     session = null;
     hostSession = null;
     loadDispatched = false;
