@@ -145,6 +145,19 @@ async function runSoundCloudSelftest({ win, app, playback, readPrefs }) {
         const state = await playback.getState();
         return state.state === "playing" && state.position > 4.2 && state.volume === 25;
       });
+      const stoppedTrack = (await playback.getState()).track.id;
+      await js("document.getElementById('stop').click()");
+      await until("Stop button pauses and rewinds the current track", async () => {
+        const state = await playback.getState();
+        return state.state === "paused" && state.position < 0.2 && state.track?.id === stoppedTrack;
+      });
+      await wait(500);
+      assert.ok((await playback.getState()).position < 0.2, "stopped audio must remain at the beginning");
+      await js("document.getElementById('play').click()");
+      await until("Play button resumes the stopped track from the beginning", async () => {
+        const state = await playback.getState();
+        return state.state === "playing" && state.position > 0.2 && state.position < 3 && state.track?.id === stoppedTrack;
+      });
       await playback.command("next");
       await until("next within playlist", async () => {
         const state = await playback.getState();
