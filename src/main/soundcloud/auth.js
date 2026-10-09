@@ -45,8 +45,8 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   let authQueue = Promise.resolve();
   let storageQueue = Promise.resolve();
   const operations = new Set();
-  const cancelled = () => authError('auth_cancelled', 'SoundCloud sign-in was cancelled.');
-  const required = () => authError('auth_required', 'Connect SoundCloud in the application menu to play SoundCloud tracks.');
+  const cancelled = () => authError('auth_cancelled', 'SoundCloud connection was cancelled.');
+  const required = () => authError('auth_required', 'Choose Playback > Connect SoundCloud to play SoundCloud tracks.');
   const snapshot = () => ({ configured, connected: !!tokens && !disposed,
     authMode: tokens?.authMode || (applicationCredentials ? 'application' : 'none') });
 
@@ -117,7 +117,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         operations.delete(op);
       },
     };
-    const timer = setTimeout(() => op.cancel(authError('auth_timeout', 'SoundCloud sign-in timed out. Please try connecting again.')), timeoutMs);
+    const timer = setTimeout(() => op.cancel(authError('auth_timeout', 'Connecting to SoundCloud timed out. Try Playback > Connect SoundCloud again.')), timeoutMs);
     operations.add(op);
     return op;
   }
@@ -152,14 +152,14 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
       }));
       op.check();
       if (!response.ok) {
-        throw authError('auth_failed', 'SoundCloud sign-in failed. Check the app credentials and authorization settings, then connect again.');
+        throw authError('auth_failed', 'SoundCloud authentication failed. Check the application credentials and authorization settings, then connect again.');
       }
       data = await op.wait(response.json());
       op.check();
     } catch (error) {
       op.check();
       if (error?.code === 'auth_failed') throw error;
-      throw authError('auth_failed', 'SoundCloud sign-in could not complete. Check your connection and connect again.');
+      throw authError('auth_failed', 'Could not connect to SoundCloud. Check your connection and try again.');
     }
     const lifetime = data?.expires_in;
     const seconds = typeof lifetime === 'number' || (typeof lifetime === 'string' && /^\d+$/.test(lifetime))
@@ -170,7 +170,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
           data?.refresh_token != null && !validToken(data.refresh_token)) ||
         !Number.isSafeInteger(seconds) || seconds <= 0 || !Number.isFinite(expiresAt) ||
         (data.token_type !== undefined && String(data.token_type).toLowerCase() !== 'bearer')) {
-      throw authError('auth_failed', 'SoundCloud returned an invalid sign-in response. Please connect again.');
+      throw authError('auth_failed', 'SoundCloud returned an invalid authentication response. Try connecting again.');
     }
     return { clientId, accessToken: data.access_token, refreshToken: data.refresh_token || null, expiresAt, authMode };
   }

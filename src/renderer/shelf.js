@@ -2,7 +2,7 @@
 // from drag and drop, paste, or ADD > URL, which reads the clipboard.
 import { sendCommand } from "./playbackMedia.js";
 
-const KIND_LABEL = { album: "album", playlist: "playlist", artist: "artist", track: "song" };
+const KIND_LABEL = { album: "album", playlist: "playlist", artist: "artist", track: "track" };
 const LIKED = { provider: "spotify", kind: "liked", uri: "liked", title: "Liked Songs" };
 
 // Webamp gives tracks small numeric ids. Ours start far above them.
@@ -86,7 +86,7 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
       else if (fresh.length > 1) flash(`Added ${fresh.length} items`);
       else flash("Already on your shelf");
     } catch {
-      flash("Could not add that link. Check your connection and SoundCloud settings.", 6000);
+      flash("Could not add that link. Check your connection and try again.", 6000);
     }
   }
 
