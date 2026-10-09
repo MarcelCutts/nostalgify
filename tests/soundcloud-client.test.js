@@ -327,3 +327,19 @@ test("auth and network errors are sanitized and do not start browser authenticat
   const network = fixture([() => { throw new Error(`Request with ${TOKEN} failed`); }]);
   await assert.rejects(network.client.loadContext(TRACK.urn), (error) => error.code === "network_error" && !error.message.includes(TOKEN));
 });
+
+test("authentication rate limits retain safe retry metadata without exposing adapter text", async () => {
+  const { client, calls } = fixture([], { getAccessToken: async () => {
+    throw Object.assign(new Error(`sensitive ${TOKEN}`), { code: "rate_limited", status: 429, retryAfterMs: 3600000, token: TOKEN });
+  } });
+  await assert.rejects(client.loadContext(TRACK.urn), (error) => {
+    assert.equal(error.code, "rate_limited");
+    assert.equal(error.status, 429);
+    assert.equal(error.retryAfterMs, 3600000);
+    assert.equal(error.token, undefined);
+    assert.doesNotMatch(error.message, /sensitive|reconnect/i);
+    assert.ok(!error.message.includes(TOKEN));
+    return true;
+  });
+  assert.equal(calls.length, 0);
+});

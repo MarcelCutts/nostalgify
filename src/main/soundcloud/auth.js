@@ -44,6 +44,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   let reconnectPromise = null;
   let authQueue = Promise.resolve();
   let storageQueue = Promise.resolve();
+  let tokenCooldownUntil = 0;
   const operations = new Set();
   const cancelled = () => authError('auth_cancelled', 'SoundCloud connection was cancelled.');
   const required = () => authError('auth_required', 'Choose Playback > Connect SoundCloud to play SoundCloud tracks.');
@@ -65,13 +66,59 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     if (!configured) throw authError('auth_configuration', 'Configure your SoundCloud application credentials before connecting.');
   }
 
-  function storageFailure(error) {
-    if (error?.code === 'storage_unavailable') {
-      return authError('storage_unavailable',
-        'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain, restart Nostalgify, and try again.');
+  function rateLimited() {
+    return Object.assign(authError('rate_limited',
+      'SoundCloud is temporarily limiting authentication requests. Please try again later.'),
+    { status: 429, retryAfterMs: Math.max(1, tokenCooldownUntil - now()) });
+  }
+
+  function checkTokenCooldown() {
+    if (tokenCooldownUntil > now()) throw rateLimited();
+  }
+
+  function recordTokenCooldown(response) {
+    const currentTime = now();
+    const retryAfter = response.headers?.get('retry-after')?.trim();
+    const reset = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)
+      ? currentTime + Number(retryAfter) * 1000 : Date.parse(retryAfter);
+    // Honor server-directed waits without shortening an hour/day quota. Missing,
+    // invalid or already elapsed dates get a bounded fallback, never a retry loop.
+    const resetTime = Number.isFinite(reset) && reset > currentTime && reset <= 8640000000000000
+      ? reset : currentTime + 60000;
+    tokenCooldownUntil = Math.max(tokenCooldownUntil, resetTime);
+  }
+
+  function storageFailure(error, operation = 'load') {
+    const code = error?.code === 'storage_unavailable' ? 'storage_unavailable' : 'storage_error';
+    if (error?.reason === 'temporary') {
+      return authError(code,
+        'Secure storage is temporarily unavailable. Restart Nostalgify and allow access to your system keychain when prompted, then try again.');
     }
-    return authError('storage_error',
-      'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain and restart Nostalgify. If the problem persists, use Playback > Forget Local SoundCloud Sign-in, then connect again.');
+    if (error?.operation === 'rotate') {
+      return authError(code, error.reason === 'filesystem'
+        ? 'Saved SoundCloud sign-in was read but could not be re-encrypted. Check the application data directory permissions and available disk space, then try again.'
+        : 'Saved SoundCloud sign-in was read but could not be re-encrypted. Check your system keychain, restart Nostalgify, and try again.');
+    }
+    if (error?.reason === 'insecure') {
+      return authError(code, operation === 'load'
+        ? 'Saved SoundCloud sign-in uses unsupported encryption. Use Playback > Forget Local SoundCloud Sign-in, then connect again with secure storage available.'
+        : 'Secure storage is unavailable. Enable a supported system keychain before saving a SoundCloud sign-in.');
+    }
+    if (error?.reason === 'filesystem') {
+      const action = { load: 'read', save: 'saved', clear: 'removed' }[operation] || 'accessed';
+      return authError(code,
+        `Saved SoundCloud sign-in could not be ${action}. Check the application data directory permissions and available disk space, then try again.`);
+    }
+    if (error?.reason === 'corrupt') {
+      return authError(code,
+        'Saved SoundCloud sign-in could not be decrypted or read. Restart Nostalgify and try again. If the problem persists, use Playback > Forget Local SoundCloud Sign-in, then connect again.');
+    }
+    if (error?.code === 'storage_unavailable') {
+      return authError(code,
+        'Secure storage is unavailable. Check that your system keychain is available, restart Nostalgify, and try again.');
+    }
+    return authError(code,
+      'SoundCloud sign-in storage could not complete the request. Check your system keychain, restart Nostalgify, and try again.');
   }
 
   function loadTokens() {
@@ -138,6 +185,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     let data;
     try {
       op.check();
+      checkTokenCooldown();
       const headers = { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' };
       const form = { ...parameters };
       if (parameters.grant_type === 'client_credentials') {
@@ -155,6 +203,11 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         body: new URLSearchParams(form).toString(),
       }));
       op.check();
+      if (response.status === 429) {
+        recordTokenCooldown(response);
+        try { await op.wait(response.body?.cancel()); } catch { op.check(); }
+        throw rateLimited();
+      }
       if (!response.ok) {
         throw authError('auth_failed', 'SoundCloud authentication failed. Check the application credentials and authorization settings, then connect again.');
       }
@@ -162,6 +215,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
       op.check();
     } catch (error) {
       op.check();
+      if (error?.code === 'rate_limited') throw rateLimited();
       if (error?.code === 'auth_failed') throw error;
       throw authError('auth_failed', 'Could not connect to SoundCloud. Check your connection and try again.');
     }
@@ -196,7 +250,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         if (op.epoch === generation) tokens = null;
         await store.clear().catch(() => {});
         op.check();
-        throw storageFailure(error);
+        throw storageFailure(error, 'save');
       }
       // A disconnect queues a clear after this write, and must never be undone.
       op.check();
@@ -275,6 +329,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     const pending = serialized(async (epoch) => {
       const op = operation(epoch);
       try {
+        checkTokenCooldown();
         await op.wait(loadTokens());
         op.check();
         const verifier = crypto.randomBytes(32).toString('base64url');
@@ -307,12 +362,13 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     return serialized(async (epoch) => {
       const op = operation(epoch);
       try {
-        // Bound this caller's wait even when a shared Keychain read is still
+        // Bound this caller's wait even when a shared storage read is still
         // pending. The storage operation itself finishes independently.
         await op.wait(loadTokens());
         op.check();
         if (!tokens && !applicationCredentials) throw required();
         if (tokens?.expiresAt > now() + 60000) return tokens.accessToken;
+        checkTokenCooldown();
         const previous = tokens;
         // A refresh token is single-use. Remove the saved token before sending
         // it, so an ambiguous network failure cannot cause its reuse.
@@ -320,7 +376,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         if (previous?.authMode === 'user') {
           await op.wait(enqueueStorage(async () => {
             op.check();
-            try { await store.clear(); } catch (error) { throw storageFailure(error); }
+            try { await store.clear(); } catch (error) { throw storageFailure(error, 'clear'); }
           }));
         }
         const mode = previous?.authMode || 'application';
@@ -341,6 +397,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     const pending = serialized(async (epoch) => {
       const op = operation(epoch);
       try {
+        checkTokenCooldown();
         await op.wait(loadTokens());
         op.check();
         // An API-rejected token may still have a future expiry. Explicit
@@ -364,7 +421,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     connectPromise = null;
     reconnectPromise = null;
     for (const op of operations) op.cancel(cancelled());
-    try { await enqueueStorage(() => store.clear()); } catch (error) { throw storageFailure(error); }
+    try { await enqueueStorage(() => store.clear()); } catch (error) { throw storageFailure(error, 'clear'); }
     return snapshot();
   }
 

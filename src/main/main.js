@@ -7,6 +7,7 @@ const fs = require("fs");
 const { execFile } = require("child_process");
 const STARTER_SKINS = require("./starterSkins");
 const { createPlayback } = require("./playback");
+const { createAudioBridge } = require("./audio-bridge");
 const { spotifyCommandError } = require("./spotify-errors");
 const { cleanShelf } = require("./shelf");
 const { createSoundCloudAuth } = require("./soundcloud/auth");
@@ -35,32 +36,17 @@ let soundcloudAuth = null;
 let soundcloudClient = null;
 let soundcloudMedia = null;
 let soundcloudConfigError = null;
-let audioRequestId = 0;
-const audioRequests = new Map();
+const audioBridge = createAudioBridge({
+  send: (message) => win.webContents.send("playback:audio-command", message),
+});
 
 function sendAudio(message) {
   if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.reject(new Error("Player window is closed"));
-  const requestId = String(++audioRequestId);
-  return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      audioRequests.delete(requestId);
-      reject(new Error("The audio player did not respond. Reload Nostalgify and try again."));
-    }, 10000);
-    audioRequests.set(requestId, { resolve, reject, timer, session: message.session });
-    win.webContents.send("playback:audio-command", { ...message, requestId });
-  });
+  return audioBridge.sendAudio(message);
 }
 
 function fromPlayer(event) {
   return win && !win.isDestroyed() && event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame;
-}
-
-function cancelAudioRequests() {
-  for (const request of audioRequests.values()) {
-    clearTimeout(request.timer);
-    request.reject(new Error("The player window reloaded"));
-  }
-  audioRequests.clear();
 }
 
 async function connectSoundCloud() {
@@ -78,6 +64,15 @@ async function connectSoundCloud() {
 async function playbackCommand(cmd, arg) {
   if (!playback) return { error: "Player is starting" };
   return playback.command(cmd, arg);
+}
+
+async function menuPlaybackCommand(cmd, arg) {
+  const result = await playbackCommand(cmd, arg);
+  if (result?.error && win && !win.isDestroyed()) {
+    buildMenu();
+    await dialog.showMessageBox(win, { type: "error", message: "Playback could not continue", detail: result.error });
+  }
+  return result;
 }
 
 // ---------- log ----------
@@ -625,13 +620,13 @@ function buildMenu() {
     {
       label: "Playback",
       submenu: [
-        { label: "Play/Pause", click: () => playbackCommand("playpause") },
-        { label: "Next Track", click: () => playbackCommand("next") },
-        { label: "Previous Track", click: () => playbackCommand("previous") },
+        { label: "Play/Pause", click: () => menuPlaybackCommand("playpause") },
+        { label: "Next Track", click: () => menuPlaybackCommand("next") },
+        { label: "Previous Track", click: () => menuPlaybackCommand("previous") },
         { type: "separator" },
-        { label: "Use Spotify", type: "radio", checked: playback?.getProvider() !== "soundcloud", click: () => playbackCommand("selectProvider", "spotify") },
-        { label: "Use SoundCloud", type: "radio", checked: playback?.getProvider() === "soundcloud", click: () => playbackCommand("selectProvider", "soundcloud") },
-        { label: "Open Current Source", click: () => playbackCommand("activate") },
+        { label: "Use Spotify", type: "radio", checked: playback?.getProvider() !== "soundcloud", click: () => menuPlaybackCommand("selectProvider", "spotify") },
+        { label: "Use SoundCloud", type: "radio", checked: playback?.getProvider() === "soundcloud", click: () => menuPlaybackCommand("selectProvider", "soundcloud") },
+        { label: "Open Current Source", click: () => menuPlaybackCommand("activate") },
         { type: "separator" },
         { label: "Connect SoundCloud…", click: connectSoundCloud },
         { label: "Forget Local SoundCloud Sign-in", click: async () => {
@@ -681,7 +676,7 @@ function createWindow() {
   win.webContents.on("did-finish-load", () => setZoom(zoom, { save: false }));
   win.webContents.on("did-start-loading", () => {
     closeContextMenu();
-    cancelAudioRequests();
+    audioBridge.cancelAll();
     // Reload destroys its audio element. Invalidate outstanding loads and state.
     playback?.rendererReset();
   });
@@ -692,7 +687,7 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  win.on("closed", () => { closeContextMenu(); cancelAudioRequests(); win = null; });
+  win.on("closed", () => { closeContextMenu(); audioBridge.cancelAll(); win = null; });
   // Never navigate away from the player, for example to a dropped link.
   win.webContents.on("will-navigate", (e) => e.preventDefault());
 
@@ -892,13 +887,7 @@ ipcMain.handle("playback:state", (event) => fromPlayer(event) ? playback.getStat
 ipcMain.handle("playback:command", (event, cmd, arg) => fromPlayer(event) ? playbackCommand(cmd, arg) : { error: "Invalid player" });
 ipcMain.on("playback:audio-state", (event, state) => { if (fromPlayer(event)) playback.audioState(state); });
 ipcMain.on("playback:audio-done", (event, result) => {
-  if (!fromPlayer(event) || !result || typeof result.requestId !== "string") return;
-  const request = audioRequests.get(result.requestId);
-  if (!request || request.session !== result.session) return;
-  clearTimeout(request.timer);
-  audioRequests.delete(result.requestId);
-  if (result.error) request.reject(new Error("The audio player could not complete that command."));
-  else request.resolve();
+  if (fromPlayer(event)) audioBridge.onDone(result);
 });
 ipcMain.handle("skins:init", () => {
   const skins = listSkins();
@@ -983,7 +972,7 @@ app.whenReady().then(() => {
         stopEjectWatch();
         if (!process.env.NOSTALGIFY_MOCK && (process.platform !== "darwin" || !(await spotifyIsRunning()))) return;
         const state = await getSpotifyState();
-        if (state.error) throw new Error("Pause Spotify before switching music sources.");
+        if (state.error) throw spotifyCommandError(state.error);
         if (state.running) await spotifyCommand("pause");
       },
     },

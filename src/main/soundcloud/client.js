@@ -173,7 +173,12 @@ function createSoundCloudClient({ fetch: fetchImpl = globalThis.fetch, auth, now
       // Validate again immediately before attaching authentication.
       url = apiURL(url);
       let token;
-      try { token = await auth.getAccessToken(); } catch {
+      try { token = await auth.getAccessToken(); } catch (error) {
+        if (error?.code === "rate_limited" && error.status === 429 &&
+            Number.isFinite(error.retryAfterMs) && error.retryAfterMs > 0) {
+          throw failure("rate_limited", "SoundCloud is temporarily rate limited. Please try again later.",
+            { status: 429, retryAfterMs: error.retryAfterMs });
+        }
         throw failure("unauthorized", "Connect or reconnect SoundCloud before loading music.", { status: 401 });
       }
       if (typeof token !== "string" || !token || /[\r\n]/.test(token)) {
