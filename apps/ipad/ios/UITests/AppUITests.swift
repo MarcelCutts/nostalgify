@@ -317,7 +317,16 @@ final class AppUITests: XCTestCase {
             }
         }
         record("phase:current-speech")
-        var speech = try voiceOver.currentSpeech().utterance
+        var speech: String
+        do {
+            speech = try voiceOver.currentSpeech().utterance
+        } catch let error as XCUIVoiceOverService.Error where error.code == .noSpeech {
+            // Enabling VoiceOver does not guarantee an initially focused
+            // element has spoken. Begin explicit navigation in that case;
+            // every navigation error below still fails the test without retry.
+            record("phase:no-initial-speech")
+            speech = ""
+        }
         record("speech: " + speech)
         func isSettingsButton(_ utterance: String) -> Bool {
             let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
