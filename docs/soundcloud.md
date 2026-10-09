@@ -95,12 +95,18 @@ A callback override must use `http://127.0.0.1` with an explicit port, have no q
 or fragment, and match the registered callback. `NOSTALGIFY_USER_DATA` changes
 the directory used for this configuration and saved state.
 
-User access and refresh tokens remain in the main process. Electron safeStorage
-encrypts them using macOS Keychain before an atomic write with private file
-permissions. An empty profile does not access Keychain to look for a missing
-file; an existing encrypted token file needs secure storage to be read.
-Plaintext storage is not an accepted fallback. Refreshes are serialized because
-refresh tokens are single-use.
+User access and refresh tokens remain in the main process. Electron's
+[asynchronous safeStorage APIs](https://www.electronjs.org/docs/latest/api/safe-storage)
+encrypt them using macOS Keychain before an atomic write with private file
+permissions. Keychain prompts leave the app responsive. An empty profile does
+not access Keychain to look for a missing token file. Plaintext storage and
+hardcoded-key fallbacks are rejected.
+
+Reads, writes and encryption-key rotation are serialized; a failed operation
+preserves the existing file for a retry. Refreshes are also serialized because
+refresh tokens are single-use. If Keychain access is denied or unavailable,
+unlock it and restart Nostalgify before trying again. Electron caches the
+initialized key provider, so reconnecting alone may not restore access.
 
 **Forget Local SoundCloud Sign-in** removes the local encrypted sign-in. It does
 not revoke authorization on SoundCloud's servers. Application tokens do not use

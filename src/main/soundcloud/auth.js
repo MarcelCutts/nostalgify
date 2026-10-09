@@ -88,9 +88,37 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     tokenCooldownUntil = Math.max(tokenCooldownUntil, resetTime);
   }
 
-  function storageFailure(error) {
-    return authError(error?.code === 'storage_unavailable' ? 'storage_unavailable' : 'storage_error',
-      'SoundCloud credentials could not be accessed securely. Check your system keychain and reconnect.');
+  function storageFailure(error, operation = 'load') {
+    const code = error?.code === 'storage_unavailable' ? 'storage_unavailable' : 'storage_error';
+    if (error?.reason === 'temporary') {
+      return authError(code,
+        'Secure storage is temporarily unavailable. Restart Nostalgify and allow access to your system keychain when prompted, then try again.');
+    }
+    if (error?.operation === 'rotate') {
+      return authError(code, error.reason === 'filesystem'
+        ? 'Saved SoundCloud sign-in was read but could not be re-encrypted. Check the application data directory permissions and available disk space, then try again.'
+        : 'Saved SoundCloud sign-in was read but could not be re-encrypted. Check your system keychain, restart Nostalgify, and try again.');
+    }
+    if (error?.reason === 'insecure') {
+      return authError(code, operation === 'load'
+        ? 'Saved SoundCloud sign-in uses unsupported encryption. Use Playback > Forget Local SoundCloud Sign-in, then connect again with secure storage available.'
+        : 'Secure storage is unavailable. Enable a supported system keychain before saving a SoundCloud sign-in.');
+    }
+    if (error?.reason === 'filesystem') {
+      const action = { load: 'read', save: 'saved', clear: 'removed' }[operation] || 'accessed';
+      return authError(code,
+        `Saved SoundCloud sign-in could not be ${action}. Check the application data directory permissions and available disk space, then try again.`);
+    }
+    if (error?.reason === 'corrupt') {
+      return authError(code,
+        'Saved SoundCloud sign-in could not be decrypted or read. Restart Nostalgify and try again. If the problem persists, use Playback > Forget Local SoundCloud Sign-in, then connect again.');
+    }
+    if (error?.code === 'storage_unavailable') {
+      return authError(code,
+        'Secure storage is unavailable. Check that your system keychain is available, restart Nostalgify, and try again.');
+    }
+    return authError(code,
+      'SoundCloud sign-in storage could not complete the request. Check your system keychain, restart Nostalgify, and try again.');
   }
 
   function loadTokens() {
@@ -222,7 +250,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         if (op.epoch === generation) tokens = null;
         await store.clear().catch(() => {});
         op.check();
-        throw storageFailure(error);
+        throw storageFailure(error, 'save');
       }
       // A disconnect queues a clear after this write, and must never be undone.
       op.check();
@@ -348,7 +376,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         if (previous?.authMode === 'user') {
           await op.wait(enqueueStorage(async () => {
             op.check();
-            try { await store.clear(); } catch (error) { throw storageFailure(error); }
+            try { await store.clear(); } catch (error) { throw storageFailure(error, 'clear'); }
           }));
         }
         const mode = previous?.authMode || 'application';
@@ -393,7 +421,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     connectPromise = null;
     reconnectPromise = null;
     for (const op of operations) op.cancel(cancelled());
-    try { await enqueueStorage(() => store.clear()); } catch (error) { throw storageFailure(error); }
+    try { await enqueueStorage(() => store.clear()); } catch (error) { throw storageFailure(error, 'clear'); }
     return snapshot();
   }
 
