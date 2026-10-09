@@ -1,5 +1,5 @@
 // Saved Spotify and SoundCloud links in Winamp's playlist window. Links come
-// from drag and drop, paste, or ADD > URL, which reads the clipboard.
+// from drag and drop, paste, or the ADD menu’s clipboard action.
 import { sendCommand } from "./playbackMedia.js";
 
 const KIND_LABEL = { album: "album", playlist: "playlist", artist: "artist", track: "track" };
@@ -107,7 +107,7 @@ export function createShelf(webamp, { quietly, flash, onPlay }) {
     true
   );
 
-  // The playlist's ADD > URL button reads a link from the clipboard.
+  // The shelf's ADD menu reads a link from the clipboard.
   async function handleAddUrl() {
     try {
       await addFromText(await window.nostalgify.readClipboard());

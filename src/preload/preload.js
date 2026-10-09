@@ -3,6 +3,8 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("nostalgify", {
   debug: Boolean(process.env.NOSTALGIFY_SELFTEST),
+  showContextMenu: (kind, state) => ipcRenderer.send("menu:show", kind, state),
+  onMenuAction: (cb) => ipcRenderer.on("menu:action", (_event, action) => cb(action)),
   getState: () => ipcRenderer.invoke("playback:state"),
   command: (cmd, arg) => ipcRenderer.invoke("playback:command", cmd, arg),
   onAudioCommand: (cb) => {

@@ -46,10 +46,12 @@ NOSTALGIFY_MOCK=1 NOSTALGIFY_SELFTEST=soundcloud npm start
 | `size` | Window size and screen boundaries | Geometry log |
 | `shelf` | Adding, playing and removing saved links | Shelf/command logs and screenshot; Spotify metadata may use the network |
 | `eq` | Showing EQ artwork only when supplied by a skin | State log and screenshots; requires the expected local skins |
+| `menus` | Native popups at multiple sizes, submenu actions, shelf edits and reload cleanup | Assertions; nonzero exit on failure |
 | `soundcloud` | Offline AAC/HLS decoding, controls, source switching, shelf persistence, attribution and reload | Assertions; nonzero exit on failure |
 
 The first five modes are diagnostic scripts, so review their output rather than
-assuming a zero exit code proves every behavior. The SoundCloud fixture is
+assuming a zero exit code proves every behavior. The `menus` and `soundcloud`
+modes assert their results. The SoundCloud fixture is
 [generated silence](../tests/fixtures/soundcloud/README.md) and makes no live
 SoundCloud requests. It checks compact attribution hit targets, including Webamp
 Double Size, without proving physical speaker output.
@@ -83,9 +85,11 @@ node --env-file=.env scripts/check-soundcloud.js --refresh https://soundcloud.co
 ```
 
 If your environment requires its configured HTTPS proxy, prefix the command
-with `NODE_USE_ENV_PROXY=1`. Normal desktop playback uses Electron's native
-network stack; a successful command-line check does not verify that route or
-audio decoding.
+with `NODE_USE_ENV_PROXY=1`. The standalone Node command requires Node 24 or
+Node 22.21+ for this variable; it is ignored by the project's minimum Node 22.12.
+Normal desktop playback uses Electron's native network stack; a successful
+command-line check does not verify that route or audio decoding. The optional
+[Electron proxy route](soundcloud.md#network-behavior) uses its bundled Node.
 
 ## Live SoundCloud with mock Spotify
 
@@ -190,7 +194,42 @@ Check attribution in full and compact views and with Webamp Double Size. Inspect
 the archive for accidental credential files before sharing it. A valid ad-hoc
 signature is not Apple notarization.
 
+If you use the optional account sign-in flow, check saved sign-in across restarts
+with that configuration; application-token playback does not exercise Keychain
+persistence. After rebuilding the ad-hoc package, macOS may request Keychain
+access again. Check that the app remains responsive while a prompt is open and
+can resume after granting access. In an isolated profile, also check recovery
+after denying a prompt: restart, allow the expected app if prompted, and retry
+before discarding the saved sign-in. A locked keychain needs unlocking separately.
+
 ## Recorded validation
+
+### Cloud review follow-up, 9 October 2026
+
+At `51670bcd76e09a486d3568fb262c5e4d43b366a2`, the complete PR stack passed
+**228 unit tests** and `npm run build` on Linux with Node 24.19.0. The individual
+updated branches also passed their suites/builds: #1 `f3c7130` (203 tests),
+#2 `a75b4f1` (214), and #3 `f9bf781` (217).
+
+Electron 44.7.0 ran under Xvfb with separate temporary profiles and
+`NOSTALGIFY_MOCK=1`. All three asserting modes exited successfully:
+
+- `soundcloud`: offline AAC/HLS, attribution, actual Stop/Play buttons, source
+  switching, saved shelf and renderer-reload recovery.
+- `menus`: native show/close events, action results, 1×/2×/3× sizing, the
+  right-click sequence with an omitted release, and reload cleanup. Inputs were
+  synthetic and menu items were activated programmatically; physical macOS
+  pointer/keyboard behavior and native placement remain separate checks.
+- `soundcloud-live`: real application credentials, API resolution and AAC/HLS
+  decoding, transport controls, natural playlist advancement, attribution,
+  persistence, reload recovery and switching to mock Spotify. This used
+  `NODE_USE_ENV_PROXY=1` through the cloud's configured proxy, not Electron's
+  normal macOS network route. No live quota was deliberately exhausted.
+
+This run did not exercise real Spotify, user OAuth/Keychain prompts or physical
+speaker output. It does not replace the macOS checks below.
+
+### Earlier macOS validation
 
 The macOS validation recorded on 9 October 2026 for commit `c69cd44` passed the
 unit suite and renderer build, offline AAC/HLS checks, live application-token
@@ -201,6 +240,7 @@ assertions and manual SoundCloud playback/shelf checks. Its archive was checked
 for credential files and the supplied credential values; neither was included.
 
 These are results for that revision, not an assertion that every later checkout
-has been tested. Physical speaker output and user OAuth/Keychain persistence
-were not verified. Restricted previews, long pauses and actual signed-media
-expiry still need live coverage. See the [release gates](soundcloud-research.md#remaining-release-gates).
+has been tested. Physical speaker output, user OAuth/Keychain persistence and
+real Keychain prompt responsiveness/recovery were not verified. Restricted
+previews, long pauses and actual signed-media expiry still need live coverage.
+See [remaining checks](soundcloud-research.md#personal-use-and-remaining-checks).

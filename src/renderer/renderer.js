@@ -4,6 +4,7 @@ import { manageLayout, addResizeGrips } from "./layout.js";
 import { createEqPolicy } from "./eq.js";
 import { createShelf } from "./shelf.js";
 import { createSoundCloudAudio } from "./soundcloudAudio.js";
+import { installContextMenus } from "./contextMenu.js";
 
 // Register before any asynchronous UI work so provider switches cannot send
 // commands into an uninitialized audio engine.
@@ -187,6 +188,7 @@ async function main() {
   const eq = createEqPolicy(webamp, skins);
   onSkinLoad((url) => eq.applyForSkin(url));
   eq.applyForSkin(initial);
+  installContextMenus({ webamp, shelf, eq, transport });
   window.nostalgify.onSetSkin((url) => webamp.setSkinFromUrl(url));
   window.nostalgify.onSkinsChanged((list) => {
     eq.updateSkins(list);
@@ -210,13 +212,6 @@ async function main() {
     "click",
     (e) => {
       if (!(e.target instanceof Element)) return;
-      // ADD > File and ADD > Dir point to the supported streaming links.
-      if (e.target.closest("#playlist-add-menu .add-file, #playlist-add-menu .add-dir")) {
-        e.stopPropagation();
-        e.preventDefault();
-        flash("Copy a Spotify or SoundCloud link, then use ADD URL", 3500);
-        return;
-      }
       if (e.target.closest("#equalizer-button")) {
         if (eq.canShowPanel()) return;
         e.stopPropagation();

@@ -8,6 +8,7 @@ const source = fs.readFileSync(path.join(__dirname, "../src/main/selftest.js"), 
 const fixtures = {
   soundcloud: ["../../tests/helpers/soundcloud-fixture", "runSoundCloudSelftest"],
   "soundcloud-live": ["../../tests/helpers/soundcloud-live", "runLiveSoundCloudSelftest"],
+  menus: ["../../tests/helpers/context-menu-selftest", "runContextMenuSelftest"],
 };
 
 // Dispatch only: neither Electron nor the fixture's API/playback operations run.
