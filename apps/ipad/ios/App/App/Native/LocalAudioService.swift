@@ -172,9 +172,12 @@ final class LocalAudioService {
     private var current: LocalAudioRecord? { library.first { $0.id == queue.current } }
     private var elapsed: Double { PlaybackValue.position(player.currentTime().seconds, duration: current?.duration ?? 0) }
 
-    private func observe(_ name: Notification.Name, handler: @escaping @MainActor (Notification) -> Void) {
+    private func observe(_ name: Notification.Name, handler: @escaping @MainActor @Sendable (Notification) -> Void) {
         notificationTokens.append(notificationCenter.addObserver(forName: name, object: nil, queue: .main) { note in
-            Task { @MainActor in handler(note) }
+            // NotificationCenter delivers this subscription on the main queue,
+            // including notifications posted from background threads. Handle it
+            // there without transferring Notification's non-Sendable payload.
+            MainActor.assumeIsolated { handler(note) }
         })
     }
 
@@ -237,14 +240,17 @@ final class LocalAudioService {
                 guard duration.isFinite, duration > 0 else {
                     throw NativeFailure(code: "unsupported_audio", message: "This file has no playable audio duration.")
                 }
-                let metadata = try await asset.load(.commonMetadata)
-                func value(_ key: AVMetadataKey) -> String {
-                    metadata.first { $0.commonKey == key }?.stringValue ?? ""
+                let metadata = (try? await asset.load(.commonMetadata)) ?? []
+                func value(_ key: AVMetadataKey) async -> String {
+                    guard let item = metadata.first(where: { $0.commonKey == key }) else { return "" }
+                    return (try? await item.load(.stringValue)) ?? ""
                 }
-                let title = value(.commonKeyTitle)
+                let title = await value(.commonKeyTitle)
+                let artist = await value(.commonKeyArtist)
+                let album = await value(.commonKeyAlbumName)
                 let record = LocalAudioRecord(id: id, filename: filename,
                     name: title.isEmpty ? source.deletingPathExtension().lastPathComponent : title,
-                    artist: value(.commonKeyArtist), album: value(.commonKeyAlbumName), duration: duration)
+                    artist: artist, album: album, duration: duration)
                 try save(library + [record])
                 library.append(record)
                 imported.append(record)

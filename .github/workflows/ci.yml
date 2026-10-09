@@ -148,6 +148,7 @@ jobs:
             out/ios-ci/**/*.png
             out/ios-ci/**/*.xcresult/**
             out/ios-ci/**/Package.resolved
+            out/ios-ci/**/test-attachments/**
 
   required:
     name: Required checks

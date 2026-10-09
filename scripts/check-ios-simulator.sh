@@ -38,6 +38,13 @@ for log in root.glob('*.log'):
 (root / 'swift-warnings.json').write_text(json.dumps(list(diagnostics.values()), indent=2) + '\n')
 print(f'Captured {len(diagnostics)} distinct first-party Swift warning diagnostics.')
 PY
+  if [ -d "$NOSTALGIFY_IOS_RESULTS/tests.xcresult" ]; then
+    # Export screenshots and accessibility hierarchies for inspection without
+    # Xcode. The original result bundle remains authoritative if export fails.
+    xcrun xcresulttool export attachments --path "$NOSTALGIFY_IOS_RESULTS/tests.xcresult" \
+      --output-path "$NOSTALGIFY_IOS_RESULTS/test-attachments" \
+      > "$NOSTALGIFY_IOS_RESULTS/attachment-export.log" 2>&1 || true
+  fi
   if [ -n "$NOSTALGIFY_SIMULATOR_ID" ]; then
     # UI tests attach their own app screenshot and hierarchy to tests.xcresult.
     # Also retain the simulator screen if a failure prevented the launch check.
@@ -146,6 +153,9 @@ xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
 xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
   -destination "platform=iOS Simulator,id=$NOSTALGIFY_SIMULATOR_ID" \
   -parallel-testing-enabled NO \
+  -test-timeouts-enabled YES \
+  -default-test-execution-time-allowance 120 \
+  -maximum-test-execution-time-allowance 180 \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
   -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \

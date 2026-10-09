@@ -5,6 +5,30 @@ import XCTest
 
 final class AudioRecoveryTests: XCTestCase {
     @MainActor
+    func testBackgroundPostedResetIsHandledOnMainActorBeforePostingCompletes() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        var changes = 0
+        service.onStateChanged = {
+            XCTAssertTrue(Thread.isMainThread)
+            changes += 1
+        }
+        let center = fixture.center
+        // Awaiting the detached task suspends MainActor, allowing the main-queue
+        // notification subscription to execute without a synchronous deadlock.
+        await Task.detached {
+            XCTAssertFalse(Thread.isMainThread)
+            center.post(name: AVAudioSession.mediaServicesWereResetNotification, object: nil)
+        }.value
+        XCTAssertEqual(fixture.players.count, 2)
+        XCTAssertGreaterThanOrEqual(changes, 1)
+        XCTAssertEqual(service.snapshot()["error"] as? String, "audio_services_reset")
+        XCTAssertEqual(fixture.players[1].playCalls, 0)
+    }
+
+    @MainActor
     func testResetRecreatesPlayerAndObserversWithoutResumingThenAllowsExplicitPlay() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }
@@ -242,7 +266,7 @@ final class AudioRecoveryTests: XCTestCase {
 
     @MainActor
     private func settleNotifications() async {
-        // The service deliberately hops notification callbacks onto MainActor.
+        // A periodic player callback may already have queued a MainActor task.
         for _ in 0..<10 { await Task.yield() }
     }
 }

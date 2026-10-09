@@ -82,7 +82,7 @@ build alone never closes the native acceptance gate.
 | Task | Automated acceptance | Device follow-up |
 | --- | --- | --- |
 | Adopt current tooling without losing compatibility | Explicit Xcode 27/iPadOS 27 and Xcode 26.6/iPadOS 26.5 lanes; committed Swift dependency resolution; unsigned Debug and Release builds | Install on the user's actual iPad and OS |
-| Recover from media service resets | Nine native regressions exercise engine/observer replacement, inactive-provider ownership, interruption intent, stale callbacks and explicit restart | Reset audio services from Developer settings during local playback and while Spotify is selected |
+| Recover from media service resets | Ten native regressions exercise engine/observer replacement, inactive-provider ownership, interruption intent, background notification delivery, stale callbacks and explicit restart | Reset audio services from Developer settings during local playback and while Spotify is selected |
 | Exercise the installed app | XCUITest operates real Capacitor and AVPlayer with isolated imported WAV files; verifies transport, persistence, settings and failed Spotify handoff recovery | Real Files providers, audible output, successful Spotify authorization and background sessions |
 | Improve accessibility | Both browser engines test keyboard focus, range controls, reduced motion and 200% text; native tests run baseline accessibility audits, rotation and iPadOS 27 VoiceOver navigation | Manual VoiceOver, device text-size preferences and full visual assessment of selected skins |
 | Make regressions diagnosable | Correlated OSLog command intervals, concurrency-warning inventory, xcresult bundles and browser failure traces | Inspect Instruments during long background/route-change sessions |
