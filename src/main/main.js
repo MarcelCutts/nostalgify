@@ -1,11 +1,20 @@
-// Nostalgify: classic Winamp skins as a remote control for the Spotify desktop app.
-// The main process owns everything that touches macOS: AppleScript calls to
-// Spotify, the skins folder, the native menu, and the window itself.
-const { app, BrowserWindow, ipcMain, protocol, Menu, shell, screen, net, clipboard } = require("electron");
+// Nostalgify: classic Winamp skins for Spotify desktop control and SoundCloud playback.
+// The main process owns provider coordination, SoundCloud credentials and media
+// requests, Spotify AppleScript calls, skins, native menus, and the app window.
+const { app, BrowserWindow, ipcMain, protocol, Menu, shell, screen, net, clipboard, safeStorage, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");
 const { execFile } = require("child_process");
 const STARTER_SKINS = require("./starterSkins");
+const { createPlayback } = require("./playback");
+const { createAudioBridge } = require("./audio-bridge");
+const { spotifyCommandError } = require("./spotify-errors");
+const { cleanShelf } = require("./shelf");
+const { createSoundCloudAuth } = require("./soundcloud/auth");
+const { createTokenStore } = require("./soundcloud/token-store");
+const { createSoundCloudClient } = require("./soundcloud/client");
+const { createMediaProxy } = require("./soundcloud/media-proxy");
+const { createElectronSoundCloudFetch } = require("./soundcloud/electron-fetch");
 
 // In development the skins live next to the code. The packaged app uses a
 // visible folder in ~/Music so dropping skins in is easy.
@@ -21,6 +30,49 @@ let zoom = 2;
 let cssSize = { w: 275, h: 232 };
 
 let win = null;
+let playback = null;
+let soundcloudAuth = null;
+let soundcloudClient = null;
+let soundcloudMedia = null;
+let soundcloudConfigError = null;
+const audioBridge = createAudioBridge({
+  send: (message) => win.webContents.send("playback:audio-command", message),
+});
+
+function sendAudio(message) {
+  if (!win || win.isDestroyed() || win.webContents.isDestroyed()) return Promise.reject(new Error("Player window is closed"));
+  return audioBridge.sendAudio(message);
+}
+
+function fromPlayer(event) {
+  return win && !win.isDestroyed() && event.sender === win.webContents && event.senderFrame === win.webContents.mainFrame;
+}
+
+async function connectSoundCloud() {
+  try {
+    if (soundcloudConfigError) throw new Error(soundcloudConfigError);
+    // Environment credentials can read public content without a browser login.
+    if (process.env.SOUNDCLOUD_CLIENT_SECRET) await soundcloudAuth.reconnect();
+    else await soundcloudAuth.connect();
+    await dialog.showMessageBox(win, { type: "info", message: "SoundCloud is connected", detail: "Copy a SoundCloud track or playlist link and paste it into Nostalgify." });
+  } catch (error) {
+    await dialog.showMessageBox(win, { type: "error", message: "Could not connect to SoundCloud", detail: error.message });
+  }
+}
+
+async function playbackCommand(cmd, arg) {
+  if (!playback) return { error: "Player is starting" };
+  return playback.command(cmd, arg);
+}
+
+async function menuPlaybackCommand(cmd, arg) {
+  const result = await playbackCommand(cmd, arg);
+  if (result?.error && win && !win.isDestroyed()) {
+    buildMenu();
+    await dialog.showMessageBox(win, { type: "error", message: "Playback could not continue", detail: result.error });
+  }
+  return result;
+}
 
 // ---------- log ----------
 // Problems talking to Spotify go to ~/Library/Application Support/Nostalgify/nostalgify.log
@@ -58,6 +110,10 @@ protocol.registerSchemesAsPrivileged([
   {
     scheme: "skin",
     privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true },
+  },
+  {
+    scheme: "soundcloud-media",
+    privileges: { standard: true, secure: true, supportFetchAPI: true, corsEnabled: true, stream: true },
   },
 ]);
 
@@ -415,7 +471,7 @@ async function playShelf(uri) {
   logLine("playing shelf entry", uri);
   if (uri === "liked") {
     const user = spotifyUsername();
-    if (!user) return logLine("can't play Liked Songs: no Spotify username found");
+    if (!user) throw new Error("Could not find your Spotify account. Open Spotify and sign in, then try Liked Songs again.");
     return spotifyCommand("playUri", `spotify:user:${user}:collection`);
   }
   if (!/^spotify:(track|album|playlist|artist):[A-Za-z0-9]+$/.test(uri)) return;
@@ -427,9 +483,10 @@ async function playShelf(uri) {
 async function playOrFallback() {
   await launchSpotifyHidden();
   const s = await getSpotifyState();
+  if (s.error) throw spotifyCommandError(s.error);
   if (s.track) return spotifyCommand("play");
   const user = spotifyUsername();
-  if (!user) return logLine("no song loaded and no Spotify username found");
+  if (!user) throw new Error("Could not find your Spotify account. Open Spotify and sign in, then try Liked Songs again.");
   logLine("nothing loaded, playing Liked Songs");
   await spotifyCommand("playUri", `spotify:user:${user}:collection`);
 }
@@ -463,7 +520,9 @@ async function spotifyCommand(cmd, arg) {
   try {
     await osa(`tell application "Spotify" to ${line}`);
   } catch (e) {
-    logLine("Spotify command failed:", cmd, e.message.trim());
+    const error = spotifyCommandError(e);
+    logLine("Spotify command failed:", cmd, error.message);
+    throw error;
   }
   if (pullsSpotifyForward) keepSpotifyHidden(2, hadFocus);
 }
@@ -497,7 +556,7 @@ function buildMenu() {
       label: "Edit",
       submenu: [
         { role: "copy" },
-        { role: "paste", label: "Paste Spotify Link" },
+        { role: "paste", label: "Paste Music Link" },
         { role: "selectAll" },
       ],
     },
@@ -525,11 +584,19 @@ function buildMenu() {
     {
       label: "Playback",
       submenu: [
-        { label: "Play/Pause", click: () => spotifyCommand("playpause") },
-        { label: "Next Track", click: () => spotifyCommand("next") },
-        { label: "Previous Track", click: () => spotifyCommand("previous") },
+        { label: "Play/Pause", click: () => menuPlaybackCommand("playpause") },
+        { label: "Next Track", click: () => menuPlaybackCommand("next") },
+        { label: "Previous Track", click: () => menuPlaybackCommand("previous") },
         { type: "separator" },
-        { label: "Show Spotify", click: () => spotifyCommand("activate") },
+        { label: "Use Spotify", type: "radio", checked: playback?.getProvider() !== "soundcloud", click: () => menuPlaybackCommand("selectProvider", "spotify") },
+        { label: "Use SoundCloud", type: "radio", checked: playback?.getProvider() === "soundcloud", click: () => menuPlaybackCommand("selectProvider", "soundcloud") },
+        { label: "Open Current Source", click: () => menuPlaybackCommand("activate") },
+        { type: "separator" },
+        { label: "Connect SoundCloud…", click: connectSoundCloud },
+        { label: "Forget Local SoundCloud Sign-in", click: async () => {
+          if (playback.getProvider() === "soundcloud") await playbackCommand("selectProvider", "soundcloud");
+          await soundcloudAuth.disconnect();
+        } },
       ],
     },
     {
@@ -578,6 +645,11 @@ function createWindow() {
   // Coming back to Nostalgify by hand ends any Eject round trip.
   win.on("focus", () => stopEjectWatch());
   win.webContents.on("did-finish-load", () => setZoom(zoom, { save: false }));
+  win.webContents.on("did-start-loading", () => {
+    audioBridge.cancelAll();
+    // Reload destroys its audio element. Invalidate outstanding loads and state.
+    playback?.rendererReset();
+  });
   // Block Chromium's own pinch and Cmd+/- zoom so only our zoom applies.
   win.webContents.setVisualZoomLevelLimits(1, 1);
   // Webamp's "about" link and anything else that opens a window goes to the browser.
@@ -585,7 +657,7 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  win.on("closed", () => (win = null));
+  win.on("closed", () => { audioBridge.cancelAll(); win = null; });
   // Never navigate away from the player, for example to a dropped link.
   win.webContents.on("will-navigate", (e) => e.preventDefault());
 
@@ -602,6 +674,7 @@ function createWindow() {
       applySkin,
       spotifyCommand,
       getSpotifyState,
+      playback,
     });
   }
 }
@@ -690,27 +763,14 @@ function decodeEntities(text) {
 }
 
 const KIND_FALLBACK = { album: "Spotify album", playlist: "Spotify playlist", artist: "Spotify artist", track: "Spotify song" };
-async function resolveLinks(text) {
+async function resolveSpotifyLinks(text) {
   const links = parseLinks(text);
   return Promise.all(
     links.map(async (l) => {
       const [title, artist] = await Promise.all([lookupTitle(l.kind, l.id), lookupArtist(l.kind, l.id)]);
-      return { kind: l.kind, uri: l.uri, title: title || KIND_FALLBACK[l.kind], artist: artist || undefined };
+      return { provider: "spotify", kind: l.kind, uri: l.uri, title: title || KIND_FALLBACK[l.kind], artist: artist || undefined };
     })
   );
-}
-
-function cleanShelf(list) {
-  if (!Array.isArray(list)) return [];
-  return list
-    .filter((i) => i && typeof i.uri === "string" && /^spotify:(track|album|playlist|artist):[A-Za-z0-9]+$/.test(i.uri))
-    .map((i) => ({
-      kind: i.uri.split(":")[1],
-      uri: i.uri,
-      title: String(i.title || "").slice(0, 120),
-      ...(typeof i.artist === "string" && i.artist ? { artist: i.artist.slice(0, 120) } : {}),
-    }))
-    .slice(0, 500);
 }
 
 // ---------- size ----------
@@ -790,8 +850,12 @@ ipcMain.handle("layout", (_e, w, h) => {
 });
 ipcMain.handle("resize:start", (_e, edge) => startResize(String(edge)));
 ipcMain.handle("resize:end", () => stopResize());
-ipcMain.handle("spotify:state", () => getSpotifyState());
-ipcMain.handle("spotify:command", (_e, cmd, arg) => spotifyCommand(cmd, arg));
+ipcMain.handle("playback:state", (event) => fromPlayer(event) ? playback.getState() : null);
+ipcMain.handle("playback:command", (event, cmd, arg) => fromPlayer(event) ? playbackCommand(cmd, arg) : { error: "Invalid player" });
+ipcMain.on("playback:audio-state", (event, state) => { if (fromPlayer(event)) playback.audioState(state); });
+ipcMain.on("playback:audio-done", (event, result) => {
+  if (fromPlayer(event)) audioBridge.onDone(result);
+});
 ipcMain.handle("skins:init", () => {
   const skins = listSkins();
   const start = pickStartupSkin(skins);
@@ -807,9 +871,16 @@ ipcMain.handle("skins:chosen", (_e, url) => {
   }
 });
 ipcMain.handle("shelf:load", () => cleanShelf(readPrefs().shelf));
-ipcMain.handle("shelf:save", (_e, list) => writePrefs({ shelf: cleanShelf(list) }));
-ipcMain.handle("links:resolve", (_e, text) => resolveLinks(text));
-ipcMain.handle("clipboard:read", () => clipboard.readText().slice(0, 20000));
+ipcMain.handle("shelf:save", (_e, list) => writePrefs({ shelfVersion: 2, shelf: cleanShelf(list) }));
+ipcMain.handle("links:resolve", async (event, text) => {
+  if (!fromPlayer(event)) return { error: "Invalid player" };
+  try {
+    const input = String(text).slice(0, 20000);
+    const [spotify, soundcloud] = await Promise.all([resolveSpotifyLinks(input), soundcloudClient.resolveLinks(input)]);
+    return [...spotify, ...soundcloud];
+  } catch (error) { return { error: error.message }; }
+});
+ipcMain.handle("clipboard:read", async (event) => fromPlayer(event) ? (await clipboard.readText()).slice(0, 20000) : "");
 ipcMain.handle("ui:load", () => {
   const p = readPrefs();
   return { playlistOpen: p.playlistOpen, playlistExtraHeight: p.playlistExtraHeight };
@@ -829,11 +900,63 @@ app.setName("Nostalgify");
 if (process.env.NOSTALGIFY_USER_DATA) app.setPath("userData", process.env.NOSTALGIFY_USER_DATA);
 app.whenReady().then(() => {
   setupSkinsDir();
-  launchSpotifyHidden();
+  let config = {};
+  try {
+    const value = JSON.parse(fs.readFileSync(path.join(app.getPath("userData"), "soundcloud.json"), "utf8"));
+    if (value && typeof value === "object" && !Array.isArray(value)) config = value;
+    else soundcloudConfigError = "SoundCloud configuration must be a JSON object. Check soundcloud.json in the app settings folder.";
+  } catch (error) {
+    if (error.code !== "ENOENT") soundcloudConfigError = "SoundCloud configuration could not be read. Check soundcloud.json in the app settings folder.";
+  }
+  const offlineSoundCloud = !app.isPackaged && process.env.NOSTALGIFY_MOCK === "1" && process.env.NOSTALGIFY_SELFTEST === "soundcloud";
+  const fetch = offlineSoundCloud
+    ? require("../../tests/helpers/soundcloud-fixture").createFixtureFetch()
+    // Node's explicit environment-proxy mode uses its already configured CA
+    // trust. Native desktop launches retain Electron's system proxy settings.
+    : process.env.NODE_USE_ENV_PROXY === "1"
+      ? (url, init) => globalThis.fetch(url, init)
+      : createElectronSoundCloudFetch(net);
+  const authOptions = {
+    clientId: offlineSoundCloud ? "offline-fixture-client" : process.env.SOUNDCLOUD_CLIENT_ID || config.clientId,
+    clientSecret: offlineSoundCloud ? "offline-fixture-secret" : process.env.SOUNDCLOUD_CLIENT_SECRET,
+    redirectUri: process.env.SOUNDCLOUD_REDIRECT_URI || config.redirectUri || "http://127.0.0.1:47832/callback",
+    fetch, openExternal: (url) => shell.openExternal(url),
+    store: createTokenStore({ filePath: path.join(app.getPath("userData"), "soundcloud-tokens.enc"), safeStorage }),
+  };
+  try { soundcloudAuth = createSoundCloudAuth(authOptions); }
+  catch {
+    soundcloudConfigError = "The SoundCloud callback must be a registered http://127.0.0.1 address with an explicit port. Check your SoundCloud configuration.";
+    soundcloudAuth = createSoundCloudAuth({ ...authOptions, redirectUri: "http://127.0.0.1:47832/callback", clientId: undefined, clientSecret: undefined });
+  }
+  soundcloudClient = createSoundCloudClient({ fetch, auth: soundcloudAuth });
+  soundcloudMedia = createMediaProxy({ fetch, getAccessToken: () => soundcloudAuth.getAccessToken() });
+  protocol.handle("soundcloud-media", (request) => soundcloudMedia.handle(request));
+  playback = createPlayback({
+    initialProvider: readPrefs().provider,
+    spotify: {
+      getState: getSpotifyState, command: spotifyCommand, start: launchSpotifyHidden,
+      pause: async () => {
+        stopEjectWatch();
+        if (!process.env.NOSTALGIFY_MOCK && (process.platform !== "darwin" || !(await spotifyIsRunning()))) return;
+        const state = await getSpotifyState();
+        if (state.error) throw spotifyCommandError(state.error);
+        if (state.running) await spotifyCommand("pause");
+      },
+    },
+    soundcloud: soundcloudClient, audio: { send: sendAudio }, media: soundcloudMedia,
+    openExternal: (url) => shell.openExternal(url),
+    onProviderChange: (provider) => { writePrefs({ provider }); buildMenu(); },
+  });
+  if (playback.getProvider() === "spotify") launchSpotifyHidden();
   registerSkinProtocol();
   buildMenu();
   watchSkinsFolder();
   createWindow();
   downloadStarterSkins();
+});
+app.on("before-quit", () => {
+  stopEjectWatch();
+  void playback?.dispose();
+  void soundcloudAuth?.dispose();
 });
 app.on("window-all-closed", () => app.quit());

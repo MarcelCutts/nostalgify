@@ -3,15 +3,17 @@
   "productName": "Nostalgify",
   "version": "0.1.0",
   "private": true,
-  "description": "Classic Winamp 2 skins as a remote control for the Spotify desktop app on macOS.",
+  "description": "Classic Winamp 2 skins for Spotify desktop control and public SoundCloud playback on macOS.",
   "main": "src/main/main.js",
   "homepage": "https://0xchaosbi.github.io/nostalgify/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xchaosbi/nostalgify.git"
+    "url": "https://github.com/MarcelCutts/nostalgify.git"
   },
   "license": "MIT",
   "scripts": {
+    "test": "node --test tests/*.test.js tests/*.test.mjs",
+    "soundcloud:check": "node scripts/check-soundcloud.js",
     "build": "esbuild src/renderer/renderer.js --bundle --format=iife --outfile=dist/renderer.js --log-level=warning",
     "start": "npm run build && electron .",
     "package": "sh scripts/package.sh",
@@ -23,9 +25,10 @@
     "@electron/packager": "^20.3.0",
     "electron": "^44.7.0",
     "esbuild": "^0.28.2",
+    "hls.js": "1.7.3",
     "webamp": "^2.3.1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   }
 }

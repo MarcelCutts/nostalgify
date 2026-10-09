@@ -1,7 +1,6 @@
-// Spotify's audio is copy-protected, so we can't analyse the real sound.
-// This drives Webamp's visualiser with a little synthetic "band" (kick, hats,
-// shifting chord tones) that runs silently while Spotify is playing.
-export function createFakeVis() {
+// Feed Webamp a silent synthetic rhythm while the active provider is playing.
+// This animation is decorative; it does not analyse Spotify or SoundCloud audio.
+export function createDecorativeVisualizer() {
   const ctx = new AudioContext();
   const analyser = ctx.createAnalyser();
   analyser.fftSize = 2048;

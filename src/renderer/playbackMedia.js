@@ -1,12 +1,25 @@
 // Webamp normally owns audio playback through its Media class. This replacement
-// plays nothing. It relays Webamp's transport and volume to Spotify and reports
-// Spotify's position back so the time display and seek bar stay correct.
-import { createFakeVis } from "./fakeVis.js";
+// relays Webamp's transport and volume to the active provider. SoundCloud's
+// actual audio lives in soundcloudAudio; Spotify remains an external player.
+import { createDecorativeVisualizer } from "./decorativeVisualizer.js";
 
 export const bridge = {
   media: null,
-  quiet: 0, // while > 0, Webamp state changes come from Spotify and must not echo back
+  quiet: 0, // provider state updates must not echo back as user commands
+  onCommandError: null,
 };
+
+export async function sendCommand(command, arg) {
+  try {
+    const result = await window.nostalgify.command(command, arg);
+    if (result?.error) bridge.onCommandError?.(result.error);
+    return result;
+  } catch {
+    const error = "Playback command failed. Try again.";
+    bridge.onCommandError?.(error);
+    return { error };
+  }
+}
 
 export function quietly(fn) {
   bridge.quiet++;
@@ -17,14 +30,14 @@ export function quietly(fn) {
   }
 }
 
-export class SpotifyMedia {
+export class PlaybackMedia {
   constructor() {
     this._handlers = {};
     this._elapsed = 0;
     this._duration = 0;
-    this._volumeReady = false; // ignore Webamp's default volume until we've read Spotify's
+    this._volumeReady = false; // ignore Webamp's default volume until the first state update
     this.lastUserVolumeAt = 0;
-    this._vis = createFakeVis();
+    this._visualizer = createDecorativeVisualizer();
     bridge.media = this;
   }
 
@@ -41,8 +54,8 @@ export class SpotifyMedia {
     this._duration = duration;
     this.emit("timeupdate");
   }
-  setVisPlaying(on) {
-    this._vis.setPlaying(on);
+  setVisualizerPlaying(on) {
+    this._visualizer.setPlaying(on);
   }
   markVolumeReady() {
     this._volumeReady = true;
@@ -62,19 +75,17 @@ export class SpotifyMedia {
   }
 
   async play() {
-    this._vis.setPlaying(true);
-    if (!bridge.quiet) window.nostalgify.command("play");
+    if (!bridge.quiet) await sendCommand("play");
   }
   pause() {
-    this._vis.setPlaying(false);
-    if (!bridge.quiet) window.nostalgify.command("pause");
+    this._visualizer.setPlaying(false);
+    if (!bridge.quiet) void sendCommand("pause");
   }
   stop() {
-    // Spotify has no "stop", so pause and rewind like Winamp does.
-    this._vis.setPlaying(false);
+    // The coordinator pauses and rewinds only the source this Stop belongs to.
+    this._visualizer.setPlaying(false);
     if (!bridge.quiet) {
-      window.nostalgify.command("pause");
-      window.nostalgify.command("seek", 0);
+      void sendCommand("stop");
       this.setTiming(0, this._duration);
     }
   }
@@ -83,24 +94,24 @@ export class SpotifyMedia {
   }
   seekToTime(seconds) {
     this.setTiming(seconds, this._duration);
-    if (!bridge.quiet) window.nostalgify.command("seek", seconds);
+    if (!bridge.quiet) void sendCommand("seek", seconds);
   }
   setVolume(volume) {
     if (!this._volumeReady || bridge.quiet) return;
     this.lastUserVolumeAt = performance.now();
-    window.nostalgify.command("volume", volume);
+    void sendCommand("volume", volume);
   }
 
-  // Track changes always originate from Spotify, so loading just tells Webamp
+  // Track changes originate from the provider, so loading just tells Webamp
   // the "file" is ready. Duration was set beforehand by the sync loop.
   async loadFromUrl(url, autoPlay) {
-    // Shelf entries aren't songs. Playing one is handled by the shelf.
+    // Shelf entries identify saved music links; playback is started by the shelf.
     if (String(url).startsWith("shelf:")) return;
     this.emit("fileLoaded");
     if (autoPlay) this.emit("playing");
   }
 
-  // Balance, preamp and EQ can't affect Spotify's audio. They stay cosmetic.
+  // Balance, preamp and EQ stay cosmetic for both providers.
   setBalance() {}
   setPreamp() {}
   setEqBand() {}
@@ -108,7 +119,7 @@ export class SpotifyMedia {
   enableEq() {}
 
   getAnalyser() {
-    return this._vis.analyser;
+    return this._visualizer.analyser;
   }
   dispose() {}
 }

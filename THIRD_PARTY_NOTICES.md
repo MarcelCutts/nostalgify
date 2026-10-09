@@ -33,6 +33,15 @@ SOFTWARE.
 Webamp bundles its own dependencies, including JSZip and music-metadata, under their own licenses.
 See the Webamp repository for details.
 
+### hls.js
+
+SoundCloud HLS playback uses [hls.js](https://github.com/video-dev/hls.js),
+version 1.7.3, under the Apache License, Version 2.0. Copyright (c) 2017
+Dailymotion; portions derived from video.js are copyright (c) 2013–2015
+Brightcove. The upstream notices and full license are in
+`licenses/hls.js.txt`, also included as `LICENSE.hls.js.txt` in the packaged
+app's `Contents/Resources` directory.
+
 ### Electron
 
 The app runs on [Electron](https://www.electronjs.org/), MIT License, which includes Chromium and other
@@ -56,8 +65,11 @@ open an issue and it will be taken down.
 
 ## Trademarks
 
-Winamp is a trademark of its owner. Spotify is a trademark of Spotify AB. Digimon is a trademark of its
-owners. Nostalgify isn't affiliated with or endorsed by any of them.
+Winamp is a trademark of its owner. Spotify is a trademark of Spotify AB. SoundCloud
+and its logo belong to SoundCloud. Digimon is a trademark of its owners. Nostalgify
+isn't affiliated with or endorsed by any of them. The SoundCloud logo is supplied
+by its official Media Kit; its source and usage terms are documented in
+`src/renderer/assets/README.md`.
 
 ## Demo song
 

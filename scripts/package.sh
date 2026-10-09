@@ -19,6 +19,8 @@ npx electron-packager . Nostalgify \
   --icon=build/icon.icns --extend-info=build/extra.plist \
   --ignore='^/src/renderer/.*\.js$' \
   --ignore='^/(skins|scripts|build|out|\.github)(/|$)' \
+  --ignore='^/tests(/|$)' \
+  --ignore='^/\.env(\..*)?$' \
   --ignore='^/[^/]+\.md$' --ignore='^/LICENSE$' --ignore='^/\.gitignore$' \
   --ignore='^/node_modules/\.package-lock\.json$'
 
@@ -29,6 +31,7 @@ cp "$OUTDIR/LICENSE" "$APP/Contents/Resources/LICENSE.electron.txt"
 cp "$OUTDIR/LICENSES.chromium.html" "$APP/Contents/Resources/"
 cp LICENSE "$APP/Contents/Resources/LICENSE.nostalgify.txt"
 cp THIRD_PARTY_NOTICES.md "$APP/Contents/Resources/"
+cp licenses/hls.js.txt "$APP/Contents/Resources/LICENSE.hls.js.txt"
 # Ad-hoc signature. Not notarized, so first launch needs right-click > Open.
 codesign --force --deep --sign - "$APP"
 
