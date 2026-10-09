@@ -103,6 +103,19 @@ test("timeout releases the command queue, permits reconnect, and ignores a late 
   assert.equal(f.host.getCachedState().provider, "local");
 });
 
+test("native commands have a separate budget while ordinary state reads remain bounded", async t => {
+  const f = fixture({}, { timeoutMs: 5, commandTimeoutMs: 80 });
+  t.after(() => f.host.dispose()); await f.host.ready;
+  f.plugin.command = async () => {
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return { state: local };
+  };
+  await f.host.command("playShelf", local.track.id);
+  assert.equal(f.host.getCachedState().provider, "local");
+  f.plugin.getState = () => new Promise(() => {});
+  await assert.rejects(f.host.getState(), { code: "timeout" });
+});
+
 test("known native errors are actionable while unknown details and tokens stay redacted", async t => {
   const f = fixture({ command: async () => { throw Object.assign(new Error("secret_token=do-not-leak"), { code: "spotify_not_installed" }); } });
   t.after(() => f.host.dispose()); await f.host.ready;

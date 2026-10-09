@@ -32,7 +32,13 @@ const ERROR_MESSAGES = {
   native_error: "The player could not complete that action. Check the connection and try again.",
 };
 
-export function createNativeHost(plugin, { timeoutMs = 12000, debug = false, onError = () => {} } = {}) {
+export function createNativeHost(plugin, {
+  timeoutMs = 12000,
+  // Spotify can reconnect and await multiple bounded native requests for one command.
+  commandTimeoutMs = timeoutMs === 12000 ? 45000 : timeoutMs,
+  debug = false,
+  onError = () => {},
+} = {}) {
   let state = normalizeSnapshot({ message: "Connect Spotify or import music from Files" });
   let eventVersion = 0;
   let listener;
@@ -117,9 +123,9 @@ export function createNativeHost(plugin, { timeoutMs = 12000, debug = false, onE
     if (command === "playShelf") {
       const provider = LOCAL_URI.test(String(arg)) ? "local" : SPOTIFY_URI.test(String(arg)) ? "spotify" : null;
       if (!provider) throw failure("invalid_link", "Use a Spotify link or an imported audio file.", requestId());
-      if (state.provider !== provider) accept((await invoke("command", { command: "provider", arg: provider, requestId: requestId() }))?.state);
+      if (state.provider !== provider) accept((await invoke("command", { command: "provider", arg: provider, requestId: requestId() }, commandTimeoutMs))?.state);
     }
-    const result = await invoke("command", { command, ...(arg === undefined ? {} : { arg }), requestId: requestId() });
+    const result = await invoke("command", { command, ...(arg === undefined ? {} : { arg }), requestId: requestId() }, commandTimeoutMs);
     if (result?.state) accept(result.state);
     return result;
   }
