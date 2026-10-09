@@ -66,8 +66,12 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   }
 
   function storageFailure(error) {
-    return authError(error?.code === 'storage_unavailable' ? 'storage_unavailable' : 'storage_error',
-      'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain, restart Nostalgify, and try again.');
+    if (error?.code === 'storage_unavailable') {
+      return authError('storage_unavailable',
+        'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain, restart Nostalgify, and try again.');
+    }
+    return authError('storage_error',
+      'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain and restart Nostalgify. If the problem persists, use Playback > Forget Local SoundCloud Sign-in, then connect again.');
   }
 
   function loadTokens() {
