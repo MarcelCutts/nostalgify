@@ -6,9 +6,8 @@ through the loaded SoundCloud playlist; Shuffle changes that order, and Repeat
 restarts the playlist or track. The shelf itself is a collection of saved links,
 not a queue spanning Spotify and SoundCloud. Liked Songs always opens Spotify.
 
-This integration currently uses credentials supplied by the developer running
-it. A successful local setup does not establish a credential model for public
-distribution; see the [release gates](soundcloud-research.md#remaining-release-gates).
+This fork is intended for personal use on your own device, using your own
+SoundCloud application credentials. The setup below covers that local workflow.
 
 ## Application credentials
 
@@ -65,9 +64,8 @@ search, private tracks or account-library browsing to Nostalgify.
 SoundCloud's [authentication guide](https://developers.soundcloud.com/docs/api/guide#authentication)
 treats clients as confidential. This app's client-ID-only sign-in path therefore
 requires an explicit public-client exception for your application. Do not assume
-that PKCE or another app's historical approval supplies that exception. A public
-release otherwise needs an architecture that keeps the shared secret outside the
-Electron bundle, such as a trusted backend.
+that PKCE or another app's historical approval supplies that exception. Use the
+application-credentials workflow above unless your application has this exception.
 
 For an approved public client, register this exact callback with SoundCloud:
 
@@ -91,27 +89,34 @@ For Finder launches, non-secret configuration can instead live in
 ```
 
 The file never stores a client secret. Environment values override file values.
-A callback override must use `http://127.0.0.1` with an explicit port, have no query
-or fragment, and match the registered callback. `NOSTALGIFY_USER_DATA` changes
-the directory used for this configuration and saved state.
+Nostalgify supports only a loopback callback: an override must use
+`http://127.0.0.1` with an explicit port, have no query or fragment, and match the
+registered callback. This is an app-specific policy, not a SoundCloud-wide
+requirement; Nostalgify does not implement custom-scheme callbacks.
+`NOSTALGIFY_USER_DATA` changes the directory used for this configuration and saved state.
 
 User access and refresh tokens remain in the main process. Electron's
 [asynchronous safeStorage APIs](https://www.electronjs.org/docs/latest/api/safe-storage)
 encrypt them using macOS Keychain before an atomic write with private file
-permissions. Keychain prompts leave the app responsive. An empty profile does
+permissions. Electron documents these APIs as non-blocking; responsiveness during
+a real Keychain prompt has not been verified here. An empty profile does
 not access Keychain to look for a missing token file. Plaintext storage and
 hardcoded-key fallbacks are rejected.
 
 Reads, writes and encryption-key rotation are serialized; a failed operation
 preserves the existing file for a retry. Refreshes are also serialized because
-refresh tokens are single-use. If Keychain access is denied or unavailable,
-unlock it and restart Nostalgify before trying again. Electron caches the
-initialized key provider, so reconnecting alone may not restore access.
+refresh tokens are single-use. The locally packaged app is ad-hoc signed, so
+macOS may ask for Keychain permission again after a rebuild. If access was denied,
+restart Nostalgify and allow the expected app when prompted. If the keychain is
+locked, unlock it before retrying. A denied permission is not the same as a locked
+keychain. If the saved sign-in remains unreadable after restoring access and
+restarting, **Forget Local SoundCloud Sign-in** lets you sign in afresh.
 
 **Forget Local SoundCloud Sign-in** removes the local encrypted sign-in. It does
 not revoke authorization on SoundCloud's servers. Application tokens do not use
-the user-token file or require Keychain persistence. Account sign-in and Keychain
-persistence need their own validation; application-token playback cannot verify them.
+the user-token file or require Keychain persistence. Account sign-in, persistence
+and prompt recovery need their own [macOS checks](testing.md#packaged-macos-checks);
+application-token playback cannot verify them.
 
 ## Playback and troubleshooting
 
@@ -159,7 +164,11 @@ token requests use `net.fetch` with redirects rejected. This avoids Electron's
 For an environment that already has a configured HTTPS proxy and CA trust,
 `NODE_USE_ENV_PROXY=1 npm start` opts into Electron's bundled Node fetch for
 SoundCloud requests. It is an optional proxy configuration, not a normal macOS
-setup step. Neither route disables TLS certificate verification.
+setup step. For the standalone API-check script, this environment variable
+[requires Node 24 or Node 22.21+](https://nodejs.org/api/cli.html#node_use_env_proxy1);
+the project's minimum Node 22.12 does not support it. Electron's bundled Node
+supports this route independently of the shell's Node version. Neither route
+disables TLS certificate verification.
 
 ## Implementation
 
@@ -175,4 +184,4 @@ entries without being removed.
 
 See [Testing](testing.md) for repeatable commands and recorded validation, and
 [SoundCloud research](soundcloud-research.md) for API decisions, attribution,
-retention and distribution requirements.
+retention and possible future distribution considerations.

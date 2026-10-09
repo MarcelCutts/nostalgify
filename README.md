@@ -28,7 +28,7 @@ Spotify plays through its desktop app in the background; SoundCloud audio plays 
 - **Real skins.** Load classic Winamp 2 `.wsz` skins and switch between them from the Skins menu.
   New files appear as you add them; Cmd+R picks a random skin.
 - **Two music sources.** Control Spotify through macOS scripting or play public SoundCloud tracks and playlists
-  through SoundCloud's API. Switching sources pauses the previous one.
+  through SoundCloud's API. Switching to SoundCloud pauses Spotify; switching to Spotify stops SoundCloud playback.
 - **Transport controls.** Play, pause, stop, previous, next, seek, volume, shuffle and repeat follow the selected source.
 - **A shelf for saved links.** Save Spotify tracks, playlists, albums and artists alongside public SoundCloud tracks
   and playlists. Double-click an entry to play it. Spotify's Liked Songs shortcut is added on launch.
@@ -38,7 +38,7 @@ Spotify plays through its desktop app in the background; SoundCloud audio plays 
 ## Install
 
 This checkout is a fork of [0xchaosbi/nostalgify](https://github.com/0xchaosbi/nostalgify).
-Build it locally to include the SoundCloud integration.
+It is a personal, locally built novelty player. Build it locally to include the SoundCloud integration.
 
 You need macOS, [Git](https://git-scm.com/) and [Node.js](https://nodejs.org/) 22.12 or newer.
 Node 24 LTS is recommended. For Spotify playback, install the
@@ -64,7 +64,8 @@ npm run install-app
 
 This puts Nostalgify in your Applications folder. SoundCloud application credentials supplied in a shell are
 not inherited when launching from Finder; see [launching with credentials](docs/soundcloud.md#application-credentials).
-The local package uses an ad-hoc signature and is not notarized.
+The local package uses an ad-hoc signature and is not notarized. If you use optional SoundCloud account
+sign-in, a rebuilt app may prompt for Keychain access again; see [sign-in and recovery](docs/soundcloud.md#optional-account-sign-in).
 
 To update from the same folder:
 
@@ -137,8 +138,7 @@ A few things to know:
   SoundCloud hides those labels.
 - **The shelf contains saved links.** It does not expand playlists into tracks or provide a queue spanning both services.
 - **SoundCloud playback depends on API access.** Public links can still be blocked or limited to previews by the
-  service. Search, private content and account-library browsing are not implemented. Distribution of the integration
-  needs the [credential and release review](docs/soundcloud-research.md#remaining-release-gates).
+  service. Search, private content and account-library browsing are not implemented.
 - **macOS only.** Spotify control uses AppleScript. Spotify may briefly appear when it starts before Nostalgify hides it.
 
 If something goes wrong, Nostalgify writes a log to `~/Library/Application Support/Nostalgify/nostalgify.log`.
@@ -159,7 +159,7 @@ npm run package -- arm64  # package for Apple Silicon; use x64 for Intel
 Development skins live in the repository's `skins/` folder. See [Testing](docs/testing.md) for isolated profiles,
 Electron diagnostics, live SoundCloud checks, real Spotify checks and package verification.
 [SoundCloud setup](docs/soundcloud.md) covers credentials; [SoundCloud research](docs/soundcloud-research.md)
-records API decisions and remaining release gates.
+records API decisions, personal-use scope and remaining checks.
 
 ### Project layout
 
@@ -178,7 +178,7 @@ skins/                Local development skins (not committed)
 
 [Webamp](https://github.com/captbaritone/webamp) implements Winamp 2 in the browser, including its skin format.
 Nostalgify runs it in Electron. A main-process playback coordinator routes controls to the selected source,
-pauses the previous source when switching, and updates the display from playback state.
+pauses Spotify before SoundCloud starts, stops SoundCloud before Spotify starts, and updates the display from playback state.
 
 Spotify plays in its desktop app. AppleScript sends commands and reads its state once a second.
 SoundCloud plays through an Audio element and hls.js inside Nostalgify; its authentication and media requests
@@ -190,9 +190,10 @@ The original website and demo live on the upstream repository's `gh-pages` branc
 integration does not change that website. See the [upstream repository](https://github.com/0xchaosbi/nostalgify)
 for its source and contribution instructions.
 
-### Releasing
+### Optional release tooling
 
-Push a version tag and GitHub Actions builds both Mac downloads and opens a draft release:
+The inherited GitHub Actions workflow builds both Mac downloads and opens a draft release when a version
+tag is pushed. Personal local builds do not need this step:
 
 ```sh
 npm version patch    # or minor or major. Updates package.json and creates a tag

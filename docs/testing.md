@@ -85,9 +85,11 @@ node --env-file=.env scripts/check-soundcloud.js --refresh https://soundcloud.co
 ```
 
 If your environment requires its configured HTTPS proxy, prefix the command
-with `NODE_USE_ENV_PROXY=1`. Normal desktop playback uses Electron's native
-network stack; a successful command-line check does not verify that route or
-audio decoding.
+with `NODE_USE_ENV_PROXY=1`. The standalone Node command requires Node 24 or
+Node 22.21+ for this variable; it is ignored by the project's minimum Node 22.12.
+Normal desktop playback uses Electron's native network stack; a successful
+command-line check does not verify that route or audio decoding. The optional
+[Electron proxy route](soundcloud.md#network-behavior) uses its bundled Node.
 
 ## Live SoundCloud with mock Spotify
 
@@ -192,6 +194,14 @@ Check attribution in full and compact views and with Webamp Double Size. Inspect
 the archive for accidental credential files before sharing it. A valid ad-hoc
 signature is not Apple notarization.
 
+If you use the optional account sign-in flow, check saved sign-in across restarts
+with that configuration; application-token playback does not exercise Keychain
+persistence. After rebuilding the ad-hoc package, macOS may request Keychain
+access again. Check that the app remains responsive while a prompt is open and
+can resume after granting access. In an isolated profile, also check recovery
+after denying a prompt: restart, allow the expected app if prompted, and retry
+before discarding the saved sign-in. A locked keychain needs unlocking separately.
+
 ## Recorded validation
 
 The macOS validation recorded on 9 October 2026 for commit `c69cd44` passed the
@@ -203,6 +213,7 @@ assertions and manual SoundCloud playback/shelf checks. Its archive was checked
 for credential files and the supplied credential values; neither was included.
 
 These are results for that revision, not an assertion that every later checkout
-has been tested. Physical speaker output and user OAuth/Keychain persistence
-were not verified. Restricted previews, long pauses and actual signed-media
-expiry still need live coverage. See the [release gates](soundcloud-research.md#remaining-release-gates).
+has been tested. Physical speaker output, user OAuth/Keychain persistence and
+real Keychain prompt responsiveness/recovery were not verified. Restricted
+previews, long pauses and actual signed-media expiry still need live coverage.
+See [remaining checks](soundcloud-research.md#personal-use-and-remaining-checks).

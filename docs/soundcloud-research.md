@@ -10,7 +10,8 @@ use [Testing](testing.md).
 
 Nostalgify retains its Webamp skin and Spotify AppleScript adapter. A main-process
 playback coordinator routes controls and native menus to the selected provider,
-pauses the previous source and rejects stale asynchronous results. A `provider`
+pauses Spotify before SoundCloud starts, stops SoundCloud before Spotify starts,
+and rejects stale asynchronous results. A `provider`
 value identifies Spotify or SoundCloud in code. Shelf entries are saved links;
 Next/Previous navigate the active source's playback, not a queue of shelf entries.
 
@@ -70,27 +71,35 @@ to use another application's credentials. No third-party SDK was added.
 | [Official Python SDK](https://github.com/soundcloud/soundcloud-python/tree/4f7050182ee37e7c503253ffa79a09a2b55742cf) | Historical wrapper still documenting client-ID-only reads, password grants and the old token endpoint. | Treat those authentication examples as legacy. |
 | [Guggenheim integration report](https://github.com/soundcloud/api/issues/523#issuecomment-4077375263) and [Shotgun preview report](https://github.com/soundcloud/api/issues/478#issuecomment-3543331914) | Both document breakage around the additional authenticated stream hop. | Test the complete API-to-CDN-to-decoder chain, not only a successful metadata response. |
 
-## Remaining release gates
+## Personal use and remaining checks
 
-1. **Playback coverage:** extend the recorded macOS checks to restricted previews,
-   long pauses, background playback and actual signed-stream expiry. Quota and
-   recovery paths have deterministic tests; live quotas were not deliberately
-   exhausted. Physical audio and user OAuth/Keychain persistence require separate
-   validation. Existing native and packaged results are in
-   [Recorded validation](testing.md#recorded-validation).
-2. **Credential distribution:** keep shared secrets out of Electron packages.
-   Confirm a public-client exception for this application or design a trusted
-   backend and its operation. Developer-supplied credentials only solve local setup.
-3. **Product permission:** the [API terms](https://developers.soundcloud.com/docs/api/terms-of-use)
-   restrict playback combining SoundCloud with other services unless explicitly
-   licensed. Establish the applicable permission before distributing this integration.
-4. **Attribution and retention:** verify uploader credit, a link to the work and
-   the current [7-bar Cloudmark](https://developers.soundcloud.com/docs/api/buttons-logos)
-   across supported skins and sizes. The API terms limit persistence beyond
-   necessary session caching and cover metadata as well as audio. Review saved
-   shelf titles and artist names; consider user-created labels with service
-   metadata loaded per session. Confirm the application's actual quota and
-   retention behavior. No offline audio feature is implemented.
+This fork is a personal novelty player built locally for its owner's devices,
+using the owner's own application credentials. A public service or distributed
+SoundCloud product is outside the current scope.
+
+Remaining playback checks include restricted previews, long pauses, background
+playback and actual signed-stream expiry. Quota and recovery paths have
+deterministic tests; live quotas were not deliberately exhausted. Physical audio,
+user OAuth/Keychain persistence and real Keychain prompt recovery remain unverified.
+Check uploader credit, the track link and the current
+[7-bar Cloudmark](https://developers.soundcloud.com/docs/api/buttons-logos) when
+trying additional skins and sizes. Existing native and packaged results are in
+[Recorded validation](testing.md#recorded-validation).
+
+Personal use is not a blanket exemption from the
+[API terms](https://developers.soundcloud.com/docs/api/terms-of-use). They restrict
+playback experiences aggregating SoundCloud with other services, except where
+explicitly licensed, and limit retention of API content, including metadata,
+to necessary session caching. Their application to this source-switching UI and
+saved-link shelf remains an unresolved interpretation. The shelf currently saves
+service titles, artist/uploader names, URNs and links between launches; no offline
+audio is stored. User-created labels are a possible future alternative to
+persisting service metadata, not an implemented feature or an established exemption.
+
+If the scope later expands to distribution, revisit these terms and metadata
+choices alongside a credential design that does not ship a shared client secret.
+An explicitly approved public client or a trusted backend would be separate
+design work; the current personal setup does not establish either.
 
 Search, account-library browsing, private content, likes/follows, a queue spanning
 sources, other desktop platforms and real audio EQ/visualization are outside the
