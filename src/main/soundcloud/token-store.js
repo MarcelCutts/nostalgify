@@ -7,7 +7,7 @@ function storageError(code, message) {
   return Object.assign(new Error(message), { code });
 }
 
-/** Tokens are encrypted by the OS keychain; never fall back to plaintext storage. */
+/** Encrypt account tokens with OS-protected keys through Electron safeStorage. */
 function createTokenStore({ filePath, safeStorage, platform = process.platform }) {
   if (typeof filePath !== 'string' || !path.isAbsolute(filePath)) {
     throw new TypeError('SoundCloud token storage requires an absolute file path.');
@@ -28,7 +28,7 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
         throw new Error('unavailable');
       }
     } catch {
-      throw storageError('storage_unavailable', 'Secure credential storage is unavailable. Enable your system keychain before connecting SoundCloud.');
+      throw storageError('storage_unavailable', 'Secure storage is unavailable. Unlock your system keychain, restart Nostalgify, and try again.');
     }
   }
 
@@ -42,7 +42,7 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
       // Electron's async Linux encryptor can select the hardcoded-key v10
       // fallback independently of getSelectedStorageBackend(). Never persist it.
       if (platform === 'linux' && encrypted.subarray(0, 3).toString() === 'v10') {
-        throw storageError('storage_unavailable', 'Secure credential storage is unavailable. Enable your system keychain before connecting SoundCloud.');
+        throw storageError('storage_unavailable', 'Secure storage is unavailable. Unlock your system keychain, restart Nostalgify, and try again.');
       }
       await fs.mkdir(path.dirname(filePath), { recursive: true, mode: 0o700 });
       handle = await fs.open(temporaryPath, 'wx', 0o600);
@@ -53,7 +53,7 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
       await fs.rename(temporaryPath, filePath);
     } catch (error) {
       if (error.code === 'storage_unavailable') throw error;
-      throw storageError('storage_error', 'SoundCloud credentials could not be saved securely. Check your system keychain and reconnect.');
+      throw storageError('storage_error', 'SoundCloud sign-in tokens could not be saved securely. Unlock your system keychain, restart Nostalgify, and try again.');
     } finally {
       await handle?.close().catch(() => {});
       await fs.rm(temporaryPath, { force: true }).catch(() => {});
@@ -85,7 +85,7 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
       } catch (error) {
         if (error.code === 'ENOENT') return null;
         if (error.code === 'storage_unavailable') throw error;
-        throw storageError('storage_error', 'SoundCloud credentials could not be read securely. Disconnect SoundCloud and connect again.');
+        throw storageError('storage_error', 'Saved SoundCloud sign-in could not be read securely. Unlock your system keychain and restart Nostalgify. If the problem persists, use Playback > Forget Local SoundCloud Sign-in, then connect again.');
       } finally {
         await handle?.close();
       }
@@ -97,7 +97,7 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
       try {
         await fs.rm(filePath, { force: true });
       } catch {
-        throw storageError('storage_error', 'Saved SoundCloud credentials could not be removed. Check the application data directory permissions.');
+        throw storageError('storage_error', 'Saved SoundCloud sign-in could not be removed. Check the application data directory permissions.');
       }
     }),
   };

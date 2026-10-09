@@ -67,7 +67,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
 
   function storageFailure(error) {
     return authError(error?.code === 'storage_unavailable' ? 'storage_unavailable' : 'storage_error',
-      'SoundCloud credentials could not be accessed securely. Check your system keychain and reconnect.');
+      'Saved SoundCloud sign-in could not be accessed securely. Unlock your system keychain, restart Nostalgify, and try again.');
   }
 
   function loadTokens() {
