@@ -44,6 +44,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   let reconnectPromise = null;
   let authQueue = Promise.resolve();
   let storageQueue = Promise.resolve();
+  let tokenCooldownUntil = 0;
   const operations = new Set();
   const cancelled = () => authError('auth_cancelled', 'SoundCloud connection was cancelled.');
   const required = () => authError('auth_required', 'Choose Playback > Connect SoundCloud to play SoundCloud tracks.');
@@ -63,6 +64,28 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   function requireConfigured() {
     if (disposed) throw cancelled();
     if (!configured) throw authError('auth_configuration', 'Configure your SoundCloud application credentials before connecting.');
+  }
+
+  function rateLimited() {
+    return Object.assign(authError('rate_limited',
+      'SoundCloud is temporarily limiting authentication requests. Please try again later.'),
+    { status: 429, retryAfterMs: Math.max(1, tokenCooldownUntil - now()) });
+  }
+
+  function checkTokenCooldown() {
+    if (tokenCooldownUntil > now()) throw rateLimited();
+  }
+
+  function recordTokenCooldown(response) {
+    const currentTime = now();
+    const retryAfter = response.headers?.get('retry-after')?.trim();
+    const reset = retryAfter && /^\d+(?:\.\d+)?$/.test(retryAfter)
+      ? currentTime + Number(retryAfter) * 1000 : Date.parse(retryAfter);
+    // Honor server-directed waits without shortening an hour/day quota. Missing,
+    // invalid or already elapsed dates get a bounded fallback, never a retry loop.
+    const resetTime = Number.isFinite(reset) && reset > currentTime && reset <= 8640000000000000
+      ? reset : currentTime + 60000;
+    tokenCooldownUntil = Math.max(tokenCooldownUntil, resetTime);
   }
 
   function storageFailure(error) {
@@ -138,6 +161,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     let data;
     try {
       op.check();
+      checkTokenCooldown();
       const headers = { accept: 'application/json', 'content-type': 'application/x-www-form-urlencoded' };
       const form = { ...parameters };
       if (parameters.grant_type === 'client_credentials') {
@@ -155,6 +179,11 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
         body: new URLSearchParams(form).toString(),
       }));
       op.check();
+      if (response.status === 429) {
+        recordTokenCooldown(response);
+        try { await op.wait(response.body?.cancel()); } catch { op.check(); }
+        throw rateLimited();
+      }
       if (!response.ok) {
         throw authError('auth_failed', 'SoundCloud authentication failed. Check the application credentials and authorization settings, then connect again.');
       }
@@ -162,6 +191,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
       op.check();
     } catch (error) {
       op.check();
+      if (error?.code === 'rate_limited') throw rateLimited();
       if (error?.code === 'auth_failed') throw error;
       throw authError('auth_failed', 'Could not connect to SoundCloud. Check your connection and try again.');
     }
@@ -275,6 +305,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     const pending = serialized(async (epoch) => {
       const op = operation(epoch);
       try {
+        checkTokenCooldown();
         await op.wait(loadTokens());
         op.check();
         const verifier = crypto.randomBytes(32).toString('base64url');
@@ -307,12 +338,13 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     return serialized(async (epoch) => {
       const op = operation(epoch);
       try {
-        // Bound this caller's wait even when a shared Keychain read is still
+        // Bound this caller's wait even when a shared storage read is still
         // pending. The storage operation itself finishes independently.
         await op.wait(loadTokens());
         op.check();
         if (!tokens && !applicationCredentials) throw required();
         if (tokens?.expiresAt > now() + 60000) return tokens.accessToken;
+        checkTokenCooldown();
         const previous = tokens;
         // A refresh token is single-use. Remove the saved token before sending
         // it, so an ambiguous network failure cannot cause its reuse.
@@ -341,6 +373,7 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
     const pending = serialized(async (epoch) => {
       const op = operation(epoch);
       try {
+        checkTokenCooldown();
         await op.wait(loadTokens());
         op.check();
         // An API-rejected token may still have a future expiry. Explicit
