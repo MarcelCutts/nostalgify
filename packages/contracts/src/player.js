@@ -1,7 +1,7 @@
 // Native and web player values use seconds and a 0–100 volume scale.
 export const CAPABILITIES = ["canSeek", "canSetVolume", "canSkipNext", "canSkipPrevious", "canShuffle", "canRepeat"];
 export const LOCAL_URI = /^local:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-export const SPOTIFY_URI = /^spotify:(track|album|playlist|artist):[A-Za-z0-9]+$/;
+export const SPOTIFY_URI = /^spotify:(track|album|playlist|artist|episode):[A-Za-z0-9]{22}$/;
 const finite = (value, fallback = 0) => Number.isFinite(value) ? Math.max(0, value) : fallback;
 const text = (value) => typeof value === "string" ? value : "";
 
@@ -31,7 +31,7 @@ export function spotifyLinks(input) {
       try {
         const url = new URL(token);
         if (url.protocol !== "https:" || url.hostname !== "open.spotify.com" || url.username || url.password || url.port) continue;
-        const match = url.pathname.match(/^\/(?:intl-[a-z-]+\/)?(track|album|playlist|artist)\/([A-Za-z0-9]+)\/?$/);
+        const match = url.pathname.match(/^\/(?:intl-[a-z-]+\/)?(track|album|playlist|artist|episode)\/([A-Za-z0-9]{22})\/?$/);
         if (!match) continue;
         uri = `spotify:${match[1]}:${match[2]}`;
       } catch { continue; }

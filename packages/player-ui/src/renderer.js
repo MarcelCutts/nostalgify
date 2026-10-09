@@ -408,7 +408,8 @@ export async function mountPlayer(host, { target = document.getElementById("app"
   }, TICK_MS);
 
   await shelf.load();
-  await webamp.renderWhenReady(target);
+  if (host.platform === "ios") await webamp.renderInto(target);
+  else await webamp.renderWhenReady(target);
   manageLayout(webamp, host);
   if (host.platform !== "ios") addResizeGrips(host);
   poll();

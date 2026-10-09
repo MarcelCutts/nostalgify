@@ -45,12 +45,17 @@ final class NativeDiagnostics {
     func exportURL(webEvents: [[String: Any]] = []) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("Nostalgify-diagnostics.json")
         var value = snapshot()
+        let webTime = ISO8601DateFormatter()
+        webTime.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         value["webEvents"] = webEvents.suffix(150).map { input -> [String: Any] in
             let event = input["event"] as? String ?? "redacted"
             var output: [String: Any] = ["event": Self.webEvents.contains(event) ? event : "redacted"]
             if let id = (input["requestId"] as? String).flatMap(UUID.init(uuidString:)) { output["requestId"] = id.uuidString }
             if let duration = input["durationMs"] as? Double, duration.isFinite { output["durationMs"] = max(0, duration) }
-            if let time = input["time"] as? String, ISO8601DateFormatter().date(from: time) != nil { output["time"] = time }
+            if let time = input["time"] as? String,
+               let date = webTime.date(from: time) ?? ISO8601DateFormatter().date(from: time) {
+                output["time"] = webTime.string(from: date)
+            }
             if let code = input["code"] as? String { output["code"] = Self.webCodes.contains(code) ? code : "redacted" }
             return output
         }
@@ -66,5 +71,9 @@ final class NativeDiagnostics {
         "getDiagnostics", "exportDiagnostics", "failure", "web_error", "listener_unavailable"]
     private static let webCodes: Set<String> = ["timeout", "native_unavailable", "native_error", "unsupported",
         "invalid_link", "skin_storage_unavailable", "skin_preference_failed", "javascript_error",
-        "unhandled_promise", "startup_failed"]
+        "unhandled_promise", "startup_failed", "spotify_configuration", "spotify_redirect", "spotify_not_installed",
+        "spotify_disconnected", "spotify_state_unavailable", "spotify_pause_unconfirmed", "spotify_command_timeout",
+        "spotify_command_failed", "spotify_restricted", "spotify_uri", "spotify_token_storage", "unsupported_command",
+        "unsupported_audio", "import_failed", "not_found", "library_write_failed", "empty_library", "no_track",
+        "audio_session_failed", "queue_boundary", "dialog_busy", "invalid_preferences", "preferences_too_large", "invalid_argument"]
 }

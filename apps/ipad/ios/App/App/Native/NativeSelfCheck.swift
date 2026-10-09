@@ -1,7 +1,8 @@
 import Foundation
+import WebKit
 
 #if DEBUG
-/// Explicit simulator/debug opt-in. No Spotify credentials and no JS involvement.
+/// Explicit simulator/debug opt-in. Account-free native audio and WebView checks.
 @MainActor
 enum NativeSelfCheck {
     static func fixture(at url: URL, seconds: Double = 0.6) throws {
@@ -24,7 +25,65 @@ enum NativeSelfCheck {
         try data.write(to: url, options: .atomic)
     }
 
-    static func run() async {
+    /// Native completion is bounded even if page startup or a JS Promise stalls.
+    @MainActor
+    private final class WebViewProbe {
+        var continuation: CheckedContinuation<Void, Error>?
+        var timeout: Task<Void, Never>?
+
+        func complete(_ result: Result<Any, Error>) {
+            guard let continuation else { return }
+            self.continuation = nil
+            timeout?.cancel()
+            timeout = nil
+            if case .success(let raw) = result, let value = raw as? [String: Any], value["passed"] as? Bool == true {
+                continuation.resume()
+            } else {
+                continuation.resume(throwing: NativeFailure(code: "selfcheck_webview_bridge", message: "The bundled player or native bridge did not become ready."))
+            }
+        }
+    }
+
+    private static func checkWebView(_ provider: @MainActor () -> WKWebView?) async throws {
+        let deadline = ProcessInfo.processInfo.systemUptime + 30
+        while provider() == nil, ProcessInfo.processInfo.systemUptime < deadline {
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        guard let webView = provider() else {
+            throw NativeFailure(code: "selfcheck_webview_bridge", message: "The bundled WebView was unavailable.")
+        }
+        let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        let javascript = """
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          const host = window.nostalgify;
+          const player = document.querySelector('#app #webamp #main-window');
+          if (host && player && window.Capacitor?.getPlatform() === 'ios' && !host.debug) {
+            try {
+              const state = await host.getState();
+              return { passed: ['spotify', 'local'].includes(state.provider) &&
+                ['playing', 'paused', 'stopped'].includes(state.state) &&
+                Number.isSafeInteger(state.sequence) };
+            } catch (_) { return { passed: false }; }
+          }
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        return { passed: false };
+        """
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            let probe = WebViewProbe()
+            probe.continuation = continuation
+            probe.timeout = Task { @MainActor in
+                do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
+                probe.complete(.failure(NativeFailure(code: "selfcheck_webview_timeout", message: "The bundled player did not respond.")))
+            }
+            webView.callAsyncJavaScript(javascript, arguments: ["timeoutMs": remaining * 1000], in: nil, contentWorld: .page) { result in
+                Task { @MainActor in probe.complete(result) }
+            }
+        }
+    }
+
+    static func run(webView: @MainActor () -> WKWebView?) async {
         let diagnostics = NativePlayback.shared.diagnostics
         diagnostics.record("selfcheck.started")
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("native-selfcheck-" + UUID().uuidString, isDirectory: true)
@@ -56,7 +115,8 @@ enum NativeSelfCheck {
             guard reloaded.library.map(\.id) == [a.id, b.id] else {
                 throw NativeFailure(code: "selfcheck_persistence", message: "Library identities did not persist.")
             }
-            result = ["passed": true, "checks": ["import", "distinct-identities", "native-queue", "persistence"],
+            try await checkWebView(webView)
+            result = ["passed": true, "checks": ["import", "distinct-identities", "native-queue", "persistence", "webview-bridge"],
                       "libraryCount": 2, "provider": "local", "state": "stopped"]
             diagnostics.record("selfcheck.passed")
         } catch {

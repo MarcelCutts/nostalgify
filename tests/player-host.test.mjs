@@ -59,3 +59,43 @@ test("native shelf retains imported files, omits unavailable Liked Songs, and pl
   assert.equal(trackOrder.length, 0);
   assert.equal(shelf.isShelfTrack(rows[0].id), false);
 });
+
+test("shelf paste preserves editable controls and still adds global Spotify links", async (t) => {
+  const original = { window: globalThis.window, document: globalThis.document };
+  const listeners = new Map();
+  globalThis.window = { addEventListener() {} };
+  globalThis.document = { addEventListener(name, listener) { listeners.set(name, listener); } };
+  t.after(() => { globalThis.window = original.window; globalThis.document = original.document; });
+  const resolved = [], added = [], trackOrder = [];
+  const host = {
+    resolveLinks: async text => {
+      resolved.push(text);
+      return [{ provider: "spotify", kind: "track", uri: "spotify:track:4uLU6hMCjMI75M1A2tKUQC", title: "Saved track" }];
+    },
+    saveShelf: async () => {},
+  };
+  createShelf({ store: {
+    getState: () => ({ playlist: { trackOrder } }),
+    dispatch(action) {
+      if (action.type === "ADD_TRACK_FROM_URL") { added.push(action); trackOrder.push(action.id); }
+    },
+  } }, { host, quietly: fn => fn(), flash() {}, onPlay() {} });
+  const paste = listeners.get("paste");
+  const clipboardData = { getData: () => "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC" };
+  for (const tagName of ["INPUT", "TEXTAREA", "SELECT"]) {
+    const target = { isContentEditable: false, closest: selector => selector.split(", ").includes(tagName.toLowerCase()) ? target : null };
+    paste({ target, clipboardData, preventDefault() { assert.fail(`Paste was prevented in ${tagName}`); } });
+  }
+  paste({ target: { isContentEditable: true }, clipboardData, preventDefault() { assert.fail("Paste was prevented in contenteditable"); } });
+  paste({ target: {}, composedPath: () => [{ isContentEditable: true }], clipboardData, preventDefault() { assert.fail("Paste was prevented inside an editable shadow root"); } });
+  await new Promise(setImmediate);
+  assert.deepEqual(resolved, []);
+  assert.deepEqual(added, []);
+
+  let prevented = false;
+  paste({ target: {}, clipboardData, preventDefault() { prevented = true; } });
+  await new Promise(setImmediate);
+  assert.equal(prevented, true);
+  assert.deepEqual(resolved, [clipboardData.getData()]);
+  assert.equal(added.length, 1);
+});

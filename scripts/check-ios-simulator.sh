@@ -86,7 +86,7 @@ xcrun simctl install "$NOSTALGIFY_SIMULATOR_ID" "$NOSTALGIFY_BUILT_APP"
 xcrun simctl launch --terminate-running-process "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad --native-local-selfcheck \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/launch.log"
 NOSTALGIFY_APP_DATA=$(xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data)
-for NOSTALGIFY_ATTEMPT in $(seq 1 30); do
+for NOSTALGIFY_ATTEMPT in $(seq 1 60); do
   if [ -f "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" ]; then break; fi
   sleep 1
 done
@@ -94,12 +94,12 @@ cp "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" "$NOSTALGIFY_IOS_RESUL
 python3 - "$NOSTALGIFY_IOS_RESULTS/native-selfcheck.json" <<'PY'
 import json, sys
 result = json.load(open(sys.argv[1]))
-required = {'import', 'distinct-identities', 'native-queue', 'persistence'}
+required = {'import', 'distinct-identities', 'native-queue', 'persistence', 'webview-bridge'}
 if result.get('passed') is not True or not required.issubset(result.get('checks', [])):
     raise SystemExit('Native local-file self-check failed; inspect native-selfcheck.json.')
 if result.get('libraryCount') != 2 or result.get('provider') != 'local' or result.get('state') != 'stopped':
     raise SystemExit('Native self-check produced an unexpected final library/playback state.')
-print('Native import, unique identities, queue advancement, and persistence self-check passed.')
+print('Native import, queue advancement, persistence, mounted UI, and Capacitor bridge self-check passed.')
 PY
 xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/launch.png"
 echo 'iOS build, native tests, local playback self-check, and launch passed. Physical Spotify/audio tests remain required.'

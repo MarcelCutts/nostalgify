@@ -55,9 +55,18 @@ struct LocalQueue {
     mutating func reset(_ identifiers: [String], startingAt identifier: String?, shuffled: Bool) {
         var unique: [String] = []
         for id in identifiers where !unique.contains(id) { unique.append(id) }
-        if shuffled { unique.shuffle() }
+        if shuffled {
+            // The selected track starts the shuffled queue. Starting at its
+            // random position would omit preceding tracks when repeat is off.
+            let selected = identifier.flatMap { unique.contains($0) ? $0 : nil }
+            if let selected { unique.removeAll { $0 == selected } }
+            unique.shuffle()
+            if let selected { unique.insert(selected, at: 0) }
+            index = 0
+        } else {
+            index = identifier.flatMap { unique.firstIndex(of: $0) } ?? 0
+        }
         ids = unique
-        index = identifier.flatMap { unique.firstIndex(of: $0) } ?? 0
     }
 
     @discardableResult

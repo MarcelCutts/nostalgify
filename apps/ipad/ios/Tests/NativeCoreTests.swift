@@ -40,6 +40,26 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertFalse(LocalAudioRecord(id: "user supplied path", filename: "track.mp3", name: "", artist: "", album: "", duration: 1).isSafe)
     }
 
+    func testShuffleKeepsSelectedTrackAndReachesEveryTrackWithoutRepeat() {
+        let identifiers = ["one", "two", "three", "four", "five"]
+        var queue = LocalQueue()
+        for iteration in 0..<100 {
+            let selected = identifiers[iteration % identifiers.count]
+            queue.reset(identifiers + [selected], startingAt: selected, shuffled: true)
+            XCTAssertEqual(queue.current, selected)
+            var visited = [selected]
+            while queue.advance(by: 1, wrapping: false) {
+                if let current = queue.current { visited.append(current) }
+            }
+            XCTAssertEqual(visited.count, identifiers.count)
+            XCTAssertEqual(Set(visited), Set(identifiers))
+            let last = queue.current
+            queue.reset(identifiers, startingAt: last, shuffled: true)
+            XCTAssertEqual(queue.current, last)
+            XCTAssertEqual(queue.index, 0)
+        }
+    }
+
     @MainActor
     func testImportCopiesFilesWithStableDistinctIdentities() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -62,6 +82,31 @@ final class NativeCoreTests: XCTestCase {
         try reopened.remove(id: a.id)
         XCTAssertEqual(reopened.library.map(\.id), [b.id])
         XCTAssertTrue(FileManager.default.fileExists(atPath: storage.appendingPathComponent(b.filename).path))
+    }
+
+    @MainActor
+    func testSeekAfterStopPreservesPositionForNextPlay() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let source = folder.appendingPathComponent("seek-fixture.wav")
+        try NativeSelfCheck.fixture(at: source, seconds: 8)
+        let service = LocalAudioService(diagnostics: NativeDiagnostics(), directory: folder.appendingPathComponent("library"))
+        _ = try await service.importFiles([source])
+        try service.setActive(true)
+        defer { try? service.setActive(false) }
+        try await service.command("volume", arg: 0)
+        try await service.command("play", arg: nil)
+        try await service.command("stop", arg: nil)
+        XCTAssertEqual(service.snapshot()["state"] as? String, "stopped")
+        try await service.command("seek", arg: 4)
+        XCTAssertEqual(service.snapshot()["state"] as? String, "paused")
+        try await service.command("play", arg: nil)
+        try await Task.sleep(for: .milliseconds(200))
+        try await service.command("pause", arg: nil)
+        let position = try XCTUnwrap(service.snapshot()["position"] as? Double)
+        XCTAssertGreaterThanOrEqual(position, 3.9)
+        XCTAssertLessThan(position, 5)
     }
 
     @MainActor

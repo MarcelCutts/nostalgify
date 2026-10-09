@@ -52,7 +52,7 @@ function renderState(state) {
   $("next-button").disabled = !caps.canSkipNext;
   $("play-button").disabled = !state.running || (!state.track && state.provider === "local");
   const playing = ["playing", "buffering"].includes(state.state);
-  $("play-button").textContent = playing ? "Ⅱ" : "▶";
+  $("play-button").textContent = playing ? "Ⅱ" : "▶︎";
   $("play-button").setAttribute("aria-label", playing ? "Pause" : "Play");
   for (const key of ["shuffle", "repeat"]) {
     $(`${key}-button`).disabled = !caps[key === "shuffle" ? "canShuffle" : "canRepeat"];
@@ -78,7 +78,12 @@ function resizePlayer() {
 host.layout = (width, height) => {
   if (width > 0 && height > 0) { playerWidth = width; playerHeight = height; resizePlayer(); }
 };
-new ResizeObserver(resizePlayer).observe($("player-viewport"));
+let resizePending = false;
+new ResizeObserver(() => {
+  if (resizePending) return;
+  resizePending = true;
+  requestAnimationFrame(() => { resizePending = false; resizePlayer(); });
+}).observe($("player-viewport"));
 window.addEventListener("resize", resizePlayer);
 
 const nativeImport = host.importFiles;
@@ -103,7 +108,16 @@ host.resolveLinks = async text => {
 };
 const localShelfItem = item => ({ provider: "local", kind: "track", uri: item.uri || `local:${item.id}`, title: item.name, artist: item.artist || "" });
 async function refreshLibrary() {
+  const previous = library;
   library = await host.listAudio();
+  if (mounted) {
+    const retained = new Set(library.map(item => item.uri || `local:${item.id}`));
+    for (const item of previous) {
+      const uri = item.uri || `local:${item.id}`;
+      if (!retained.has(uri)) await mounted.shelf.removeUri(uri);
+    }
+    await mounted.shelf.addItems(library.map(localShelfItem));
+  }
   renderLists();
 }
 function renderLists() {
@@ -178,7 +192,7 @@ $("link-form").addEventListener("submit", event => {
   void action(async () => {
     const text = $("spotify-link").value.trim();
     const links = await host.resolveLinks(text);
-    if (!links.length) throw new Error("Paste a link from open.spotify.com for a track, album, artist or playlist.");
+    if (!links.length) throw new Error("Paste a link from open.spotify.com for a track, album, artist, playlist or episode.");
     if (mounted?.shelf.addItems) await mounted.shelf.addItems(links);
     else await mounted?.shelf.addFromText(text);
     $("spotify-link").value = "";
@@ -221,8 +235,25 @@ async function start() {
   if (preferences.spotify) { $("spotify-client-id").value = preferences.spotify.clientId || ""; $("spotify-redirect").value = preferences.spotify.redirectURI || "nostalgify://spotify-login-callback"; }
   if (native || demo) await refreshLibrary();
   mounted = await mountPlayer(host);
+  mounted.webamp.onWillClose(cancel => cancel());
+  host.restoreDefaultSkin = () => mounted.webamp.store.dispatch({ type: "LOAD_DEFAULT_SKIN" });
+  host.confirmSkinLoad = () => new Promise((resolve, reject) => {
+    const store = mounted.webamp.store;
+    const before = store.getState().display.skinImages;
+    const timer = setTimeout(() => finish(false), 12000);
+    const unsubscribe = store.subscribe(() => {
+      if (!store.getState().display.loading) finish(store.getState().display.skinImages !== before);
+    });
+    function finish(success) {
+      clearTimeout(timer); unsubscribe();
+      if (success) resolve();
+      else reject(new Error("That skin could not be read. Your previous skin is still selected."));
+    }
+  });
+  try { await host.restoreSavedSkin(); } catch (error) { showError(error); }
   await renderSkins();
   renderLists(); renderState(host.getCachedState()); resizePlayer();
+  document.documentElement.dataset.playerReady = "true";
   if (demo) window.__ipad = { host, mounted, plugin };
 }
 void start().catch(error => { host.recordError("startup_failed"); showError(error); $("player-status").textContent = "The player could not start. Export diagnostics from Settings."; });

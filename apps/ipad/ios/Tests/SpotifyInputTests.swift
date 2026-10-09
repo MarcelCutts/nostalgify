@@ -75,4 +75,89 @@ final class SpotifyInputTests: XCTestCase {
         XCTAssertThrowsError(try SpotifyInput.seekMilliseconds(Double.greatestFiniteMagnitude, duration: Double.greatestFiniteMagnitude))
         XCTAssertThrowsError(try SpotifyInput.seekMilliseconds(Double(Int.max), duration: Double(Int.max)))
     }
+
+    @MainActor
+    func testPlaybackWaitsForConnectionEventBeforeSendingCommand() async throws {
+        let waiter = SpotifyConnectionWaiter()
+        let started = expectation(description: "Reconnect requested")
+        var played = false
+        let playback = Task { @MainActor in
+            try await waiter.wait { started.fulfill() }
+            played = true
+        }
+        await fulfillment(of: [started], timeout: 1)
+        XCTAssertFalse(played, "A source switch must not send play before App Remote connects")
+        waiter.complete(.success(()))
+        try await playback.value
+        XCTAssertTrue(played)
+        waiter.complete(.success(())) // A duplicate delegate event must not resume twice.
+    }
+
+    @MainActor
+    func testDisconnectRejectsWaitingPlaybackWithoutSendingCommand() async throws {
+        let waiter = SpotifyConnectionWaiter()
+        let started = expectation(description: "Reconnect requested")
+        var played = false
+        let playback = Task { @MainActor in
+            try await waiter.wait { started.fulfill() }
+            played = true
+        }
+        await fulfillment(of: [started], timeout: 1)
+        waiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Reconnect Spotify.")))
+        do {
+            try await playback.value
+            XCTFail("A disconnected source must fail waiting playback")
+        } catch let error as NativeFailure {
+            XCTAssertEqual(error.code, "spotify_disconnected")
+        }
+        waiter.complete(.success(()))
+        XCTAssertFalse(played)
+    }
+
+    @MainActor
+    func testCancelledPlaybackDoesNotRunWhenConnectionArrives() async throws {
+        let waiter = SpotifyConnectionWaiter()
+        let started = expectation(description: "Reconnect requested")
+        var played = false
+        let playback = Task { @MainActor in
+            try await waiter.wait { started.fulfill() }
+            played = true
+        }
+        await fulfillment(of: [started], timeout: 1)
+        playback.cancel()
+        // Deliberately race success with the cancellation handler's main-actor hop.
+        waiter.complete(.success(()))
+        do {
+            try await playback.value
+            XCTFail("Cancellation must prevent the following playback command")
+        } catch is CancellationError { }
+        XCTAssertFalse(played)
+    }
+
+    @MainActor
+    func testConnectionWaitTimesOutWhenSpotifyNeverAnswers() async throws {
+        let waiter = SpotifyConnectionWaiter()
+        do {
+            try await waiter.wait(timeoutNanoseconds: 1_000_000) { }
+            XCTFail("A silent SDK must not hold the command queue indefinitely")
+        } catch let error as NativeFailure {
+            XCTAssertEqual(error.code, "spotify_connection_timeout")
+        }
+        waiter.complete(.success(()))
+    }
+
+    @MainActor
+    func testUnconfiguredPlaybackRequestsExplicitSetup() async throws {
+        let domain = "SpotifyInputTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let service = SpotifyRemoteService(diagnostics: NativeDiagnostics(), defaults: defaults)
+        do {
+            try await service.prepareForPlayback()
+            XCTFail("Preparing playback must not begin implicit authorization")
+        } catch let error as NativeFailure {
+            XCTAssertEqual(error.code, "spotify_configuration")
+        }
+        XCTAssertEqual(service.snapshot()["authorizing"] as? Bool, false)
+    }
 }

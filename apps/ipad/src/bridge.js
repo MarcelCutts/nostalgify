@@ -13,7 +13,7 @@ const ERROR_MESSAGES = {
   spotify_command_timeout: "Spotify did not confirm that action. Check Spotify before trying again.",
   spotify_command_failed: "Spotify could not complete that action. Open Spotify to check playback or reconnect.",
   spotify_restricted: "Spotify does not currently allow that control for this track or account.",
-  spotify_uri: "Use a full Spotify track, album, artist or playlist link.",
+  spotify_uri: "Use a full Spotify track, album, artist, playlist or episode link.",
   spotify_token_storage: "Unlock this iPad and try connecting Spotify again.",
   unsupported: "This control is unavailable for the current source.",
   unsupported_command: "This control is unavailable for the current source.",
@@ -61,11 +61,12 @@ export function createNativeHost(plugin, { timeoutMs = 12000, debug = false, onE
     let timer;
     try {
       if (!plugin || typeof plugin[method] !== "function") throw Object.assign(new Error(), { code: "native_unavailable" });
-      const result = await Promise.race([
-        Promise.resolve().then(() => plugin[method](options)),
+      const operation = Promise.resolve().then(() => plugin[method](options));
+      const result = wait === null ? await operation : await Promise.race([
+        operation,
         new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error(), { code: "timeout" })), wait); }),
       ]);
-      if (result?.error) throw Object.assign(new Error(), { code: "native_error" });
+      // Native operation failures reject. Snapshot.error is playback state and must be displayed.
       record(method, { requestId: id, durationMs: Math.round(performance.now() - started) });
       return result;
     } catch (error) {
@@ -140,10 +141,10 @@ export function createNativeHost(plugin, { timeoutMs = 12000, debug = false, onE
     async connectSpotify() { await invoke("connectSpotify", undefined, 60000); return refresh(); },
     async disconnectSpotify() { await invoke("disconnectSpotify"); return refresh(); },
     async listAudio() { return (await invoke("listAudio"))?.items || []; },
-    async importFiles() { return (await invoke("importAudio", undefined, 120000))?.items || []; },
+    async importFiles() { return (await invoke("importAudio", undefined, null))?.items || []; },
     async removeAudio(id) { await invoke("removeAudio", { id }); return refresh(); },
     getDiagnostics: async () => ({ version: 1, web: diagnostics.slice(), native: await invoke("getDiagnostics") }),
-    exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.slice() }, 60000),
+    exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.slice() }, null),
     recordError: code => record("web_error", { code: /^[a-z_]{1,40}$/.test(code) ? code : "unexpected" }),
     close() {}, minimize() {}, layout() {}, resizeStart() {}, resizeEnd() {},
     async dispose() { disposed = true; subscribers.clear(); await listener?.remove?.(); },

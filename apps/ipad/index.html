@@ -24,9 +24,9 @@
           <div class="now-playing"><p id="track-title">Ready when you are.</p><p id="track-artist">Connect Spotify or bring your own music.</p></div>
           <div class="seek-row"><output id="elapsed" for="seek">0:00</output><input id="seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="Playback position" disabled /><output id="duration" for="seek">0:00</output></div>
           <div class="transport" aria-label="Playback controls">
-            <button id="previous-button" class="transport-side" aria-label="Previous track" disabled>⏮</button>
-            <button id="play-button" class="transport-play" aria-label="Play" disabled>▶</button>
-            <button id="next-button" class="transport-side" aria-label="Next track" disabled>⏭</button>
+            <button id="previous-button" class="transport-side" aria-label="Previous track" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM20 5 9 12l11 7z" /></svg></button>
+            <button id="play-button" class="transport-play" aria-label="Play" disabled>▶︎</button>
+            <button id="next-button" class="transport-side" aria-label="Next track" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5h3v14h-3zM4 5l11 7L4 19z" /></svg></button>
           </div>
           <div class="playback-options"><button id="shuffle-button" class="quiet-button" aria-pressed="false" disabled>Shuffle</button><button id="repeat-button" class="quiet-button" aria-pressed="false" disabled>Repeat</button><label for="native-volume">Volume</label><input id="native-volume" type="range" min="0" max="100" value="100" aria-label="Playback volume" disabled /></div>
           <p id="volume-note" class="microcopy">Use the iPad volume buttons for Spotify.</p>
@@ -49,7 +49,7 @@
       <section id="settings-panel" class="settings-panel" aria-labelledby="settings-title" hidden>
         <div class="section-heading"><h2 id="settings-title">Connection & settings</h2><button id="settings-close" class="quiet-button">Close</button></div>
         <p class="panel-intro">For this personal build, create a Spotify developer app and register the redirect URI shown below. Install Spotify on this iPad and sign in before connecting.</p>
-        <form id="spotify-settings"><label for="spotify-client-id">Spotify client ID</label><input id="spotify-client-id" autocomplete="off" spellcheck="false" required /><label for="spotify-redirect">Registered redirect URI</label><input id="spotify-redirect" value="nostalgify://spotify-login-callback" autocomplete="off" spellcheck="false" required /><p class="microcopy">Use the same callback in Spotify’s developer dashboard. This is a client ID, never a client secret. Spotify playback requires the native Spotify SDK in your Xcode build.</p><button class="primary-button" type="submit">Save connection settings</button></form>
+        <form id="spotify-settings"><label for="spotify-client-id">Spotify client ID</label><input id="spotify-client-id" autocomplete="off" spellcheck="false" required /><label for="spotify-redirect">Registered redirect URI</label><input id="spotify-redirect" value="nostalgify://spotify-login-callback" autocomplete="off" spellcheck="false" required /><p class="microcopy">Use the same callback in Spotify’s developer dashboard. This is a client ID, never a client secret. Install Spotify on this iPad, then connect.</p><button class="primary-button" type="submit">Save connection settings</button></form>
         <div class="settings-actions"><button id="reconnect-button" class="quiet-button">Refresh connection</button><button id="disconnect-button" class="quiet-button">Disconnect Spotify</button><button id="logout-button" class="quiet-button">Forget Spotify sign-in</button><button id="diagnostics-button" class="quiet-button">Export diagnostics</button><button id="web-diagnostics-button" class="quiet-button">Save interface diagnostics</button></div>
         <p id="diagnostics-status" class="microcopy" role="status"></p>
       </section>

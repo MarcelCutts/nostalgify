@@ -13,7 +13,7 @@ it for listening.
 ## Build and install with Xcode
 
 You need a Mac with Xcode 26 or newer, its iOS platform support, Node.js 22.12 or
-newer (Node 24 LTS recommended), an Apple account, and an iPad running iPadOS 15 or
+newer (Node 24 LTS recommended), an Apple account, and an iPad running iPadOS 17 or
 newer. The committed project targets iPad; test on your actual iPadOS version.
 
 From the repository root:
@@ -50,8 +50,9 @@ provisioning profile, or automated upload credentials.
 
 ## Connect Spotify
 
-1. Install Spotify on the iPad and sign in. Spotify App Remote requires Spotify
-   Premium for playback control; use an account allowed by your developer app.
+1. Install Spotify on the iPad and sign in. Use Premium for on-demand playback;
+   Spotify documents restricted shuffle playback for Free accounts. Your account
+   must also be allowed by the developer application's current access mode.
 2. Create an application in the [Spotify developer dashboard](https://developer.spotify.com/dashboard)
    and enable its iOS SDK use. Register this redirect URI **exactly**:
 
@@ -126,6 +127,20 @@ play native audio. See [testing and observability](ipad-testing.md) and the
 physical-device checks.
 
 ## Why this repository and native host
+
+The source comparison informed the native choice:
+
+| Source | Browser route | Native route and decision |
+| --- | --- | --- |
+| Spotify | The Web Playback SDK supports iOS, but playback transfer still requires user interaction. A web controller through the Web API is another option, with separate device discovery and authorization. | App Remote delegates audio to Spotify and provides its documented app-switch/lifecycle model. Selected for the first build. |
+| SoundCloud | The official widget is the simplest playback route, but its controls and presentation are not the existing skin engine. A custom API player needs token management. | An API backend plus native streaming player could reuse the current desktop concepts. Deferred: SoundCloud currently requires confidential-client credentials, including for token exchange; shipping a secret in the iPad app is unsuitable. |
+| Local files | Browser-selected files can play in a foreground web experience, but library durability and background queue behaviour need separate device validation. | Copying imports to app storage and letting AVPlayer own playback gives explicit persistence, audio-session and lock-screen integration. Selected alongside Spotify. |
+
+These are engineering tradeoffs, not a claim that Safari cannot play music.
+Spotify documents its [current iOS Web Playback SDK limitation](https://developer.spotify.com/documentation/web-playback-sdk#troubleshooting);
+SoundCloud documents [server-side authorization and client-secret requirements](https://developers.soundcloud.com/docs/api/guide#authentication).
+The native choice fits the requested personal installation and local-file
+background-playback goals while retaining the existing skin renderer.
 
 | Approach | What works well | Limitation for this project |
 | --- | --- | --- |

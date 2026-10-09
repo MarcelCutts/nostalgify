@@ -32,6 +32,7 @@ input[type=range] { accent-color: var(--accent); min-width: 0; min-height: 44px;
 #seek { width: 100%; }
 .transport { display: flex; justify-content: center; align-items: center; gap: 30px; margin: 10px 0; }
 .transport-side { background: transparent; font-size: 27px; min-width: 48px; min-height: 48px; }
+.transport-side svg { width: 27px; height: 27px; fill: currentColor; vertical-align: middle; }
 .transport-play { width: 62px; height: 62px; border-radius: 50%; background: var(--accent); color: #1c251a; font-size: 26px; }
 .playback-options { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; }
 .playback-options label { font-size: 11px; color: var(--muted); margin-left: 10px; }

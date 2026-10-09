@@ -24,8 +24,12 @@ export function manageLayout(webamp, host) {
     for (const [key, selector] of ORDER) {
       const el = root.querySelector(selector);
       if (!el) continue;
-      // The iPad shell scales the stack; retain intrinsic pixels for stacking.
-      const r = host.platform === "ios" ? { width: el.offsetWidth, height: el.offsetHeight } : el.getBoundingClientRect();
+      // Ignore the iPad shell's outer scale, but include Webamp's own Double
+      // Size transform. Only windows that support it receive this class.
+      const scale = el.classList.contains("doubled") ? 2 : 1;
+      const r = host.platform === "ios"
+        ? { width: el.offsetWidth * scale, height: el.offsetHeight * scale }
+        : el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) continue;
       positions[key] = { x: 0, y };
       y += r.height;

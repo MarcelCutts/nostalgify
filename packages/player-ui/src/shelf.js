@@ -158,8 +158,11 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
     }
   }
 
-  // Cmd+V anywhere in the window adds a supported link from the clipboard.
+  // Paste outside editable controls adds a supported link to the shelf. Native
+  // shells also contain settings/link inputs, which must keep normal editing.
   document.addEventListener("paste", (e) => {
+    const target = e.composedPath?.()[0] || e.target;
+    if (e.defaultPrevented || target?.isContentEditable || target?.closest?.("input, textarea, select")) return;
     const text = e.clipboardData && e.clipboardData.getData("text");
     if (text) {
       e.preventDefault();

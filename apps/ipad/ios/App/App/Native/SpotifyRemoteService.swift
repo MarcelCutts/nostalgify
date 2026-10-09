@@ -65,6 +65,50 @@ enum SpotifyInput {
     }
 }
 
+/// Awaits an SDK connection event without polling, blocking the main actor, or
+/// leaving a continuation behind when a caller cancels or Spotify never answers.
+@MainActor
+final class SpotifyConnectionWaiter {
+    private struct Pending {
+        let continuation: CheckedContinuation<Void, Error>
+        let timeout: Task<Void, Never>
+    }
+    private var pending: [UUID: Pending] = [:]
+
+    func wait(timeoutNanoseconds: UInt64 = 12_000_000_000, start: () -> Void) async throws {
+        let id = UUID()
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                let timeout = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(nanoseconds: timeoutNanoseconds) } catch { return }
+                    self?.finish(id, result: .failure(NativeFailure(code: "spotify_connection_timeout", message: "Spotify did not respond. Tap Connect Spotify to open Spotify and reconnect.")))
+                }
+                pending[id] = Pending(continuation: continuation, timeout: timeout)
+                start()
+            }
+        }, onCancel: {
+            Task { @MainActor [weak self] in self?.finish(id, result: .failure(CancellationError())) }
+        })
+        try Task.checkCancellation()
+    }
+
+    func complete(_ result: Result<Void, Error>) {
+        let waiting = pending
+        pending.removeAll()
+        for request in waiting.values {
+            request.timeout.cancel()
+            request.continuation.resume(with: result)
+        }
+    }
+
+    private func finish(_ id: UUID, result: Result<Void, Error>) {
+        guard let request = pending.removeValue(forKey: id) else { return }
+        request.timeout.cancel()
+        request.continuation.resume(with: result)
+    }
+}
+
 /// Spotify remains the audio owner. This service never opens an AVAudioSession,
 /// manufactures audio, or pauses Spotify merely because Nostalgify backgrounds.
 @MainActor
@@ -87,6 +131,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     private var mayHaveActivePlayback = false
     private var generation = UUID()
     private var connectionTimeout: Task<Void, Never>?
+    private let connectionWaiter = SpotifyConnectionWaiter()
     private var authorizationTimeout: Task<Void, Never>?
     private var failure: NativeFailure?
     private var statusMessage = "Add your Spotify Client ID in Settings, then connect."
@@ -241,6 +286,36 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         connectTransport() // Never opens Spotify or starts music automatically on foregrounding.
     }
 
+    /// Source selection can finish before App Remote connects. Playback commands
+    /// await that connection here; only the explicit Connect action can authorize.
+    func prepareForPlayback() async throws {
+        try Task.checkCancellation()
+        guard let remote else {
+            throw NativeFailure(code: "spotify_configuration", message: "Add your Spotify Client ID in Settings, then tap Connect Spotify.")
+        }
+        guard wantsConnection, remote.connectionParameters.accessToken != nil, !authorizing else {
+            throw NativeFailure(code: "spotify_disconnected", message: "Tap Connect Spotify and finish authorization before using playback controls.")
+        }
+        guard foreground else {
+            throw NativeFailure(code: "spotify_disconnected", message: "Return to Nostalgify before using Spotify playback controls.")
+        }
+        if remote.isConnected { return }
+        let session = generation
+        do {
+            try await connectionWaiter.wait { connectTransport() }
+            try Task.checkCancellation()
+            guard foreground, wantsConnection, self.remote === remote,
+                  generation == session, remote.isConnected else {
+                throw NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")
+            }
+        } catch is CancellationError {
+            throw NativeFailure(code: "spotify_connection_cancelled", message: "Connecting to Spotify was cancelled. Try the playback control again when ready.")
+        } catch let error as NativeFailure {
+            setFailure(error.code, error.message)
+            throw error
+        }
+    }
+
     func command(_ command: String, arg: Any?) async throws {
         var playbackMayHaveStarted = false
         do {
@@ -383,6 +458,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         if !preserveAuthorization || !authorizing { generation = UUID() }
         connecting = false
         connectionTimeout?.cancel()
+        connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
         cancelPendingRequests()
         // App Remote releases its APIs on disconnect; their delegate is weak and nonnull in the SDK.
         remote?.disconnect()
@@ -474,6 +550,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         })
         diagnostics.record("spotify_connected")
         refreshState()
+        connectionWaiter.complete(.success(()))
         notify()
     }
 
@@ -487,6 +564,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         guard remote === appRemote else { return }
         connecting = false
         connectionTimeout?.cancel()
+        connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
         cancelPendingRequests()
         if error != nil, foreground, wantsConnection, !authorizing {
             closeTransport()

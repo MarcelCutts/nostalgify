@@ -24,7 +24,7 @@ if (!/PRODUCT_BUNDLE_IDENTIFIER\s*=\s*"?dev\.nostalgify\.ipad"?\s*;/.test(projec
 const families = [...project.matchAll(/TARGETED_DEVICE_FAMILY\s*=\s*"?([^";]+)"?\s*;/g)].map((match) => match[1].trim());
 if (!families.length || families.some((family) => family !== '2')) fail('All native targets must target iPad (device family 2)');
 const targets = [...project.matchAll(/IPHONEOS_DEPLOYMENT_TARGET\s*=\s*([\d.]+)\s*;/g)].map((match) => Number(match[1]));
-if (!targets.length || targets.some((value) => !Number.isFinite(value) || value < 15)) fail('Native deployment targets must support Capacitor 8 (iOS 15+)');
+if (!targets.length || targets.some((value) => !Number.isFinite(value) || value < 17)) fail('Native deployment targets must match the web runtime (iPadOS 17+)');
 if (/layoutprobe|DEVELOPMENT_TEAM\s*=\s*"?[A-Z0-9]{10}"?\s*;/.test(project)) fail('Remove probe identifiers or a committed personal signing team');
 if (!/capacitor-swift-pm\.git"\s*,\s*exact:\s*"8\.5\.3"/.test(packageFile)) fail('Capacitor Swift package must be pinned to 8.5.3');
 if (!/spotify\/ios-sdk(?:\.git)?/.test(project + packageFile)

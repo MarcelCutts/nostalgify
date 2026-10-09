@@ -221,8 +221,13 @@ final class LocalAudioService {
             player.pause(); stopped = true; resumeAfterInterruption = false
             await seek(0)
         case "seek":
-            guard current != nil else { throw NativeFailure(code: "no_track", message: "Choose a local audio file first.") }
-            await seek(try PlaybackValue.number(arg))
+            guard let record = current else { throw NativeFailure(code: "no_track", message: "Choose a local audio file first.") }
+            let seconds = try PlaybackValue.number(arg)
+            if player.currentItem == nil { load(record) }
+            await seek(seconds)
+            // An explicit scrub selects the next playback position even after
+            // Stop or natural completion. Stop's internal seek keeps stopped.
+            stopped = false
         case "volume": player.volume = Float(PlaybackValue.volume(try PlaybackValue.number(arg)) / 100)
         case "next": try skip(1)
         case "previous":

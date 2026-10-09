@@ -2,6 +2,7 @@
   "appId": "dev.nostalgify.ipad",
   "appName": "Nostalgify",
   "webDir": "dist",
+  "loggingBehavior": "none",
   "ios": { "contentInset": "never", "backgroundColor": "#121514", "scrollEnabled": true },
   "server": { "iosScheme": "capacitor" }
 }

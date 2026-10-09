@@ -40,9 +40,10 @@ test("native fixture snapshots preserve seconds and provider-specific volume cap
 });
 
 test("Spotify links reject unrelated hosts, embedded credentials and non-content links", () => {
-  const links = spotifyLinks("https://open.spotify.com/intl-en/track/abc?si=ignored spotify:track:abc https://open.spotify.com/playlist/XYZ");
-  assert.deepEqual(links.map(item => item.uri), ["spotify:track:abc", "spotify:playlist:XYZ"]);
-  for (const value of ["https://open.spotify.com.evil.test/track/abc", "https://secret@open.spotify.com/track/abc", "http://open.spotify.com/track/abc", "https://open.spotify.com:444/track/abc", "spotify:collection:tracks", "https://spotify.link/short", "javascript:alert(1)"]) assert.deepEqual(spotifyLinks(value), []);
+  const links = spotifyLinks("https://open.spotify.com/intl-en/track/0123456789abcdefghijkl?si=ignored spotify:track:0123456789abcdefghijkl https://open.spotify.com/playlist/abcdefghijkl0123456789");
+  assert.deepEqual(links.map(item => item.uri), ["spotify:track:0123456789abcdefghijkl", "spotify:playlist:abcdefghijkl0123456789"]);
+  assert.equal(spotifyLinks("https://open.spotify.com/episode/0123456789abcdefghijkl")[0].kind, "episode");
+  for (const value of ["https://open.spotify.com.evil.test/track/0123456789abcdefghijkl", "https://secret@open.spotify.com/track/0123456789abcdefghijkl", "http://open.spotify.com/track/0123456789abcdefghijkl", "https://open.spotify.com:444/track/0123456789abcdefghijkl", "spotify:collection:tracks", "https://spotify.link/short", "javascript:alert(1)"]) assert.deepEqual(spotifyLinks(value), []);
 });
 
 test("a stale native poll cannot replace a newer state event", async t => {
@@ -54,6 +55,14 @@ test("a stale native poll cannot replace a newer state event", async t => {
   assert.equal((await request).provider, "local");
   f.emit({ ...spotify, sequence: 10 });
   assert.equal(f.host.getCachedState().sequence, 12);
+});
+
+test("an authoritative provider error snapshot is accepted and keeps its safe status message", async t => {
+  const f = fixture({ getState: async () => ({ ...spotify, running: false, error: "spotify_not_installed", message: "Install Spotify on this iPad first." }) });
+  t.after(() => f.host.dispose()); await f.host.ready;
+  assert.equal(f.host.getCachedState().error, "spotify_not_installed");
+  assert.equal(f.host.getCachedState().message, "Install Spotify on this iPad first.");
+  assert.equal(f.host.getCachedState().running, false);
 });
 
 test("a legacy unsequenced poll cannot replace an event arriving while it was pending", async t => {
@@ -108,12 +117,12 @@ test("concurrent preference patches preserve unrelated settings and serialize na
   const f = fixture({ setPreferences: async ({ value }) => { writing++; peak = Math.max(peak, writing); if (!value.shelf) await first.promise; f.calls.push(value); writing--; } });
   t.after(() => f.host.dispose()); await f.host.ready;
   const ui = f.host.saveUiPrefs({ playlistOpen: false });
-  const shelf = f.host.saveShelf([{ uri: "spotify:track:abc" }]);
+  const shelf = f.host.saveShelf([{ uri: "spotify:track:0123456789abcdefghijkl" }]);
   first.resolve(); await Promise.all([ui, shelf]);
   assert.equal(peak, 1);
   assert.equal(f.calls.at(-1).retained, "existing");
   assert.equal(f.calls.at(-1).ui.playlistOpen, false);
-  assert.equal(f.calls.at(-1).shelf[0].uri, "spotify:track:abc");
+  assert.equal(f.calls.at(-1).shelf[0].uri, "spotify:track:0123456789abcdefghijkl");
 });
 
 test("a failed preferences read cannot overwrite an existing native preference object", async t => {
@@ -133,4 +142,17 @@ test("diagnostic exports include bounded safe web events and disposal removes na
   assert.equal(payload.webEvents.length, 150);
   assert.equal(payload.webEvents.at(-1).code, "javascript_error");
   await f.host.dispose(); assert.equal(f.removed, true);
+});
+
+test("document picker and share sheet wait for dismissal beyond the playback RPC deadline", async t => {
+  const picker = deferred(), share = deferred();
+  const f = fixture({ importAudio: () => picker.promise, exportDiagnostics: () => share.promise }, { timeoutMs: 5 });
+  t.after(() => f.host.dispose()); await f.host.ready;
+  let picked = false, shared = false;
+  const importing = f.host.importFiles().then(value => { picked = true; return value; });
+  const exporting = f.host.exportDiagnostics().then(value => { shared = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(picked, false); assert.equal(shared, false);
+  picker.resolve({ items: [{ id: "chosen" }] }); share.resolve({ shared: true });
+  assert.equal((await importing)[0].id, "chosen"); assert.equal((await exporting).shared, true);
 });

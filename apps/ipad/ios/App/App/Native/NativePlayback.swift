@@ -12,6 +12,7 @@ final class NativePlayback {
     private var sequence: Int = 0
     private var listeners: [UUID: ([String: Any]) -> Void] = [:]
     private var commandTail: Task<Void, Error>?
+    private var foreground = UIApplication.shared.applicationState == .active
 
     private init() {
         provider = UserDefaults.standard.string(forKey: "nostalgify.provider") == "local" ? "local" : "spotify"
@@ -44,12 +45,14 @@ final class NativePlayback {
     }
 
     func becameActive() {
+        foreground = true
         diagnostics.record("app.active")
         if provider == "spotify" { spotify.resume() }
         publish()
     }
 
     func becameInactive() {
+        foreground = false
         diagnostics.record("app.inactive")
         spotify.suspend()
         // Local AVPlayer continues in the genuine background-audio mode.
@@ -65,6 +68,9 @@ final class NativePlayback {
 
     func connectSpotify() async throws {
         try await enqueue {
+            guard self.foreground else {
+                throw NativeFailure(code: "spotify_disconnected", message: "Return to Nostalgify before connecting Spotify.")
+            }
             try await self.select("spotify")
             try self.spotify.connect()
         }
@@ -97,6 +103,7 @@ final class NativePlayback {
                 } else if self.provider == "local" {
                     try await self.local.command(name, arg: arg)
                 } else {
+                    try await self.spotify.prepareForPlayback()
                     try await self.spotify.command(name, arg: arg)
                 }
                 self.publish()
@@ -116,10 +123,15 @@ final class NativePlayback {
         let previous = commandTail
         let task = Task { @MainActor in
             _ = try? await previous?.value
+            try Task.checkCancellation()
             try await work()
         }
         commandTail = task
-        try await task.value
+        try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
     }
 
     private func select(_ next: String) async throws {
@@ -139,7 +151,7 @@ final class NativePlayback {
         provider = next
         UserDefaults.standard.set(next, forKey: "nostalgify.provider")
         diagnostics.record("provider.changed", code: next)
-        if next == "spotify" { spotify.resume() }
+        if next == "spotify", foreground { spotify.resume() }
         publish()
     }
 

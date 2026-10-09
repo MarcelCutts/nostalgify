@@ -1,7 +1,7 @@
 // Development-only UI fixture. This module does not play audio or connect accounts.
 export function createMockPlugin() {
   let sequence = 0;
-  let preferences = {};
+  let preferences = JSON.parse(localStorage.getItem("nostalgify-development-preferences") || "{}");
   const listeners = new Set();
   const items = [];
   const state = {
@@ -15,7 +15,7 @@ export function createMockPlugin() {
     async addListener(_name, callback) { listeners.add(callback); return { remove: async () => listeners.delete(callback) }; },
     async getState() { return snapshot(); },
     async getPreferences() { return { value: structuredClone(preferences) }; },
-    async setPreferences({ value }) { preferences = structuredClone(value); },
+    async setPreferences({ value }) { preferences = structuredClone(value); localStorage.setItem("nostalgify-development-preferences", JSON.stringify(preferences)); },
     async configureSpotify() {},
     async connectSpotify() { state.running = true; state.message = "Development demo · Spotify connection simulated"; state.capabilities = capabilities(false); publish(); },
     async disconnectSpotify() { state.running = false; state.track = null; state.state = "stopped"; state.message = "Development demo · disconnected"; publish(); },

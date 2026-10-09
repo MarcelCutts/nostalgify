@@ -8,7 +8,8 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
-        window?.rootViewController = NostalgifyViewController()
+        let controller = NostalgifyViewController()
+        window?.rootViewController = controller
         window?.makeKeyAndVisible()
 
         SceneDelegateProxy.shared.scene(scene, willConnectTo: session, options: connectionOptions)
@@ -20,7 +21,7 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         }
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("--native-local-selfcheck") {
-            Task { @MainActor in await NativeSelfCheck.run() }
+            Task { @MainActor in await NativeSelfCheck.run(webView: { controller.webView }) }
         }
         #endif
     }
