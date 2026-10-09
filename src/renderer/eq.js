@@ -4,13 +4,13 @@ const CONTROLS = ".band, #on, #auto, #presets-context, #presets, #plus12db, #zer
 const FOCUSABLE = "input, button, select, [tabindex], [role='slider'], [role='button']";
 const DESCRIPTION = {
   spotify: "Decorative equalizer. Spotify: use Spotify Settings > Playback > Equalizer.",
-  soundcloud: "Decorative equalizer. SoundCloud equalizer is not implemented yet.",
+  soundcloud: "Decorative equalizer. EQ does not affect SoundCloud playback in Nostalgify.",
 };
 
 export function createEqPolicy(webamp, initialSkins) {
   const store = webamp.store;
   let hasEq = new Map(initialSkins.map((s) => [s.url, s.hasEq]));
-  let allowed = true;
+  let panelAvailable = true;
   let autoClosed = false;
   let provider = "spotify";
   let resetting = false;
@@ -76,7 +76,7 @@ export function createEqPolicy(webamp, initialSkins) {
   }
 
   return {
-    allowed: () => allowed,
+    canShowPanel: () => panelAvailable,
     setProvider(next) {
       const value = next === "soundcloud" ? "soundcloud" : "spotify";
       if (value === provider) return;
@@ -89,12 +89,12 @@ export function createEqPolicy(webamp, initialSkins) {
     },
     // url is null for Webamp's built-in default skin, which has an equalizer.
     applyForSkin(url) {
-      allowed = url == null ? true : hasEq.get(url) !== false;
-      document.body.classList.toggle("no-eq", !allowed);
-      if (!allowed && isOpen()) {
+      panelAvailable = url == null ? true : hasEq.get(url) !== false;
+      document.body.classList.toggle("no-eq", !panelAvailable);
+      if (!panelAvailable && isOpen()) {
         store.dispatch({ type: "CLOSE_WINDOW", windowId: "equalizer" });
         autoClosed = true;
-      } else if (allowed && autoClosed && !isOpen()) {
+      } else if (panelAvailable && autoClosed && !isOpen()) {
         store.dispatch({ type: "TOGGLE_WINDOW", windowId: "equalizer" });
         autoClosed = false;
       }
