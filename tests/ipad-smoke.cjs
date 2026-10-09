@@ -48,6 +48,8 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.ok(doubledEQ.y >= doubledMain.y + doubledMain.height - 1, "double-size windows must not overlap");
     assert.ok(doubledMain.x + doubledMain.width <= doubledFrame.x + doubledFrame.width, "double-size mode must fit the frame");
     await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_DOUBLESIZE_MODE" }));
+    assert.deepEqual(await page.evaluate(async () => (await window.nostalgify.getDiagnostics()).web.filter(event => event.event === "web_error")), [], "startup and resize must not report JavaScript or ResizeObserver errors");
+    assert.equal(await page.locator("#error-message").isVisible(), false);
     assert.equal(await page.locator("#native-volume").isDisabled(), true);
     await page.locator("#webamp #close").tap();
     assert.equal(await page.locator("#main-window").isVisible(), true, "desktop close must not strand the iPad interface");

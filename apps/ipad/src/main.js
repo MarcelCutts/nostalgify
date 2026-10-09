@@ -4,6 +4,7 @@ import { createNativeHost } from "./bridge.js";
 import { attachSkinStore } from "./skins.js";
 import { LOCAL_URI } from "../../../packages/contracts/src/player.js";
 import { createMockPlugin } from "./mock.js";
+import { safeWebError } from "./diagnostics.js";
 
 const $ = id => document.getElementById(id);
 const native = Capacitor.isNativePlatform();
@@ -21,6 +22,7 @@ let selectedSource = "spotify";
 let playerWidth = 275;
 let playerHeight = 377;
 let lastTrack = null;
+let lastGeometry = "";
 
 function showError(error) {
   $("error-message").textContent = error?.message || "The player could not complete that action. Please try again.";
@@ -70,6 +72,9 @@ function renderState(state) {
 function resizePlayer() {
   const available = Math.max(240, $("player-viewport").clientWidth - 38);
   const scale = Math.min(1.7, available / playerWidth);
+  const geometry = `${playerWidth}:${playerHeight}:${scale}`;
+  if (geometry === lastGeometry) return;
+  lastGeometry = geometry;
   $("app").style.transform = `scale(${scale})`;
   $("player-size").style.width = `${Math.ceil(playerWidth * scale)}px`;
   $("player-size").style.height = `${Math.ceil(playerHeight * scale)}px`;
@@ -222,8 +227,8 @@ $("web-diagnostics-button").addEventListener("click", () => action(async () => {
   const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
   const link = document.createElement("a"); link.href = url; link.download = "nostalgify-diagnostics.json"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }, $("web-diagnostics-button")));
-window.addEventListener("error", () => { host.recordError("javascript_error"); showError(new Error("The interface encountered an error. Refresh the connection or export diagnostics.")); });
-window.addEventListener("unhandledrejection", () => { host.recordError("unhandled_promise"); showError(new Error("An action could not finish. Try again or export diagnostics.")); });
+window.addEventListener("error", event => { const details = safeWebError(event); host.recordError(details.code, details); showError(new Error("The interface encountered an error. Refresh the connection or export diagnostics.")); });
+window.addEventListener("unhandledrejection", event => { host.recordError("unhandled_promise", safeWebError({ error: event.reason })); showError(new Error("An action could not finish. Try again or export diagnostics.")); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void action(async () => { await host.getState(); if (native || demo) await refreshLibrary(); }); });
 window.addEventListener("online", () => { void action(() => host.getState()); });
 host.onStateChanged(renderState);

@@ -43,6 +43,16 @@ xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug
   CODE_SIGNING_ALLOWED=NO \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/build.log"
 
+# Also compile the device SDK and Release-only paths, including the Spotify
+# XCFramework's device slice. This is an unsigned build, never an archive/upload.
+xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Release \
+  -destination 'generic/platform=iOS' \
+  -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
+  -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
+  -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/release.xcresult" \
+  CODE_SIGNING_ALLOWED=NO \
+  2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/release.log"
+
 # Create and remove our own simulator, leaving a developer's existing devices
 # untouched. Choose an installed iOS runtime and a supported iPad device type.
 xcrun simctl list --json > "$NOSTALGIFY_IOS_RESULTS/simulators.json"

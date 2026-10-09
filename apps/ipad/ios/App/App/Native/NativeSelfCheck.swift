@@ -28,7 +28,7 @@ enum NativeSelfCheck {
     /// Native completion is bounded even if page startup or a JS Promise stalls.
     @MainActor
     private final class WebViewProbe {
-        var continuation: CheckedContinuation<Void, Error>?
+        var continuation: CheckedContinuation<[String: Any], Error>?
         var timeout: Task<Void, Never>?
 
         func complete(_ result: Result<Any, Error>) {
@@ -36,15 +36,21 @@ enum NativeSelfCheck {
             self.continuation = nil
             timeout?.cancel()
             timeout = nil
-            if case .success(let raw) = result, let value = raw as? [String: Any], value["passed"] as? Bool == true {
-                continuation.resume()
+            if case .success(let raw) = result, let value = raw as? [String: Any] {
+                let codes: Set<String> = ["selfcheck_webview_bridge", "selfcheck_webview_error", "selfcheck_webview_banner", "selfcheck_webview_timeout"]
+                let code = value["code"] as? String ?? ""
+                var safe: [String: Any] = ["passed": value["passed"] as? Bool == true,
+                    "errorBannerVisible": value["errorBannerVisible"] as? Bool == true,
+                    "webErrors": (value["webErrors"] as? [[String: Any]] ?? []).suffix(20).map(NativeDiagnostics.sanitizedWebError)]
+                if codes.contains(code) { safe["code"] = code }
+                continuation.resume(returning: safe)
             } else {
                 continuation.resume(throwing: NativeFailure(code: "selfcheck_webview_bridge", message: "The bundled player or native bridge did not become ready."))
             }
         }
     }
 
-    private static func checkWebView(_ provider: @MainActor () -> WKWebView?) async throws {
+    private static func checkWebView(_ provider: @MainActor () -> WKWebView?) async throws -> [String: Any] {
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         while provider() == nil, ProcessInfo.processInfo.systemUptime < deadline {
             try await Task.sleep(for: .milliseconds(100))
@@ -58,27 +64,45 @@ enum NativeSelfCheck {
         while (Date.now() < deadline) {
           const host = window.nostalgify;
           const player = document.querySelector('#app #webamp #main-window');
-          if (host && player && window.Capacitor?.getPlatform() === 'ios' && !host.debug) {
+          if (host && player && document.documentElement.dataset.playerReady === 'true' &&
+              window.Capacitor?.getPlatform() === 'ios' && !host.debug) {
             try {
               const state = await host.getState();
-              return { passed: ['spotify', 'local'].includes(state.provider) &&
+              const validState = ['spotify', 'local'].includes(state.provider) &&
                 ['playing', 'paused', 'stopped'].includes(state.state) &&
-                Number.isSafeInteger(state.sequence) };
-            } catch (_) { return { passed: false }; }
+                Number.isSafeInteger(state.sequence);
+              // Let pending layout/ResizeObserver notifications settle before
+              // checking startup diagnostics; never hide or clear UI errors.
+              await new Promise(resolve => setTimeout(resolve, 250));
+              const report = await host.getDiagnostics();
+              const webErrors = (report.web || []).filter(event => event.event === 'web_error');
+              const banner = document.getElementById('error-message');
+              const errorBannerVisible = Boolean(banner && !banner.hidden);
+              const passed = validState && webErrors.length === 0 && !errorBannerVisible;
+              return { passed, webErrors, errorBannerVisible,
+                code: !validState ? 'selfcheck_webview_bridge' : webErrors.length ? 'selfcheck_webview_error' :
+                  errorBannerVisible ? 'selfcheck_webview_banner' : '' };
+            } catch (_) { return { passed: false, code: 'selfcheck_webview_bridge' }; }
           }
           await new Promise(resolve => setTimeout(resolve, 100));
         }
-        return { passed: false };
+        return { passed: false, code: 'selfcheck_webview_timeout' };
         """
-        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String: Any], Error>) in
             let probe = WebViewProbe()
             probe.continuation = continuation
             probe.timeout = Task { @MainActor in
                 do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
-                probe.complete(.failure(NativeFailure(code: "selfcheck_webview_timeout", message: "The bundled player did not respond.")))
+                probe.complete(.success(["passed": false, "code": "selfcheck_webview_timeout"]))
             }
-            webView.callAsyncJavaScript(javascript, arguments: ["timeoutMs": remaining * 1000], in: nil, contentWorld: .page) { result in
-                Task { @MainActor in probe.complete(result) }
+            Task { @MainActor in
+                do {
+                    let value = try await webView.callAsyncJavaScript(javascript,
+                        arguments: ["timeoutMs": remaining * 1000], in: nil, contentWorld: .page)
+                    probe.complete(.success(value as Any))
+                } catch {
+                    probe.complete(.failure(error))
+                }
             }
         }
     }
@@ -115,9 +139,13 @@ enum NativeSelfCheck {
             guard reloaded.library.map(\.id) == [a.id, b.id] else {
                 throw NativeFailure(code: "selfcheck_persistence", message: "Library identities did not persist.")
             }
-            try await checkWebView(webView)
+            let webReport = try await checkWebView(webView)
+            result["webview"] = webReport
+            guard webReport["passed"] as? Bool == true else {
+                throw NativeFailure(code: webReport["code"] as? String ?? "selfcheck_webview_bridge", message: "The bundled player did not pass its startup checks.")
+            }
             result = ["passed": true, "checks": ["import", "distinct-identities", "native-queue", "persistence", "webview-bridge"],
-                      "libraryCount": 2, "provider": "local", "state": "stopped"]
+                      "libraryCount": 2, "provider": "local", "state": "stopped", "webview": webReport]
             diagnostics.record("selfcheck.passed")
         } catch {
             let code = (error as? NativeFailure)?.code ?? "selfcheck_failed"

@@ -57,6 +57,7 @@ final class NativeDiagnostics {
                 output["time"] = webTime.string(from: date)
             }
             if let code = input["code"] as? String { output["code"] = Self.webCodes.contains(code) ? code : "redacted" }
+            if event == "web_error" { output.merge(Self.sanitizedWebError(input)) { _, new in new } }
             return output
         }
         try JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
@@ -71,9 +72,29 @@ final class NativeDiagnostics {
         "getDiagnostics", "exportDiagnostics", "failure", "web_error", "listener_unavailable"]
     private static let webCodes: Set<String> = ["timeout", "native_unavailable", "native_error", "unsupported",
         "invalid_link", "skin_storage_unavailable", "skin_preference_failed", "javascript_error",
-        "unhandled_promise", "startup_failed", "spotify_configuration", "spotify_redirect", "spotify_not_installed",
+        "unhandled_promise", "startup_failed", "resize_observer_loop", "spotify_configuration", "spotify_redirect", "spotify_not_installed",
         "spotify_disconnected", "spotify_state_unavailable", "spotify_pause_unconfirmed", "spotify_command_timeout",
         "spotify_command_failed", "spotify_restricted", "spotify_uri", "spotify_token_storage", "unsupported_command",
         "unsupported_audio", "import_failed", "not_found", "library_write_failed", "empty_library", "no_track",
         "audio_session_failed", "queue_boundary", "dialog_busy", "invalid_preferences", "preferences_too_large", "invalid_argument"]
+
+    /// Structural browser error locations are useful; raw messages, stacks and
+    /// URLs can contain user data and must never cross into exported reports.
+    static func sanitizedWebError(_ input: [String: Any]) -> [String: Any] {
+        let codes: Set<String> = ["javascript_error", "unhandled_promise", "startup_failed", "resize_observer_loop"]
+        let classes: Set<String> = ["Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError", "URIError", "DOMException", "ResizeObserver", "Unknown"]
+        let code = input["code"] as? String ?? "unexpected"
+        var result: [String: Any] = ["code": codes.contains(code) ? code : "unexpected"]
+        if let value = input["errorClass"] as? String, classes.contains(value) { result["errorClass"] = value }
+        if let value = input["source"] as? String, ["app.js", "unknown"].contains(value) { result["source"] = value }
+        for key in ["line", "column"] {
+            if let number = input[key] as? NSNumber {
+                let value = number.doubleValue
+                if value.isFinite, value >= 0, value <= Double(Int32.max), value.rounded(.towardZero) == value {
+                    result[key] = Int(value)
+                }
+            }
+        }
+        return result
+    }
 }

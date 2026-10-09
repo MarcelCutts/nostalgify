@@ -121,4 +121,18 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertEqual(events.last?["event"] as? String, "redacted")
         XCTAssertFalse(String(describing: events).contains("spotify:track"))
     }
+
+    @MainActor
+    func testWebErrorExportKeepsOnlyFixedCodesAndStructuralLocations() {
+        let valid = NativeDiagnostics.sanitizedWebError(["code": "resize_observer_loop", "errorClass": "ResizeObserver",
+            "source": "app.js", "line": 42, "column": 8, "message": "private song title", "stack": "private URL"])
+        XCTAssertEqual(valid["code"] as? String, "resize_observer_loop")
+        XCTAssertEqual(valid["line"] as? Int, 42)
+        XCTAssertNil(valid["message"])
+        XCTAssertNil(valid["stack"])
+        let untrusted = NativeDiagnostics.sanitizedWebError(["code": "private", "errorClass": "private",
+            "source": "https://private.example", "line": Double.infinity, "column": -1])
+        XCTAssertEqual(untrusted["code"] as? String, "unexpected")
+        XCTAssertEqual(untrusted.count, 1)
+    }
 }

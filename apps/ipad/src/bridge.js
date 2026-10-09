@@ -151,7 +151,7 @@ export function createNativeHost(plugin, {
     async removeAudio(id) { await invoke("removeAudio", { id }); return refresh(); },
     getDiagnostics: async () => ({ version: 1, web: diagnostics.slice(), native: await invoke("getDiagnostics") }),
     exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.slice() }, null),
-    recordError: code => record("web_error", { code: /^[a-z_]{1,40}$/.test(code) ? code : "unexpected" }),
+    recordError: (code, details = {}) => record("web_error", { ...details, code: /^[a-z_]{1,40}$/.test(code) ? code : "unexpected" }),
     close() {}, minimize() {}, layout() {}, resizeStart() {}, resizeEnd() {},
     async dispose() { disposed = true; subscribers.clear(); await listener?.remove?.(); },
   };

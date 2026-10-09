@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { createNativeHost } from "../apps/ipad/src/bridge.js";
 import { normalizeSnapshot, spotifyLinks } from "../packages/contracts/src/player.js";
+import { safeWebError } from "../apps/ipad/src/diagnostics.js";
 
 const spotify = JSON.parse(await readFile(new URL("../packages/contracts/fixtures/spotify.json", import.meta.url)));
 const local = JSON.parse(await readFile(new URL("../packages/contracts/fixtures/local.json", import.meta.url)));
@@ -37,6 +38,13 @@ test("native fixture snapshots preserve seconds and provider-specific volume cap
   assert.deepEqual(normalizeSnapshot(local), { ...local, error: null, message: "" });
   const invalid = normalizeSnapshot({ position: Infinity, volume: NaN, capabilities: { canSeek: "yes" }, track: {} });
   assert.equal(invalid.position, 0); assert.equal(invalid.capabilities.canSeek, false); assert.equal(invalid.track, null);
+});
+
+test("web diagnostics retain safe error location while omitting messages, paths and arbitrary classes", () => {
+  const details = safeWebError({ message: "access_token=private", filename: "capacitor://localhost/app.js?token=private", error: { name: "TypeError", stack: "private" }, lineno: 12, colno: 3 });
+  assert.deepEqual(details, { code: "javascript_error", errorClass: "TypeError", source: "app.js", line: 12, column: 3 });
+  assert.equal(safeWebError({ message: "ResizeObserver loop completed with undelivered notifications." }).code, "resize_observer_loop");
+  assert.equal(safeWebError({ error: { name: "private_filename" }, filename: "file:///private/song.mp3", lineno: NaN }).errorClass, "Unknown");
 });
 
 test("Spotify links reject unrelated hosts, embedded credentials and non-content links", () => {
