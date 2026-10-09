@@ -65,7 +65,8 @@ final class NostalgifyViewController: CAPBridgeViewController {
 
     private func startupRecord(phase: String, fixtureID: String, launchID: String, started: Double) -> StartupProbeRecord {
         let progress = webView?.estimatedProgress
-        return StartupProbeRecord(fixtureID: fixtureID, launchID: launchID, phase: phase,
+        return StartupProbeRecord(fixtureID: fixtureID, launchID: launchID,
+            appProcessID: ProcessInfo.processInfo.processIdentifier, phase: phase,
             elapsedMs: max(0, (ProcessInfo.processInfo.systemUptime - started) * 1000),
             webViewPresent: webView != nil, isLoading: webView?.isLoading,
             estimatedProgress: progress.flatMap { $0.isFinite ? min(1, max(0, $0)) : nil })
@@ -86,12 +87,14 @@ final class NostalgifyViewController: CAPBridgeViewController {
         }
     }
 
-    /// Only fixed phases, generated identities, booleans and loading progress
-    /// leave the app. Never include a URL, page text, source or raw JavaScript error.
+    /// Only fixed phases, generated identities, the numeric process identity,
+    /// booleans and loading progress leave the app. Never include a URL, page
+    /// text, source or raw JavaScript error.
     private struct StartupProbeRecord: Encodable, Sendable {
         let version = 1
         let fixtureID: String
         let launchID: String
+        let appProcessID: Int32
         let phase: String
         let elapsedMs: Double
         let webViewPresent: Bool

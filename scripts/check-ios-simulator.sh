@@ -14,6 +14,7 @@ NOSTALGIFY_IOS_RESULTS=$(mktemp -d "$PWD/out/ios-ci/run.XXXXXX")
 NOSTALGIFY_SIMULATOR_ID=''
 NOSTALGIFY_VALIDATION_LOG_START=''
 NOSTALGIFY_UI_TESTS_STARTED=false
+NOSTALGIFY_STARTUP_WATCHER_ID=''
 NOSTALGIFY_PROJECT="$PWD/apps/ipad/ios/App/App.xcodeproj"
 NOSTALGIFY_DERIVED_DATA="$NOSTALGIFY_IOS_RESULTS/DerivedData"
 NOSTALGIFY_PACKAGE_LOCK="$NOSTALGIFY_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
@@ -29,6 +30,16 @@ cleanup() {
   # Diagnostic collection must neither hide the original failure nor replace a
   # successful suite with an export error. Every collector below is best effort.
   set +e
+  if [ -n "$NOSTALGIFY_STARTUP_WATCHER_ID" ]; then
+    # Only stop our diagnostic watcher. Its subprocesses have bounded timeouts;
+    # neither the application nor its WebContent process is terminated here.
+    for NOSTALGIFY_CHILD_PID in $(jobs -pr); do
+      if [ "$NOSTALGIFY_CHILD_PID" = "$NOSTALGIFY_STARTUP_WATCHER_ID" ]; then
+        kill "$NOSTALGIFY_STARTUP_WATCHER_ID" 2>/dev/null || true
+      fi
+    done
+    wait "$NOSTALGIFY_STARTUP_WATCHER_ID" 2>/dev/null || true
+  fi
   # Preserve a deduplicated inventory even when a build or UI test fails. Swift
   # 5 remains the language mode while first-party concurrency boundaries migrate.
   python3 - "$NOSTALGIFY_IOS_RESULTS" <<'PY'
@@ -252,6 +263,10 @@ print('Native import, queue advancement, persistence, mounted UI, and Capacitor 
 PY
 # Do not leave the self-check process alive for the unit/UI test launches.
 xcrun simctl terminate "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad
+python3 scripts/capture-ios-startup-stall.py "$NOSTALGIFY_SIMULATOR_ID" \
+  "$NOSTALGIFY_APP_DATA/Documents/UITestStartupDiagnostics" "$NOSTALGIFY_IOS_RESULTS" \
+  > "$NOSTALGIFY_IOS_RESULTS/startup-watcher.log" 2>&1 &
+NOSTALGIFY_STARTUP_WATCHER_ID=$!
 NOSTALGIFY_UI_TESTS_STARTED=true
 date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/test-started-at.log"
 xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \

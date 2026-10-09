@@ -8,6 +8,7 @@ import UIKit
 final class AppUITests: XCTestCase {
     private var app: XCUIApplication!
     private var fixtureID: String!
+    private var launchOrdinal = 0
     // The app owns one WKWebView. Start at its first native wrapper instead of
     // repeatedly searching every nested/auxiliary WebView accessibility node.
     private var webView: XCUIElement { app.webViews.firstMatch }
@@ -18,6 +19,7 @@ final class AppUITests: XCTestCase {
         // the compatibility runner. Keep a bounded allowance for VM variance.
         executionTimeAllowance = 180
         fixtureID = UUID().uuidString
+        launchOrdinal = 0
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         XCUIDevice.shared.orientation = .portrait
@@ -42,8 +44,32 @@ final class AppUITests: XCTestCase {
 
     private func launch() {
         let started = Date()
+        let startUptime = ProcessInfo.processInfo.systemUptime
+        launchOrdinal += 1
         app.launch()
-        let ready = button("settings-toggle", "Settings").waitForExistence(timeout: 30)
+        let launchedUptime = ProcessInfo.processInfo.systemUptime
+        // CI recorded 28-second launches for WebKit's renderer, networking and
+        // GPU helpers before the page could load. This is a bounded readiness
+        // allowance after app.launch(), within the unchanged 180-second case.
+        let readinessWaitLimit: TimeInterval = 60
+        let ready = button("settings-toggle", "Settings").waitForExistence(timeout: readinessWaitLimit)
+        let checkedUptime = ProcessInfo.processInfo.systemUptime
+        let timing = LaunchTiming(fixtureID: fixtureID, launchOrdinal: launchOrdinal,
+            startedAtUTC: ISO8601DateFormatter().string(from: started),
+            appLaunchSeconds: launchedUptime - startUptime,
+            readinessWaitSeconds: checkedUptime - launchedUptime,
+            totalSeconds: checkedUptime - startUptime,
+            readinessWaitLimitSeconds: readinessWaitLimit, ready: ready)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let attachment = XCTAttachment(string: String(decoding: try encoder.encode(timing), as: UTF8.self))
+            attachment.name = "App launch timing \(launchOrdinal)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        } catch {
+            XCTFail("Could not encode app launch timing: \(error)")
+        }
         if !ready {
             let details = """
             Launch began: \(ISO8601DateFormatter().string(from: started))
@@ -53,7 +79,7 @@ final class AppUITests: XCTestCase {
             Window count: \(app.windows.count)
             WKWebView count: \(app.webViews.count)
             Orientation: \(XCUIDevice.shared.orientation.rawValue)
-            Settings absent after the 30-second readiness deadline. See the failure screenshot/hierarchy and simulator startup log.
+            Settings absent after the 60-second readiness wait. See the failure screenshot/hierarchy and simulator startup log.
             """
             let attachment = XCTAttachment(string: details)
             attachment.name = "Launch readiness failure"
@@ -63,6 +89,18 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(ready, "The real bundled UI must become ready.")
         XCTAssertFalse(app.staticTexts["UI test fixture failed"].exists)
         XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "DEVELOPMENT DEMO")).firstMatch.exists)
+    }
+
+    private struct LaunchTiming: Encodable {
+        let version = 1
+        let fixtureID: String
+        let launchOrdinal: Int
+        let startedAtUTC: String
+        let appLaunchSeconds: Double
+        let readinessWaitSeconds: Double
+        let totalSeconds: Double
+        let readinessWaitLimitSeconds: Double
+        let ready: Bool
     }
 
     private func button(_ identifier: String, _ label: String) -> XCUIElement {
