@@ -258,7 +258,12 @@ test('storage failures reject user tokens without publishing a usable session', 
   const store = memoryStore(saved(CLOCK - 1));
   store.save = async () => { throw new Error('raw token access-new'); };
   const { auth } = await fixture(t, { store });
-  await assert.rejects(auth.getAccessToken(), (error) => error.code === 'storage_error' && !error.message.includes('access-new'));
+  await assert.rejects(auth.getAccessToken(), (error) => {
+    assert.equal(error.code, 'storage_error');
+    assert.match(error.message, /Playback > Forget Local SoundCloud Sign-in, then connect again/);
+    assert.doesNotMatch(error.message, /raw token|access-new|refresh-new/);
+    return true;
+  });
   assert.equal(store.value, null);
   assert.equal((await auth.status()).connected, false);
 });
