@@ -252,7 +252,7 @@ export async function mountPlayer(host, { target = document.getElementById("app"
 
   // Classic Winamp keys: Z prev, X play, C pause, V stop, B next.
   window.addEventListener("keydown", (e) => {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.target?.closest?.("input, textarea, select, button, a[href], [contenteditable=true]")) return;
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.target?.closest?.("input, textarea, select, button, a[href], [role=button], [role=menu], [role=menuitem], [contenteditable=true]")) return;
     const k = e.key.toLowerCase();
     if (k === "z") transport("previous");
     else if (k === "x") transport(currentTrackId ? "play" : "playOrFallback");

@@ -149,6 +149,7 @@ jobs:
             out/ios-ci/run.*/*.xcresult/**
             out/ios-ci/run.*/Package.resolved
             out/ios-ci/run.*/test-attachments/**
+            out/ios-ci/run.*/startup-probes/*.json
 
   required:
     name: Required checks

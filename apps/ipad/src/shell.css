@@ -24,6 +24,7 @@ h1, h2 { font-size: 1.25rem; letter-spacing: -.5px; margin: 0; font-weight: 600;
 #app { position: absolute; inset: auto; top: 0; left: 0; width: 275px; transform-origin: top left; }
 #webamp, #webamp * { box-sizing: content-box; }
 #webamp { user-select: none; }
+#webamp [data-skin-control]:focus-visible, #webamp-context-menu [data-skin-control]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .now-playing { margin: 25px 0 16px; text-align: center; }
 #track-title { margin: 0 0 5px; font-size: 1.25rem; font-weight: 620; letter-spacing: -.4px; }
 #track-artist { color: var(--muted); font-size: 1rem; margin: 0; }

@@ -8,6 +8,9 @@ import UIKit
 final class AppUITests: XCTestCase {
     private var app: XCUIApplication!
     private var fixtureID: String!
+    // The app owns one WKWebView. Start at its first native wrapper instead of
+    // repeatedly searching every nested/auxiliary WebView accessibility node.
+    private var webView: XCUIElement { app.webViews.firstMatch }
 
     override func setUpWithError() throws {
         continueAfterFailure = false
@@ -65,14 +68,13 @@ final class AppUITests: XCTestCase {
     private func button(_ identifier: String, _ label: String) -> XCUIElement {
         let predicate = identifier.isEmpty ? NSPredicate(format: "label == %@", label) :
             NSPredicate(format: "identifier == %@ OR label == %@", identifier, label)
-        return app.webViews.buttons.matching(predicate).firstMatch
+        return webView.buttons.matching(predicate).firstMatch
     }
 
-    private func text(_ label: String) -> XCUIElement { app.webViews.staticTexts[label].firstMatch }
+    private func text(_ label: String) -> XCUIElement { webView.staticTexts[label].firstMatch }
 
     private func reveal(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
-        let webView = app.webViews.firstMatch
         for _ in 0..<8 {
             let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
             let center = CGPoint(x: element.frame.midX, y: element.frame.midY)
@@ -110,6 +112,11 @@ final class AppUITests: XCTestCase {
     }
 
     private func auditAccessibility() throws {
+        // Report every finding from this screen while preserving test failure.
+        // Restore fail-fast behavior for ordinary interactions afterward.
+        let previousContinueAfterFailure = continueAfterFailure
+        continueAfterFailure = true
+        defer { continueAfterFailure = previousContinueAfterFailure }
         try app.performAccessibilityAudit(for: [.elementDetection, .sufficientElementDescription]) { issue in
             var details = ["Type: \(issue.auditType)", issue.compactDescription, issue.detailedDescription]
             if let element = issue.element {
@@ -127,7 +134,7 @@ final class AppUITests: XCTestCase {
     }
 
     // WebKit exposes HTML aria-pressed controls as native accessibility switches.
-    private func openFiles() { tap(app.webViews.switches["Files"].firstMatch) }
+    private func openFiles() { tap(webView.switches["Files"].firstMatch) }
 
     private func playFixture() {
         openFiles()
@@ -138,7 +145,7 @@ final class AppUITests: XCTestCase {
 
     func testSettingsValidationAndRecoveryThroughNativeRefresh() throws {
         tap(button("settings-toggle", "Settings"))
-        let clientID = app.webViews.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-client-id", "Spotify client ID")).firstMatch
+        let clientID = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-client-id", "Spotify client ID")).firstMatch
         reveal(clientID)
         clientID.tap()
         clientID.typeText("invalid")
@@ -174,13 +181,13 @@ final class AppUITests: XCTestCase {
 
     func testFailedSpotifyHandoffCanRecoverToLocalPlayback() throws {
         playFixture()
-        tap(app.webViews.switches["Spotify"].firstMatch)
-        let link = app.webViews.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
+        tap(webView.switches["Spotify"].firstMatch)
+        let link = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
         reveal(link)
         link.tap()
         link.typeText("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC")
         tap(button("", "Save Spotify link"))
-        let saved = app.webViews.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Play Spotify track")).firstMatch
+        let saved = webView.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Play Spotify track")).firstMatch
         tap(saved)
         XCTAssertTrue(text("Add the public client ID from your Spotify developer app in Settings.").waitForExistence(timeout: 15))
         XCTAssertTrue(button("play-button", "Play").exists)
@@ -207,6 +214,10 @@ final class AppUITests: XCTestCase {
     func testAccessibleControlsRemainUsableAfterRotation() throws {
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             XCUIDevice.shared.orientation = orientation
+            waitUntil("The app must adopt the requested \(orientation == .portrait ? "portrait" : "landscape") layout") {
+                let bounds = self.app.frame
+                return orientation == .portrait ? bounds.height > bounds.width : bounds.width > bounds.height
+            }
             let settings = button("settings-toggle", "Settings")
             reveal(settings)
             let bounds = app.frame
@@ -249,8 +260,19 @@ final class AppUITests: XCTestCase {
         try voiceOver.enable()
         defer {
             record("phase:disable")
-            try? voiceOver.disable()
-            record("phase:disabled")
+            do {
+                try voiceOver.disable()
+                if voiceOver.isEnabled {
+                    record("phase:still-enabled")
+                    XCTFail("VoiceOver remained enabled after the service reported successful cleanup.")
+                } else {
+                    record("phase:disabled")
+                }
+            } catch {
+                record("phase:disable-failed")
+                record("cleanup error: \(error)")
+                XCTFail("VoiceOver cleanup failed: \(error)")
+            }
         }
         record("phase:current-speech")
         var speech = try voiceOver.currentSpeech().utterance

@@ -24,6 +24,10 @@ esac
 echo "iOS validation results: $NOSTALGIFY_IOS_RESULTS"
 
 cleanup() {
+  local NOSTALGIFY_VALIDATION_STATUS=$?
+  # Diagnostic collection must neither hide the original failure nor replace a
+  # successful suite with an export error. Every collector below is best effort.
+  set +e
   # Preserve a deduplicated inventory even when a build or UI test fails. Swift
   # 5 remains the language mode while first-party concurrency boundaries migrate.
   python3 - "$NOSTALGIFY_IOS_RESULTS" <<'PY'
@@ -53,6 +57,47 @@ PY
       xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/failure-screen.png" \
         >/dev/null 2>&1 || true
     fi
+    if [ "$NOSTALGIFY_VALIDATION_STATUS" -ne 0 ] && [ -n "$NOSTALGIFY_TEST_LOG_START" ]; then
+      # Compare a fresh fixture launch outside XCTest after its verdict is final.
+      # This is diagnostic evidence only: no test is retried and the failed exit
+      # status is preserved. Never run the comparison for a successful suite.
+      NOSTALGIFY_COMPARISON_ID=$(uuidgen)
+      if xcrun simctl launch --terminate-running-process "$NOSTALGIFY_SIMULATOR_ID" \
+          dev.nostalgify.ipad --ui-testing "$NOSTALGIFY_COMPARISON_ID" \
+          -AppleLanguages '(en)' -AppleLocale en_US \
+          > "$NOSTALGIFY_IOS_RESULTS/comparison-launch.log" 2>&1; then
+        NOSTALGIFY_CAPTURE_APP_DATA=$(xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data 2>/dev/null)
+        if [ -n "$NOSTALGIFY_CAPTURE_APP_DATA" ]; then
+          python3 - "$NOSTALGIFY_CAPTURE_APP_DATA/Documents/UITestStartupDiagnostics" \
+          "$NOSTALGIFY_COMPARISON_ID" "$NOSTALGIFY_IOS_RESULTS/comparison.json" <<'PY'
+import json, pathlib, sys, time
+directory, identifier, output = pathlib.Path(sys.argv[1]), sys.argv[2], pathlib.Path(sys.argv[3])
+started, completed = time.monotonic(), False
+while time.monotonic() - started < 25:
+    for file in directory.glob(identifier + '-*.json'):
+        try:
+            if json.loads(file.read_text()).get('phase') == 'completed':
+                completed = True
+        except (OSError, ValueError):
+            pass
+    if completed:
+        break
+    time.sleep(1)
+output.write_text(json.dumps({'diagnosticOnly': True, 'fixtureID': identifier, 'probeCompleted': completed, 'waitedSeconds': round(time.monotonic() - started, 1), 'waitLimitSeconds': 25}, indent=2) + '\n')
+PY
+        fi
+        xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/comparison.png" \
+          > "$NOSTALGIFY_IOS_RESULTS/comparison-screenshot.log" 2>&1 || true
+      fi
+    fi
+    # Probe filenames include fixture and launch UUIDs, so comparison/cold-launch
+    # evidence cannot overwrite previous attempts or relaunch persistence tests.
+    NOSTALGIFY_CAPTURE_APP_DATA=$(xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data 2>/dev/null)
+    if [ -n "$NOSTALGIFY_CAPTURE_APP_DATA" ] && [ -d "$NOSTALGIFY_CAPTURE_APP_DATA/Documents/UITestStartupDiagnostics" ]; then
+      mkdir -p "$NOSTALGIFY_IOS_RESULTS/startup-probes"
+      cp "$NOSTALGIFY_CAPTURE_APP_DATA/Documents/UITestStartupDiagnostics/"*.json \
+        "$NOSTALGIFY_IOS_RESULTS/startup-probes/" 2>/dev/null || true
+    fi
     # The first cold launch may fail well before the last five minutes. Retain
     # the whole test interval, bounded by this job's 45-minute deadline.
     NOSTALGIFY_LOG_TIME_ARGUMENTS=(--last 45m)
@@ -65,6 +110,7 @@ PY
     xcrun simctl shutdown "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
     xcrun simctl delete "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
   fi
+  return "$NOSTALGIFY_VALIDATION_STATUS"
 }
 trap cleanup EXIT
 
@@ -126,7 +172,7 @@ def executable_images(configuration):
     raise SystemExit(f'Built app executable missing for {configuration}.')
 debug = executable_images('Debug-iphonesimulator')
 release = executable_images('Release-iphoneos')
-markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed']
+markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed', b'UITestStartupDiagnostics']
 debug_fixture = any(markers[1] in image for image in debug.values())
 release_markers = [marker.decode() for marker in markers if any(marker in image for image in release.values())]
 result = {'passed': debug_fixture and not release_markers, 'debugFixturePresent': debug_fixture, 'releaseFixtureMarkers': release_markers, 'debugImages': list(debug), 'releaseImages': list(release)}

@@ -5,6 +5,7 @@ import { attachSkinStore } from "./skins.js";
 import { LOCAL_URI } from "../../../packages/contracts/src/player.js";
 import { createMockPlugin } from "./mock.js";
 import { safeWebError } from "./diagnostics.js";
+import { installSkinAccessibility } from "./skin-accessibility.js";
 
 const $ = id => document.getElementById(id);
 const native = Capacitor.isNativePlatform();
@@ -182,8 +183,10 @@ function renderList(container, items, emptyText) {
     const text = document.createElement("span"); text.className = "music-text";
     const title = document.createElement("span"); title.className = "music-title"; title.textContent = item.title;
     const subtitle = document.createElement("span"); subtitle.className = "music-subtitle"; subtitle.textContent = item.artist || (item.provider === "local" ? "Imported audio" : `Spotify ${item.kind}`);
+    subtitle.id = `${container.id}-subtitle-${encodeURIComponent(item.uri)}`;
     text.append(title, subtitle); play.append(icon, text);
     play.setAttribute("aria-label", `Play ${item.title}`);
+    play.setAttribute("aria-describedby", subtitle.id);
     play.addEventListener("click", () => action(() => host.command("playShelf", item.uri), play));
     const remove = document.createElement("button"); remove.className = "remove-item"; remove.textContent = "×"; remove.setAttribute("aria-label", `Remove ${item.title}`);
     play.dataset.uri = remove.dataset.uri = item.uri;
@@ -277,23 +280,7 @@ async function renderSkins() {
   $("skin-select").replaceChildren(new Option("Classic Winamp", ""), ...skins.map(skin => new Option(skin.name, skin.id)));
   $("skin-select").value = selected;
 }
-function installSkinAccessibility() {
-  // Webamp draws these duplicate readouts as individually positioned glyphs.
-  // WKWebView otherwise exposes hundreds of letters and off-screen marquee frames
-  // to VoiceOver. The shell provides complete track/status text and spoken times.
-  const bitmapReadouts = "#marquee, #kbps, #khz, #time, .mini-time, #playlist-shade-track-title, #playlist-shade-time, .playlist-running-time-display";
-  // EQ processing is unavailable. Retain its explanatory group and working
-  // shade/close controls, but omit the inert artwork from accessibility navigation.
-  const decorativeEQ = ".band, #on, #auto, #presets-context, #presets, #plus12db, #zerodb, #minus12db";
-  const update = () => {
-    for (const element of $("app").querySelectorAll(bitmapReadouts)) element.setAttribute("aria-hidden", "true");
-    for (const element of $("app").querySelector("#equalizer-window")?.querySelectorAll(decorativeEQ) || []) element.setAttribute("aria-hidden", "true");
-  };
-  update();
-  // React replaces readouts after skin changes or shade toggles; observe child
-  // replacement only so these ARIA writes cannot create an observer feedback loop.
-  new MutationObserver(update).observe($("app"), { childList: true, subtree: true });
-}
+
 $("diagnostics-button").addEventListener("click", () => action(async () => {
   const result = await host.exportDiagnostics();
   $("diagnostics-status").textContent = result?.shared ? "Diagnostics exported." : "Export closed.";
@@ -316,7 +303,7 @@ async function start() {
   if (preferences.spotify) { $("spotify-client-id").value = preferences.spotify.clientId || ""; $("spotify-redirect").value = preferences.spotify.redirectURI || "nostalgify://spotify-login-callback"; }
   if (native || demo) await refreshLibrary();
   mounted = await mountPlayer(host);
-  installSkinAccessibility();
+  installSkinAccessibility($("app"));
   mounted.webamp.onWillClose(cancel => cancel());
   host.restoreDefaultSkin = () => mounted.webamp.store.dispatch({ type: "LOAD_DEFAULT_SKIN" });
   host.confirmSkinLoad = () => new Promise((resolve, reject) => {
