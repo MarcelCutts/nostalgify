@@ -277,6 +277,23 @@ async function renderSkins() {
   $("skin-select").replaceChildren(new Option("Classic Winamp", ""), ...skins.map(skin => new Option(skin.name, skin.id)));
   $("skin-select").value = selected;
 }
+function installSkinAccessibility() {
+  // Webamp draws these duplicate readouts as individually positioned glyphs.
+  // WKWebView otherwise exposes hundreds of letters and off-screen marquee frames
+  // to VoiceOver. The shell provides complete track/status text and spoken times.
+  const bitmapReadouts = "#marquee, #kbps, #khz, #time, .mini-time, #playlist-shade-track-title, #playlist-shade-time, .playlist-running-time-display";
+  // EQ processing is unavailable. Retain its explanatory group and working
+  // shade/close controls, but omit the inert artwork from accessibility navigation.
+  const decorativeEQ = ".band, #on, #auto, #presets-context, #presets, #plus12db, #zerodb, #minus12db";
+  const update = () => {
+    for (const element of $("app").querySelectorAll(bitmapReadouts)) element.setAttribute("aria-hidden", "true");
+    for (const element of $("app").querySelector("#equalizer-window")?.querySelectorAll(decorativeEQ) || []) element.setAttribute("aria-hidden", "true");
+  };
+  update();
+  // React replaces readouts after skin changes or shade toggles; observe child
+  // replacement only so these ARIA writes cannot create an observer feedback loop.
+  new MutationObserver(update).observe($("app"), { childList: true, subtree: true });
+}
 $("diagnostics-button").addEventListener("click", () => action(async () => {
   const result = await host.exportDiagnostics();
   $("diagnostics-status").textContent = result?.shared ? "Diagnostics exported." : "Export closed.";
@@ -299,6 +316,7 @@ async function start() {
   if (preferences.spotify) { $("spotify-client-id").value = preferences.spotify.clientId || ""; $("spotify-redirect").value = preferences.spotify.redirectURI || "nostalgify://spotify-login-callback"; }
   if (native || demo) await refreshLibrary();
   mounted = await mountPlayer(host);
+  installSkinAccessibility();
   mounted.webamp.onWillClose(cancel => cancel());
   host.restoreDefaultSkin = () => mounted.webamp.store.dispatch({ type: "LOAD_DEFAULT_SKIN" });
   host.confirmSkinLoad = () => new Promise((resolve, reject) => {

@@ -43,6 +43,11 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
     assert.equal(await page.locator("#demo-banner").isVisible(), true);
     assert.equal(await page.locator("#main-window").isVisible(), true);
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("aria-hidden") === "true");
+    assert.equal(await page.locator("#webamp #marquee").ariaSnapshot(), "", "bitmap marquee glyphs must not be separate accessibility elements");
+    assert.equal(await page.locator("#equalizer-window .band").first().getAttribute("aria-hidden"), "true", "decorative EQ bands are omitted while its working title controls remain");
+    assert.equal(await page.locator("#webamp #play").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working classic transport remains exposed");
+    assert.equal(await page.locator("#equalizer-window #equalizer-close").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working EQ window controls remain exposed");
     const frame = await page.locator("#player-viewport").boundingBox();
     const classicPlayer = await page.locator("#main-window").boundingBox();
     assert.ok(classicPlayer.x >= frame.x && classicPlayer.y >= frame.y, "classic player must render inside its frame");
@@ -143,6 +148,12 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
     assert.equal(await page.locator("#skin-select").inputValue(), stableSkin);
     assert.equal(await page.locator("#skin-select option").count(), 2);
+    assert.equal(await page.locator("#webamp #marquee").ariaSnapshot(), "", "skin reload must preserve readable accessibility output without per-glyph duplicates");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
+    await page.waitForFunction(() => document.querySelector("#main-window .mini-time")?.getAttribute("aria-hidden") === "true");
+    assert.equal(await page.locator("#main-window .mini-time").ariaSnapshot(), "", "new compact-mode bitmap readouts must not expose individual characters");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("aria-hidden") === "true");
     await page.locator("#skin-select").selectOption("");
     await page.waitForFunction(async () => (await window.__ipad.host.getPreferences()).skinId === null);
     await page.locator("#skin-file").setInputFiles({ name: "broken.wsz", mimeType: "application/zip", buffer: Buffer.from([80, 75, 3, 4, 0, 0]) });

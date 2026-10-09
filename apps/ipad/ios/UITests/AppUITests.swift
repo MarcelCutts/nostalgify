@@ -50,12 +50,24 @@ final class AppUITests: XCTestCase {
 
     private func reveal(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
         XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
-        for _ in 0..<6 where !element.isHittable { app.webViews.firstMatch.swipeUp() }
-        for _ in 0..<8 where !element.isHittable { app.webViews.firstMatch.swipeDown() }
-        XCTAssertTrue(element.isHittable, "Element is inaccessible after scrolling: \(element)", file: file, line: line)
+        let webView = app.webViews.firstMatch
+        for _ in 0..<8 {
+            let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
+            let center = CGPoint(x: element.frame.midX, y: element.frame.midY)
+            if element.isHittable && visible.contains(center) { return }
+            if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
+        }
+        XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
     }
 
     private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+        // WKWebView can report a DOM control as hittable behind the keyboard.
+        // Dismiss the actual iPad keyboard before tapping a non-text control.
+        let hideKeyboard = app.keyboards.buttons["Hide keyboard"].firstMatch
+        if hideKeyboard.exists {
+            hideKeyboard.tap()
+            waitUntil("The keyboard must close before tapping content") { !self.app.keyboards.firstMatch.exists }
+        }
         reveal(element, file: file, line: line)
         element.tap()
     }
@@ -65,7 +77,8 @@ final class AppUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed, message)
     }
 
-    private func openFiles() { tap(button("local-source", "Files")) }
+    // WebKit exposes HTML aria-pressed controls as native accessibility switches.
+    private func openFiles() { tap(app.webViews.switches["Files"].firstMatch) }
 
     private func playFixture() {
         openFiles()
@@ -112,7 +125,7 @@ final class AppUITests: XCTestCase {
 
     func testFailedSpotifyHandoffCanRecoverToLocalPlayback() throws {
         playFixture()
-        tap(button("spotify-source", "Spotify"))
+        tap(app.webViews.switches["Spotify"].firstMatch)
         let link = app.webViews.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
         reveal(link)
         link.tap()

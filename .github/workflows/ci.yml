@@ -143,12 +143,12 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
           path: |
-            out/ios-ci/**/*.log
-            out/ios-ci/**/*.json
-            out/ios-ci/**/*.png
-            out/ios-ci/**/*.xcresult/**
-            out/ios-ci/**/Package.resolved
-            out/ios-ci/**/test-attachments/**
+            out/ios-ci/run.*/*.log
+            out/ios-ci/run.*/*.json
+            out/ios-ci/run.*/*.png
+            out/ios-ci/run.*/*.xcresult/**
+            out/ios-ci/run.*/Package.resolved
+            out/ios-ci/run.*/test-attachments/**
 
   required:
     name: Required checks
