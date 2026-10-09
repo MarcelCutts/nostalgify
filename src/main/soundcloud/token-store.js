@@ -70,6 +70,10 @@ function createTokenStore({ filePath, safeStorage, platform = process.platform }
         const encrypted = await handle.readFile();
         await handle.close();
         handle = null;
+        // Existing files must meet the same encryption policy as new writes.
+        if (platform === 'linux' && encrypted.subarray(0, 3).toString() === 'v10') {
+          throw storageError('storage_unavailable', 'Secure storage is unavailable. Unlock your system keychain, restart Nostalgify, and try again.');
+        }
         // A fresh profile has no account tokens. Avoid prompting/blocking on
         // Keychain for application credentials that never persist a user login.
         await requireEncryption();

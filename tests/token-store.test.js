@@ -240,7 +240,7 @@ test('async availability and decryption failures keep ciphertext for a later ret
   }
 });
 
-test('Linux async hardcoded-key fallback cannot overwrite securely stored tokens', async (t) => {
+test('Linux async hardcoded-key fallback is rejected on writes and existing-file reads', async (t) => {
   const { filePath } = await fixture(t);
   const adapter = encryptionAdapter();
   const store = createTokenStore({ filePath, safeStorage: adapter, platform: 'linux' });
@@ -251,16 +251,25 @@ test('Linux async hardcoded-key fallback cannot overwrite securely stored tokens
   await assert.rejects(store.save({ token: 'next' }), { code: 'storage_unavailable' });
   assert.deepEqual(await fs.readFile(filePath), previous);
   assert.deepEqual(await store.load(), { token: 'preserved' });
+  const fallback = Buffer.from('v10-test-only-fallback');
+  await fs.writeFile(filePath, fallback);
+  adapter.decryptStringAsync = async () => assert.fail('hardcoded-key ciphertext must not reach decryption');
+  await assert.rejects(store.load(), { code: 'storage_unavailable' });
+  assert.deepEqual(await fs.readFile(filePath), fallback, 'rejected ciphertext is preserved until explicitly cleared');
 });
 
 test('the Linux fallback guard allows macOS Keychain v10 ciphertext', async (t) => {
   const { filePath } = await fixture(t);
   const encrypted = Buffer.from('v10-test-only-keychain-ciphertext');
-  const adapter = encryptionAdapter({ encryptStringAsync: async () => encrypted });
+  const adapter = encryptionAdapter({
+    encryptStringAsync: async () => encrypted,
+    decryptStringAsync: async () => ({ result: JSON.stringify({ token: 'macos' }), shouldReEncrypt: false }),
+  });
   delete adapter.getSelectedStorageBackend;
   const store = createTokenStore({ filePath, safeStorage: adapter, platform: 'darwin' });
   await store.save({ token: 'macos' });
   assert.deepEqual(await fs.readFile(filePath), encrypted);
+  assert.deepEqual(await store.load(), { token: 'macos' });
 });
 
 test('token loading refuses symbolic links', async (t) => {
