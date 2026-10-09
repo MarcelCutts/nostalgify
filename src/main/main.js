@@ -79,6 +79,15 @@ async function playbackCommand(cmd, arg) {
   return playback.command(cmd, arg);
 }
 
+async function menuPlaybackCommand(cmd, arg) {
+  const result = await playbackCommand(cmd, arg);
+  if (result?.error && win && !win.isDestroyed()) {
+    buildMenu();
+    await dialog.showMessageBox(win, { type: "error", message: "Playback could not continue", detail: result.error });
+  }
+  return result;
+}
+
 // ---------- log ----------
 // Problems talking to Spotify go to ~/Library/Application Support/Nostalgify/nostalgify.log
 function logLine(...parts) {
@@ -589,13 +598,13 @@ function buildMenu() {
     {
       label: "Playback",
       submenu: [
-        { label: "Play/Pause", click: () => playbackCommand("playpause") },
-        { label: "Next Track", click: () => playbackCommand("next") },
-        { label: "Previous Track", click: () => playbackCommand("previous") },
+        { label: "Play/Pause", click: () => menuPlaybackCommand("playpause") },
+        { label: "Next Track", click: () => menuPlaybackCommand("next") },
+        { label: "Previous Track", click: () => menuPlaybackCommand("previous") },
         { type: "separator" },
-        { label: "Use Spotify", type: "radio", checked: playback?.getProvider() !== "soundcloud", click: () => playbackCommand("selectProvider", "spotify") },
-        { label: "Use SoundCloud", type: "radio", checked: playback?.getProvider() === "soundcloud", click: () => playbackCommand("selectProvider", "soundcloud") },
-        { label: "Open Current Source", click: () => playbackCommand("activate") },
+        { label: "Use Spotify", type: "radio", checked: playback?.getProvider() !== "soundcloud", click: () => menuPlaybackCommand("selectProvider", "spotify") },
+        { label: "Use SoundCloud", type: "radio", checked: playback?.getProvider() === "soundcloud", click: () => menuPlaybackCommand("selectProvider", "soundcloud") },
+        { label: "Open Current Source", click: () => menuPlaybackCommand("activate") },
         { type: "separator" },
         { label: "Connect SoundCloud…", click: connectSoundCloud },
         { label: "Forget Local SoundCloud Sign-in", click: async () => {
@@ -950,7 +959,7 @@ app.whenReady().then(() => {
         stopEjectWatch();
         if (!process.env.NOSTALGIFY_MOCK && (process.platform !== "darwin" || !(await spotifyIsRunning()))) return;
         const state = await getSpotifyState();
-        if (state.error) throw new Error("Pause Spotify before switching music sources.");
+        if (state.error) throw spotifyCommandError(state.error);
         if (state.running) await spotifyCommand("pause");
       },
     },
