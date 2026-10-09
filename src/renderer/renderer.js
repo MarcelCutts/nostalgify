@@ -218,7 +218,7 @@ async function main() {
         return;
       }
       if (e.target.closest("#equalizer-button")) {
-        if (eq.allowed()) return;
+        if (eq.canShowPanel()) return;
         e.stopPropagation();
         e.preventDefault();
         return;
@@ -321,6 +321,7 @@ async function main() {
   function apply(s) {
     const media = bridge.media;
     if (!media || !s) return;
+    eq.setProvider(s.provider);
     updateAttribution(s);
     const soundcloud = s.provider === "soundcloud";
 

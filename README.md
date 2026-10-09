@@ -130,8 +130,9 @@ A few things to know:
 ## Known limits
 
 - **Some classic controls and readouts are decorative.** The equalizer and balance control do not process either
-  source's audio; EQ artwork appears only when a skin supplies it. Spotify's own equalizer is separate. A silent
-  synthesizer drives the visualizer. Spotify's bitrate/sample-rate labels are fixed values, not measurements;
+  source's audio. When a skin supplies EQ artwork, the panel stays flat and OFF with disabled controls;
+  closing and shading it still work. Hover over the panel for the current source's explanation.
+  For Spotify, use **Spotify Settings → Playback → Equalizer**. A silent synthesizer drives the visualizer. Spotify's bitrate/sample-rate labels are fixed values, not measurements;
   SoundCloud hides those labels.
 - **The shelf contains saved links.** It does not expand playlists into tracks or provide a queue spanning both services.
 - **SoundCloud playback depends on API access.** Public links can still be blocked or limited to previews by the
