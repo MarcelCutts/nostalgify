@@ -100,6 +100,8 @@ for NOSTALGIFY_ATTEMPT in $(seq 1 60); do
   if [ -f "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" ]; then break; fi
   sleep 1
 done
+# Capture the mounted UI even when the self-check fails or times out.
+xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/launch.png"
 cp "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" "$NOSTALGIFY_IOS_RESULTS/native-selfcheck.json"
 python3 - "$NOSTALGIFY_IOS_RESULTS/native-selfcheck.json" <<'PY'
 import json, sys
@@ -111,5 +113,4 @@ if result.get('libraryCount') != 2 or result.get('provider') != 'local' or resul
     raise SystemExit('Native self-check produced an unexpected final library/playback state.')
 print('Native import, queue advancement, persistence, mounted UI, and Capacitor bridge self-check passed.')
 PY
-xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/launch.png"
 echo 'iOS build, native tests, local playback self-check, and launch passed. Physical Spotify/audio tests remain required.'

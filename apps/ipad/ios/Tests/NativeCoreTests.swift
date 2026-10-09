@@ -1,4 +1,5 @@
 import XCTest
+import WebKit
 @testable import App
 
 final class NativeCoreTests: XCTestCase {
@@ -134,5 +135,61 @@ final class NativeCoreTests: XCTestCase {
             "source": "https://private.example", "line": Double.infinity, "column": -1])
         XCTAssertEqual(untrusted["code"] as? String, "unexpected")
         XCTAssertEqual(untrusted.count, 1)
+    }
+
+    @MainActor
+    func testWebViewProbeWaitsThroughStartupNavigationAndAsyncBridge() async throws {
+        let webView = WKWebView()
+        webView.loadHTMLString("<html><body>Loading</body></html>", baseURL: nil)
+        let navigation = Task { @MainActor in
+            try await Task.sleep(for: .milliseconds(300))
+            webView.loadHTMLString(Self.webViewFixture(errors: "[]"), baseURL: nil)
+        }
+        defer { navigation.cancel() }
+        let result = try await NativeSelfCheck.checkWebView { webView }
+        XCTAssertEqual(result["passed"] as? Bool, true)
+        XCTAssertEqual(result["phase"] as? String, "done")
+        let calls = try await webView.evaluateJavaScript("window.bridgeCalls")
+        XCTAssertEqual(calls as? Int, 2)
+        let cleaned = try await webView.evaluateJavaScript("!('__nostalgifyNativeProbe' in window)")
+        XCTAssertEqual(cleaned as? Bool, true)
+    }
+
+    @MainActor
+    func testWebViewProbeFailsOnRecordedBrowserErrorWithoutLeakingMessage() async throws {
+        let webView = WKWebView()
+        webView.loadHTMLString(Self.webViewFixture(errors: "[{event:'web_error',code:'javascript_error',errorClass:'TypeError',source:'app.js',line:12,column:4,message:'private song'}]"), baseURL: nil)
+        let result = try await NativeSelfCheck.checkWebView { webView }
+        XCTAssertEqual(result["passed"] as? Bool, false)
+        XCTAssertEqual(result["code"] as? String, "selfcheck_webview_error")
+        let errors = try XCTUnwrap(result["webErrors"] as? [[String: Any]])
+        XCTAssertEqual(errors.count, 1)
+        XCTAssertEqual(errors.first?["errorClass"] as? String, "TypeError")
+        XCTAssertNil(errors.first?["message"])
+    }
+
+    private static func webViewFixture(errors: String) -> String {
+        """
+        <html data-player-ready="true"><body>
+        <div id="app"><div id="webamp"><div id="main-window"></div></div></div>
+        <p id="error-message" hidden></p>
+        <script>
+        window.bridgeCalls = 0;
+        window.Capacitor = {getPlatform: () => 'ios'};
+        window.nostalgify = {
+          debug: false,
+          getState: async () => {
+            window.bridgeCalls++;
+            await new Promise(resolve => setTimeout(resolve, 150));
+            return {provider:'spotify',state:'stopped',sequence:0};
+          },
+          getDiagnostics: async () => {
+            window.bridgeCalls++;
+            await new Promise(resolve => setTimeout(resolve, 50));
+            return {web:\(errors)};
+          }
+        };
+        </script></body></html>
+        """
     }
 }

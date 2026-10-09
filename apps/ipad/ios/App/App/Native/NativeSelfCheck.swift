@@ -30,18 +30,24 @@ enum NativeSelfCheck {
     private final class WebViewProbe {
         var continuation: CheckedContinuation<[String: Any], Error>?
         var timeout: Task<Void, Never>?
+        var evaluation: Task<Void, Never>?
+        var phase = "readiness"
+        var retries = 0
 
         func complete(_ result: Result<Any, Error>) {
             guard let continuation else { return }
             self.continuation = nil
             timeout?.cancel()
             timeout = nil
+            evaluation?.cancel()
+            evaluation = nil
             if case .success(let raw) = result, let value = raw as? [String: Any] {
                 let codes: Set<String> = ["selfcheck_webview_bridge", "selfcheck_webview_error", "selfcheck_webview_banner", "selfcheck_webview_timeout"]
                 let code = value["code"] as? String ?? ""
                 var safe: [String: Any] = ["passed": value["passed"] as? Bool == true,
                     "errorBannerVisible": value["errorBannerVisible"] as? Bool == true,
-                    "webErrors": (value["webErrors"] as? [[String: Any]] ?? []).suffix(20).map(NativeDiagnostics.sanitizedWebError)]
+                    "webErrors": (value["webErrors"] as? [[String: Any]] ?? []).suffix(20).map(NativeDiagnostics.sanitizedWebError),
+                    "phase": phase, "evaluationRetries": retries]
                 if codes.contains(code) { safe["code"] = code }
                 continuation.resume(returning: safe)
             } else {
@@ -50,7 +56,7 @@ enum NativeSelfCheck {
         }
     }
 
-    private static func checkWebView(_ provider: @MainActor () -> WKWebView?) async throws -> [String: Any] {
+    static func checkWebView(_ provider: @MainActor () -> WKWebView?) async throws -> [String: Any] {
         let deadline = ProcessInfo.processInfo.systemUptime + 30
         while provider() == nil, ProcessInfo.processInfo.systemUptime < deadline {
             try await Task.sleep(for: .milliseconds(100))
@@ -59,34 +65,49 @@ enum NativeSelfCheck {
             throw NativeFailure(code: "selfcheck_webview_bridge", message: "The bundled WebView was unavailable.")
         }
         let remaining = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        // Returning an unresolved Promise to callAsyncJavaScript can lose its
+        // completion handler when WebKit collects the result. Retain the Promise
+        // on the page and return only immediate polling snapshots to native code.
         let javascript = """
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
+        (() => {
           const host = window.nostalgify;
           const player = document.querySelector('#app #webamp #main-window');
-          if (host && player && document.documentElement.dataset.playerReady === 'true' &&
-              window.Capacitor?.getPlatform() === 'ios' && !host.debug) {
-            try {
-              const state = await host.getState();
-              const validState = ['spotify', 'local'].includes(state.provider) &&
-                ['playing', 'paused', 'stopped'].includes(state.state) &&
-                Number.isSafeInteger(state.sequence);
-              // Let pending layout/ResizeObserver notifications settle before
-              // checking startup diagnostics; never hide or clear UI errors.
-              await new Promise(resolve => setTimeout(resolve, 250));
-              const report = await host.getDiagnostics();
-              const webErrors = (report.web || []).filter(event => event.event === 'web_error');
-              const banner = document.getElementById('error-message');
-              const errorBannerVisible = Boolean(banner && !banner.hidden);
-              const passed = validState && webErrors.length === 0 && !errorBannerVisible;
-              return { passed, webErrors, errorBannerVisible,
-                code: !validState ? 'selfcheck_webview_bridge' : webErrors.length ? 'selfcheck_webview_error' :
-                  errorBannerVisible ? 'selfcheck_webview_banner' : '' };
-            } catch (_) { return { passed: false, code: 'selfcheck_webview_bridge' }; }
+          if (!(host && player && document.documentElement.dataset.playerReady === 'true' &&
+              window.Capacitor?.getPlatform() === 'ios' && !host.debug)) {
+            return { phase: 'readiness' };
           }
-          await new Promise(resolve => setTimeout(resolve, 100));
-        }
-        return { passed: false, code: 'selfcheck_webview_timeout' };
+          let probe = window.__nostalgifyNativeProbe;
+          if (!probe) {
+            probe = { phase: 'bridge', result: null, promise: null };
+            window.__nostalgifyNativeProbe = probe;
+            probe.promise = (async () => {
+              try {
+                const state = await host.getState();
+                const validState = ['spotify', 'local'].includes(state.provider) &&
+                  ['playing', 'paused', 'stopped'].includes(state.state) &&
+                  Number.isSafeInteger(state.sequence);
+                // Preserve real startup errors, including delayed layout errors.
+                await new Promise(resolve => setTimeout(resolve, 250));
+                probe.phase = 'diagnostics';
+                const report = await host.getDiagnostics();
+                const webErrors = (report.web || []).filter(event => event.event === 'web_error');
+                const banner = document.getElementById('error-message');
+                const errorBannerVisible = Boolean(banner && !banner.hidden);
+                probe.result = { passed: validState && webErrors.length === 0 && !errorBannerVisible,
+                  webErrors, errorBannerVisible,
+                  code: !validState ? 'selfcheck_webview_bridge' : webErrors.length ? 'selfcheck_webview_error' :
+                    errorBannerVisible ? 'selfcheck_webview_banner' : '' };
+              } catch (_) { probe.result = { passed: false, code: 'selfcheck_webview_bridge' }; }
+              probe.phase = 'done';
+            })();
+          }
+          if (probe.result) {
+            const report = probe.result;
+            delete window.__nostalgifyNativeProbe;
+            return { phase: 'done', report };
+          }
+          return { phase: probe.phase };
+        })();
         """
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<[String: Any], Error>) in
             let probe = WebViewProbe()
@@ -95,13 +116,25 @@ enum NativeSelfCheck {
                 do { try await Task.sleep(for: .seconds(remaining)) } catch { return }
                 probe.complete(.success(["passed": false, "code": "selfcheck_webview_timeout"]))
             }
-            Task { @MainActor in
-                do {
-                    let value = try await webView.callAsyncJavaScript(javascript,
-                        arguments: ["timeoutMs": remaining * 1000], in: nil, contentWorld: .page)
-                    probe.complete(.success(value as Any))
-                } catch {
-                    probe.complete(.failure(error))
+            probe.evaluation = Task { @MainActor in
+                while !Task.isCancelled, ProcessInfo.processInfo.systemUptime < deadline {
+                    do {
+                        let value = try await webView.evaluateJavaScript(javascript)
+                        if let poll = value as? [String: Any] {
+                            if let phase = poll["phase"] as? String, ["readiness", "bridge", "diagnostics", "done"].contains(phase) {
+                                probe.phase = phase
+                            }
+                            if let report = poll["report"] as? [String: Any] {
+                                probe.complete(.success(report))
+                                return
+                            }
+                        }
+                    } catch {
+                        // A page still loading may replace its execution context.
+                        // Retry the immediate check within the original deadline.
+                        probe.retries += 1
+                    }
+                    do { try await Task.sleep(for: .milliseconds(100)) } catch { return }
                 }
             }
         }
