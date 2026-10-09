@@ -63,6 +63,15 @@ trap cleanup EXIT
 
 xcodebuild -version | tee "$NOSTALGIFY_IOS_RESULTS/xcode.log"
 xcodebuild -showsdks > "$NOSTALGIFY_IOS_RESULTS/sdks.log"
+# Check the selected toolchain's interface before opting out of its expensive
+# system-wide post-failure collection. Test results and our own captures remain.
+python3 - "$NOSTALGIFY_IOS_RESULTS/xcodebuild-help.log" <<'PY'
+import pathlib, subprocess, sys
+result = subprocess.run(['xcodebuild', '-help'], text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+pathlib.Path(sys.argv[1]).write_text(result.stdout)
+if '-collect-test-diagnostics' not in result.stdout:
+    raise SystemExit('Selected Xcode does not support explicit test diagnostic collection policy.')
+PY
 node scripts/check-ios-project.cjs
 
 xcodebuild -resolvePackageDependencies -project "$NOSTALGIFY_PROJECT" -scheme App \
@@ -156,6 +165,7 @@ xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug 
   -test-timeouts-enabled YES \
   -default-test-execution-time-allowance 120 \
   -maximum-test-execution-time-allowance 180 \
+  -collect-test-diagnostics never \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
   -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \

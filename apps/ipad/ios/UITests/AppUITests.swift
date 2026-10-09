@@ -174,17 +174,49 @@ final class AppUITests: XCTestCase {
         // the runtime condition protects devices older than iPadOS 27.
         #if compiler(>=6.4)
         guard #available(iOS 27.0, *) else { throw XCTSkip("VoiceOver automation requires iPadOS 27.") }
+        let settings = button("settings-toggle", "Settings")
+        reveal(settings)
         let voiceOver = XCUIDevice.shared.voiceOverService
-        try voiceOver.enable()
-        defer { try? voiceOver.disable() }
-        var speech = try voiceOver.currentSpeech().utterance
-        for _ in 0..<20 {
-            if speech.localizedCaseInsensitiveContains("settings") { break }
-            speech = try voiceOver.moveForward().utterance
+        var trace: [String] = []
+        func record(_ value: String) {
+            if trace.count < 50 { trace.append(String(value.prefix(240))) }
+            // Phase-only console breadcrumbs identify a stalled service call.
+            // Speech stays in a bounded test attachment, never app diagnostics.
+            if value.hasPrefix("phase:") { print("UI_VOICEOVER \(value)") }
         }
-        XCTAssertTrue(speech.localizedCaseInsensitiveContains("settings"), "Settings must be reachable through VoiceOver navigation.")
-        XCTAssertTrue(speech.localizedCaseInsensitiveContains("button"), "VoiceOver must announce Settings as an actionable button.")
+        defer {
+            let attachment = XCTAttachment(string: trace.joined(separator: "\n"))
+            attachment.name = "VoiceOver navigation trace"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        record("phase:enable")
+        try voiceOver.enable()
+        defer {
+            record("phase:disable")
+            try? voiceOver.disable()
+            record("phase:disabled")
+        }
+        record("phase:current-speech")
+        var speech = try voiceOver.currentSpeech().utterance
+        record("speech: " + speech)
+        func isSettingsButton(_ utterance: String) -> Bool {
+            let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized.hasPrefix("settings") && normalized.contains("button")
+        }
+        // Webamp receives DOM focus at startup. The real WK accessibility tree
+        // places Settings before that focused subtree, so navigate backward to
+        // the preceding header control rather than through the entire player.
+        for index in 0..<20 {
+            if isSettingsButton(speech) { break }
+            record("phase:move-backward-\(index)")
+            speech = try voiceOver.moveBackward().utterance
+            record("speech: " + speech)
+        }
+        XCTAssertTrue(isSettingsButton(speech), "VoiceOver must reach Settings and announce it as a button, rather than incidental help text.")
+        record("phase:leave-settings")
         let next = try voiceOver.moveForward().utterance
+        record("speech: " + next)
         XCTAssertFalse(next.isEmpty)
         XCTAssertNotEqual(next, speech, "VoiceOver focus must be able to leave the Settings control.")
         #else
