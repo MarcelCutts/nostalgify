@@ -6,13 +6,13 @@ const path = require("path");
 
 module.exports = function runSelfTest(ctx) {
   const mode = process.env.NOSTALGIFY_SELFTEST;
-  if (["soundcloud", "soundcloud-live"].includes(mode) &&
+  if (["soundcloud", "soundcloud-live", "menus"].includes(mode) &&
       (ctx.app.isPackaged || process.env.NOSTALGIFY_MOCK !== "1")) {
     console.error(`FAIL ${mode} requires a development app and NOSTALGIFY_MOCK=1`);
     ctx.app.exit(1);
     return;
   }
-  if (process.env.NOSTALGIFY_SELFTEST === "menus" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
+  if (mode === "menus") {
     return require("../../tests/helpers/context-menu-selftest").runContextMenuSelftest(ctx);
   }
   if (["real", "focus"].includes(process.env.NOSTALGIFY_SELFTEST)) {
