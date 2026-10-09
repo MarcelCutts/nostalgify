@@ -25,14 +25,14 @@ function contextMenuTemplate(kind, state, { action, skinMenu, zoomMenu }) {
     separator, item("Clear Shelf", "clearShelf"),
   ];
   const select = [item("Select All", "selectAll"), item("Select None", "selectNone"), item("Invert Selection", "invertSelection")];
-  const sort = [item("Sort by Title", "sortByTitle"), item("Reverse Order", "reverseOrder"), item("Randomize Order", "randomizeOrder")];
+  const sort = [item("Sort Alphabetically", "sortAlphabetically"), item("Reverse Order", "reverseOrder"), item("Randomize Order", "randomizeOrder")];
   switch (kind) {
     case "main": return [
       { role: "about", label: "About Nostalgify" }, separator,
       item("Add Music Link from Clipboard", "addMusicLink"),
       { label: "Playback", submenu: playback }, separator,
       check("Equalizer Panel", "toggleEqualizerPanel", state.equalizerPanelOpen, state.equalizerPanelAvailable),
-      check("Playlist Editor", "togglePlaylistWindow", state.playlistOpen),
+      check("Shelf", "togglePlaylistWindow", state.playlistOpen),
       { label: "Skins", submenu: skinMenu },
       { label: "Options", submenu: options }, separator,
       { role: "minimize" }, { role: "quit", label: "Quit Nostalgify" },

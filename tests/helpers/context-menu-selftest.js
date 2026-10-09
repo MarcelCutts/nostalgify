@@ -70,10 +70,10 @@ async function runContextMenuSelftest({ win, app, setZoom, contextMenu, closeCon
       assert.equal(await js(`window.__webamp.store.getState().display.doubled`), false);
 
       menu = await open("#main-window", true);
-      const wasOpen = menu.items.find((item) => item.label === "Playlist Editor").checked;
-      await choose(menu, "Playlist Editor");
+      const wasOpen = menu.items.find((item) => item.label === "Shelf").checked;
+      await choose(menu, "Shelf");
       assert.equal(await js(`window.__webamp.store.getState().windows.genWindows.playlist.open`), !wasOpen);
-      if (wasOpen) await choose(await open("#main-window", true), "Playlist Editor");
+      if (wasOpen) await choose(await open("#main-window", true), "Shelf");
 
       menu = await open("#playlist-remove-menu");
       assert.equal(menu.items[0].enabled, false);
@@ -118,7 +118,7 @@ async function runContextMenuSelftest({ win, app, setZoom, contextMenu, closeCon
       assert.deepEqual(menu.items.map((item) => item.label), ["Add Music Link from Clipboard"]);
       await close();
       menu = await open("#playlist-misc-menu");
-      assert.ok(menu.items.find((item) => item.label === "Sort by Title"));
+      assert.ok(menu.items.find((item) => item.label === "Sort Alphabetically"));
       await close();
       menu = await open("#playlist-list-menu");
       assert.equal(menu.items[0].enabled, false);

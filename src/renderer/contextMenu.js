@@ -66,12 +66,12 @@ export function installContextMenus({ webamp, shelf, eq, transport }) {
       case "keepOnlySelected":
         if (selected.length) remove(s.playlist.trackOrder.filter((id) => !selected.includes(id)));
         break;
-      // Shelf edits should not stop the independent provider's current song.
+      // Shelf edits should not stop the selected source's current track.
       case "clearShelf": remove(s.playlist.trackOrder); break;
       case "selectAll": dispatch("SELECT_ALL"); break;
       case "selectNone": dispatch("SELECT_ZERO"); break;
       case "invertSelection": dispatch("INVERT_SELECTION"); break;
-      case "sortByTitle": dispatch("SET_TRACK_ORDER", {
+      case "sortAlphabetically": dispatch("SET_TRACK_ORDER", {
         trackOrder: [...s.playlist.trackOrder].sort((a, b) =>
           String(s.tracks[a]?.title || "").localeCompare(String(s.tracks[b]?.title || ""))),
       }); break;

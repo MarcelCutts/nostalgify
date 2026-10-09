@@ -10,7 +10,7 @@ test("native menu requests accept only known contexts and literal boolean state"
   const eq = menu.find((item) => item.label === "Equalizer Panel");
   assert.equal(eq.enabled, false);
   assert.equal(eq.checked, false);
-  assert.equal(menu.find((item) => item.label === "Playlist Editor").checked, false);
+  assert.equal(menu.find((item) => item.label === "Shelf").checked, false);
 });
 
 test("renderer input cannot supply native roles, labels, callbacks, or executable commands", () => {
