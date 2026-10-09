@@ -218,7 +218,7 @@ async function main() {
         return;
       }
       if (e.target.closest("#equalizer-button")) {
-        if (eq.allowed()) return;
+        if (eq.canShowPanel()) return;
         e.stopPropagation();
         e.preventDefault();
         return;

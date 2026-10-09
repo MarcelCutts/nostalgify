@@ -98,7 +98,7 @@ test("source-specific disabled semantics survive control replacement without dis
   const replacement = h.replaceControls();
   h.store.dispatch({ type: "WINDOW_SHADE_CHANGED" });
   h.flush();
-  assert.match(replacement.panel.attributes["aria-description"], /SoundCloud equalizer is not implemented yet/);
+  assert.match(replacement.panel.attributes["aria-description"], /EQ does not affect SoundCloud playback in Nostalgify/);
   assert.match(replacement.slider.attributes["aria-description"], /SoundCloud/);
   assert.equal(replacement.slider.disabled, true);
   assert.equal(replacement.presets.children[0].tabIndex, -1);
@@ -114,11 +114,11 @@ test("source-specific disabled semantics survive control replacement without dis
 test("skins without EQ artwork close the panel and preserve the existing automatic reopening policy", (t) => {
   const h = harness(t);
   h.policy.applyForSkin("skin:no-eq");
-  assert.equal(h.policy.allowed(), false);
+  assert.equal(h.policy.canShowPanel(), false);
   assert.equal(h.state.windows.genWindows.equalizer.open, false);
   assert.ok(h.classes.has("no-eq"));
   h.policy.applyForSkin("skin:with-eq");
-  assert.equal(h.policy.allowed(), true);
+  assert.equal(h.policy.canShowPanel(), true);
   assert.equal(h.state.windows.genWindows.equalizer.open, true);
   assert.ok(!h.classes.has("no-eq"));
   h.store.dispatch({ type: "CLOSE_WINDOW", windowId: "equalizer" });
