@@ -17,9 +17,12 @@ npm run check
 `npm test` runs the desktop, shared-contract, and iPad JavaScript tests. The build produces separate desktop staging and iPad web assets. `ipad:sync` copies the latter into the committed Capacitor project; it requires no Spotify account, client secret, signing certificate, or connected iPad. The browser smoke test runs the bundled UI against its test adapter:
 
 ```sh
-npx playwright install --with-deps chromium
+npx playwright install --with-deps chromium webkit
 npm run test:ipad:browser
+IPAD_SMOKE_BROWSER=webkit npm run test:ipad:browser
 ```
+
+The same UI smoke test runs in Chromium and WebKit, including touch layout, controls, provider changes, skin import and persistence after reload. These browser checks use a test adapter; the simulator self-check separately verifies the real Capacitor bridge. CI saves each engine's screenshot and result under separate browser artifact directories.
 
 The portable checks inspect the actual esbuild input/import graphs and packaging output. They reject Electron/Node imports in either renderer, SoundCloud/HLS or desktop implementation imports in the iPad renderer, Capacitor/iPad imports in the desktop renderer, and iOS project files accidentally included in desktop staging. The native structural check verifies Swift build-phase membership, the shared XCTest scheme, pinned packages, iPad targeting, callback registration, background audio configuration, and bundled rather than remotely hosted web assets. These checks do not compile Swift.
 
@@ -38,6 +41,7 @@ CI runs these checks on every push and pull request, with an additional manual d
 | Environment | Evidence it can provide | What it does not establish |
 | --- | --- | --- |
 | Node tests and build checks | Provider/contract behavior, isolated bundles, packaging boundaries, predictable errors with test doubles | Apple SDK compilation or device playback |
+| Chromium and WebKit browser smoke | Mounted UI, touch layout, controls and persistent skin import against the test adapter | Real Capacitor/Spotify integration or native audio playback |
 | Xcode simulator/device builds and XCTest | Debug simulator and unsigned Release device compilation, Spotify SDK linking, native unit tests, plugin/target integration | Spotify App Remote communication with the real Spotify iPad app |
 | Simulator launch, native self-check and screenshot | Bundled UI starts; native WAV import, queue progression and persistence operate without live credentials | Correct audible output, long background sessions, Bluetooth/AirPlay behavior |
 | Physical iPad | Real authentication/app switching, audible playback, Files imports, lock screen, interruptions and touch interaction | Compatibility with untested OS/device versions |

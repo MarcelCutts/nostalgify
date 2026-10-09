@@ -1,10 +1,13 @@
-// UI contract smoke only: mocked native plugin, Chromium touch emulation, no real audio/iPad claims.
-const { chromium, devices } = require("playwright");
+// UI contract smoke only: mocked native plugin and browser touch emulation, no real audio/iPad claims.
+const { chromium, webkit, devices } = require("playwright");
 const { execFileSync } = require("node:child_process");
 const { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join, resolve } = require("node:path");
 const assert = require("node:assert/strict");
+const engine = process.env.IPAD_SMOKE_BROWSER || "chromium";
+assert.ok(["chromium", "webkit"].includes(engine), "IPAD_SMOKE_BROWSER must be chromium or webkit");
+const browserType = engine === "webkit" ? webkit : chromium;
 const root = resolve(__dirname, "..");
 const outdir = mkdtempSync(join(tmpdir(), "nostalgify-ipad-smoke-"));
 const productionDir = join(outdir, "production");
@@ -13,8 +16,8 @@ mkdirSync(artifacts, { recursive: true });
 execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--dev", "--outdir", outdir], { cwd: root, stdio: "inherit" });
 execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", productionDir], { cwd: root, stdio: "inherit" });
 (async () => {
-  const system = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (!existsSync(chromium.executablePath()) && existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined);
-  const browser = await chromium.launch({ executablePath: system, headless: true, args: ["--no-sandbox", "--disable-crashpad-for-testing"] });
+  const system = engine === "chromium" ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (!existsSync(chromium.executablePath()) && existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined) : undefined;
+  const browser = await browserType.launch({ executablePath: system, headless: true, args: engine === "chromium" ? ["--no-sandbox", "--disable-crashpad-for-testing"] : [] });
   const errors = [];
   let page;
   try {
@@ -25,6 +28,8 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     // Fulfil requests from the build directory: no server or external traffic.
     await page.route("**/*", async route => {
       const url = new URL(route.request().url());
+      // WebKit routes blob fetches through interception; these stay inside the browser.
+      if (url.protocol === "blob:" || url.protocol === "data:") return route.continue();
       if (!["nostalgify.test", "nostalgify-production.test"].includes(url.hostname)) return route.abort();
       const directory = url.hostname === "nostalgify-production.test" ? productionDir : outdir;
       const file = resolve(directory, "." + (url.pathname === "/" ? "/index.html" : url.pathname));
@@ -119,7 +124,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.evaluate(() => typeof window.__ipad), "undefined");
     const meta = JSON.parse(readFileSync(join(outdir, "metafile.json"), "utf8"));
     assert.equal(Object.keys(meta.inputs).some(input => /apps\/desktop\/|node_modules\/electron\//.test(input)), false);
-    const report = { pass: true, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings paste and Spotify configuration", "saved link persistence after reload", "touch transport", "native file import contract", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion", "split-view no horizontal overflow", "no JS exceptions"] };
+    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings paste and Spotify configuration", "saved link persistence after reload", "touch transport", "native file import contract", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion", "split-view no horizontal overflow", "no JS exceptions"] };
     writeFileSync(join(artifacts, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));
     await context.close();
