@@ -260,12 +260,29 @@ test('storage failures reject user tokens without publishing a usable session', 
   const { auth } = await fixture(t, { store });
   await assert.rejects(auth.getAccessToken(), (error) => {
     assert.equal(error.code, 'storage_error');
-    assert.match(error.message, /Playback > Forget Local SoundCloud Sign-in, then connect again/);
+    assert.match(error.message, /restart Nostalgify/);
+    assert.doesNotMatch(error.message, /Forget/);
     assert.doesNotMatch(error.message, /raw token|access-new|refresh-new/);
     return true;
   });
   assert.equal(store.value, null);
   assert.equal((await auth.status()).connected, false);
+});
+
+test('failed credential persistence reports filesystem recovery without echoing store text', async (t) => {
+  const store = memoryStore(saved(CLOCK - 1));
+  store.save = async () => { throw Object.assign(new Error('raw token access-new'), {
+    code: 'storage_error', reason: 'filesystem', operation: 'save',
+  }); };
+  const { auth } = await fixture(t, { store });
+  await assert.rejects(auth.getAccessToken(), (error) => {
+    assert.equal(error.code, 'storage_error');
+    assert.match(error.message, /could not be saved/);
+    assert.match(error.message, /directory permissions and available disk space/);
+    assert.doesNotMatch(error.message, /keychain|Forget|raw token|access-new/i);
+    return true;
+  });
+  assert.equal(store.value, null);
 });
 
 test('timeout and disconnect close callback listeners', async (t) => {
