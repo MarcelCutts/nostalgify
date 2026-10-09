@@ -85,6 +85,7 @@ but may not contain this fork's changes. Follow the instructions for that releas
 | Change skin | Pick one from the **Skins** menu, or press Cmd+R for a random one |
 | Resize | Drag the right edge, bottom edge or corner. Cmd+1, 2 or 3 for fixed sizes |
 | Move the window | Drag any Winamp title bar |
+| Open the player menu | Right-click the player, click its top-left menu button, or press Shift+F10. Menus stay at the macOS text size when the player is enlarged. |
 | Put music on your shelf | Drag a supported Spotify or SoundCloud link onto Nostalgify, or copy the link and press Cmd+V. The playlist window's **ADD** button also offers a clipboard action. |
 | Play something from your shelf | Double-click it in the playlist window |
 | Tidy the shelf | Drag entries to reorder them. Select one and use **REM** to remove it |

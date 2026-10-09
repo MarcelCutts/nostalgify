@@ -14,6 +14,7 @@ const { createTokenStore } = require("./soundcloud/token-store");
 const { createSoundCloudClient } = require("./soundcloud/client");
 const { createMediaProxy } = require("./soundcloud/media-proxy");
 const { createElectronSoundCloudFetch } = require("./soundcloud/electron-fetch");
+const { contextMenuTemplate } = require("./context-menu");
 
 // In development the skins live next to the code. The packaged app uses a
 // visible folder in ~/Music so dropping skins in is easy.
@@ -549,9 +550,61 @@ function keepSpotifyHidden(seconds, refocus) {
 }
 
 // ---------- menu ----------
-function buildMenu() {
+function skinMenuTemplate() {
   const skins = listSkins();
   const { lastSkin } = readPrefs();
+  return [
+    { label: "Random Skin", accelerator: "CmdOrCtrl+R", click: randomSkin },
+    { label: "Open Skins Folder", click: () => shell.openPath(SKINS_DIR) },
+    { label: "Download Starter Skins", click: () => downloadStarterSkins({ force: true }) },
+    { label: "Browse More Skins Online", click: () => shell.openExternal("https://skins.webamp.org/") },
+    { type: "separator" },
+    ...(skins.length ? skins.map((s) => ({
+      label: s.name, type: "radio", checked: s.url === lastSkin, click: () => applySkin(s),
+    })) : [{ label: "Drop .wsz files into the skins folder", enabled: false }]),
+  ];
+}
+
+function zoomMenuTemplate() {
+  return [
+    { label: "Actual Size", accelerator: "CmdOrCtrl+1", click: () => setZoom(1) },
+    { label: "Double Size", accelerator: "CmdOrCtrl+2", click: () => setZoom(2) },
+    { label: "Triple Size", accelerator: "CmdOrCtrl+3", click: () => setZoom(3) },
+    { type: "separator" },
+    { label: "Bigger", accelerator: "CmdOrCtrl+=", click: () => setZoom(zoom + 0.25) },
+    { label: "Smaller", accelerator: "CmdOrCtrl+-", click: () => setZoom(zoom - 0.25) },
+  ];
+}
+
+let contextMenu = null;
+function closeContextMenu() {
+  contextMenu?.closePopup(win);
+  contextMenu = null;
+}
+
+function showContextMenu(event, kind, state) {
+  if (!fromPlayer(event)) return;
+  const contents = win.webContents;
+  const frame = event.senderFrame;
+  const template = contextMenuTemplate(kind, state, {
+    action: (action) => {
+      closeContextMenu();
+      if (!contents.isDestroyed() && frame === contents.mainFrame) contents.send("menu:action", action);
+    },
+    skins: skinMenuTemplate(), zoom: zoomMenuTemplate(),
+  });
+  if (!template.length) return;
+  closeContextMenu();
+  const menu = Menu.buildFromTemplate(template);
+  contextMenu = menu;
+  const clear = () => { if (contextMenu === menu) contextMenu = null; };
+  menu.once("menu-will-close", clear);
+  // Let macOS position the popup at the pointer and constrain it to the screen,
+  // independent of Chromium's zoom and the transparent player window's bounds.
+  menu.popup({ window: win, callback: clear });
+}
+
+function buildMenu() {
   const template = [
     {
       label: app.name,
@@ -567,24 +620,7 @@ function buildMenu() {
     },
     {
       label: "Skins",
-      submenu: [
-        { label: "Random Skin", accelerator: "CmdOrCtrl+R", click: randomSkin },
-        { label: "Open Skins Folder", click: () => shell.openPath(SKINS_DIR) },
-        { label: "Download Starter Skins", click: () => downloadStarterSkins({ force: true }) },
-        {
-          label: "Browse More Skins Online",
-          click: () => shell.openExternal("https://skins.webamp.org/"),
-        },
-        { type: "separator" },
-        ...(skins.length
-          ? skins.map((s) => ({
-              label: s.name,
-              type: "radio",
-              checked: s.url === lastSkin,
-              click: () => applySkin(s),
-            }))
-          : [{ label: "Drop .wsz files into the skins folder", enabled: false }]),
-      ],
+      submenu: skinMenuTemplate(),
     },
     {
       label: "Playback",
@@ -606,14 +642,7 @@ function buildMenu() {
     },
     {
       label: "View",
-      submenu: [
-        { label: "Actual Size", accelerator: "CmdOrCtrl+1", click: () => setZoom(1) },
-        { label: "Double Size", accelerator: "CmdOrCtrl+2", click: () => setZoom(2) },
-        { label: "Triple Size", accelerator: "CmdOrCtrl+3", click: () => setZoom(3) },
-        { type: "separator" },
-        { label: "Bigger", accelerator: "CmdOrCtrl+=", click: () => setZoom(zoom + 0.25) },
-        { label: "Smaller", accelerator: "CmdOrCtrl+-", click: () => setZoom(zoom - 0.25) },
-      ],
+      submenu: zoomMenuTemplate(),
     },
     { role: "windowMenu" },
   ];
@@ -651,6 +680,7 @@ function createWindow() {
   win.on("focus", () => stopEjectWatch());
   win.webContents.on("did-finish-load", () => setZoom(zoom, { save: false }));
   win.webContents.on("did-start-loading", () => {
+    closeContextMenu();
     cancelAudioRequests();
     // Reload destroys its audio element. Invalidate outstanding loads and state.
     playback?.rendererReset();
@@ -662,7 +692,7 @@ function createWindow() {
     if (/^https?:/.test(url)) shell.openExternal(url);
     return { action: "deny" };
   });
-  win.on("closed", () => { cancelAudioRequests(); win = null; });
+  win.on("closed", () => { closeContextMenu(); cancelAudioRequests(); win = null; });
   // Never navigate away from the player, for example to a dropped link.
   win.webContents.on("will-navigate", (e) => e.preventDefault());
 
@@ -680,6 +710,8 @@ function createWindow() {
       spotifyCommand,
       getSpotifyState,
       playback,
+      contextMenu: () => contextMenu,
+      closeContextMenu,
     });
   }
 }
@@ -846,6 +878,7 @@ function stopResize() {
 }
 
 // ---------- IPC ----------
+ipcMain.on("menu:show", showContextMenu);
 ipcMain.handle("layout", (_e, w, h) => {
   w = Math.round(Number(w));
   h = Math.round(Number(h));

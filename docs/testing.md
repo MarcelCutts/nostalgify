@@ -46,10 +46,12 @@ NOSTALGIFY_MOCK=1 NOSTALGIFY_SELFTEST=soundcloud npm start
 | `size` | Window size and screen boundaries | Geometry log |
 | `shelf` | Adding, playing and removing saved links | Shelf/command logs and screenshot; Spotify metadata may use the network |
 | `eq` | Showing EQ artwork only when supplied by a skin | State log and screenshots; requires the expected local skins |
+| `menus` | Native popups at multiple sizes, submenu actions, shelf edits and reload cleanup | Assertions; nonzero exit on failure |
 | `soundcloud` | Offline AAC/HLS decoding, controls, source switching, shelf persistence, attribution and reload | Assertions; nonzero exit on failure |
 
 The first five modes are diagnostic scripts, so review their output rather than
-assuming a zero exit code proves every behavior. The SoundCloud fixture is
+assuming a zero exit code proves every behavior. The `menus` and `soundcloud`
+modes assert their results. The SoundCloud fixture is
 [generated silence](../tests/fixtures/soundcloud/README.md) and makes no live
 SoundCloud requests. It checks compact attribution hit targets, including Webamp
 Double Size, without proving physical speaker output.

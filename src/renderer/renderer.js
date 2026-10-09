@@ -4,6 +4,7 @@ import { manageLayout, addResizeGrips } from "./layout.js";
 import { createEqPolicy } from "./eq.js";
 import { createShelf } from "./shelf.js";
 import { createSoundCloudAudio } from "./soundcloudAudio.js";
+import { installContextMenus } from "./contextMenu.js";
 
 // Register before any asynchronous UI work so provider switches cannot send
 // commands into an uninitialized audio engine.
@@ -187,6 +188,7 @@ async function main() {
   const eq = createEqPolicy(webamp, skins);
   onSkinLoad((url) => eq.applyForSkin(url));
   eq.applyForSkin(initial);
+  installContextMenus({ webamp, shelf, eq, transport });
   window.nostalgify.onSetSkin((url) => webamp.setSkinFromUrl(url));
   window.nostalgify.onSkinsChanged((list) => {
     eq.updateSkins(list);

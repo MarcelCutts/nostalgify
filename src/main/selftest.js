@@ -5,6 +5,9 @@ const fs = require("fs");
 const path = require("path");
 
 module.exports = function runSelfTest(ctx) {
+  if (process.env.NOSTALGIFY_SELFTEST === "menus" && !ctx.app.isPackaged && process.env.NOSTALGIFY_MOCK === "1") {
+    return require("../../tests/helpers/context-menu-selftest").runContextMenuSelftest(ctx);
+  }
   if (["real", "focus"].includes(process.env.NOSTALGIFY_SELFTEST)) {
     return require("./spotify-selftest").runRealSpotifySelftest(ctx);
   }
