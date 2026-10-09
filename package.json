@@ -3,12 +3,12 @@
   "productName": "Nostalgify",
   "version": "0.1.0",
   "private": true,
-  "description": "Classic Winamp 2 skins as a remote control for the Spotify desktop app on macOS.",
+  "description": "Classic Winamp 2 skins for Spotify desktop control and public SoundCloud playback on macOS.",
   "main": "src/main/main.js",
   "homepage": "https://0xchaosbi.github.io/nostalgify/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/0xchaosbi/nostalgify.git"
+    "url": "https://github.com/MarcelCutts/nostalgify.git"
   },
   "license": "MIT",
   "scripts": {
@@ -29,6 +29,6 @@
     "webamp": "^2.3.1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   }
 }
