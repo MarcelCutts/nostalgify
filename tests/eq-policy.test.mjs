@@ -8,13 +8,41 @@ const built = await build({
 });
 const { createEqPolicy } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString("base64")}`);
 
-function element({ input = false, children = [] } = {}) {
+// Model the selector forms used by the policy, including descendants and
+// reflected tabindex. Unknown forms fail rather than silently overmatching.
+function element({ tag = "div", id, className, children = [] } = {}) {
   const node = {
-    attributes: {}, tabIndex: 0, title: "", children,
-    setAttribute(name, value) { this.attributes[name] = value; },
-    querySelectorAll() { return children; },
+    attributes: { ...(id ? { id } : {}), ...(className ? { class: className } : {}) },
+    title: "", children,
+    setAttribute(name, value) { this.attributes[name] = String(value); },
+    get tabIndex() { return this.attributes.tabindex == null ? (tag === "input" ? 0 : -1) : Number(this.attributes.tabindex); },
+    set tabIndex(value) { this.attributes.tabindex = String(value); },
+    matches(selector) {
+      if (selector === "*") return true;
+      if (/^#[\w-]+$/.test(selector)) return this.attributes.id === selector.slice(1);
+      if (/^\.[\w-]+$/.test(selector)) return (this.attributes.class || "").split(/\s+/).includes(selector.slice(1));
+      if (/^[a-z]+$/.test(selector)) return tag === selector;
+      const attribute = selector.match(/^\[([\w-]+)(?:=['"]([^'"]+)['"])?\]$/);
+      if (attribute) return attribute[2] == null
+        ? Object.hasOwn(this.attributes, attribute[1])
+        : this.attributes[attribute[1]] === attribute[2];
+      throw new SyntaxError(`Unsupported fixture selector: ${selector}`);
+    },
+    querySelectorAll(selector) {
+      const selectors = selector.split(",").map((part) => part.trim());
+      if (selectors.some((part) => !part)) throw new SyntaxError("Empty selector");
+      const found = [];
+      function visit(parent) {
+        for (const child of parent.children) {
+          if (selectors.some((part) => child.matches(part))) found.push(child);
+          visit(child);
+        }
+      }
+      visit(this);
+      return found;
+    },
   };
-  if (input) node.disabled = false;
+  if (tag === "input") node.disabled = false;
   return node;
 }
 
@@ -27,15 +55,39 @@ function harness(t) {
   };
   let listener = () => {};
   let panel;
-  function replaceControls() {
-    const slider = element({ input: true });
-    const band = element({ children: [slider] });
-    const on = element();
-    const presets = element({ children: [element({ input: true })] });
-    // These working controls deliberately aren't among the decorative controls.
-    const close = element(), shade = element(), volume = element({ input: true });
-    panel = element({ children: [band, on, presets] });
-    return { panel, band, slider, on, presets, close, shade, volume };
+  function replaceControls({ shaded = false } = {}) {
+    // Webamp 2.3.1 uses div-based EQ controls. Close/shade live inside the
+    // panel in both modes; only the shaded panel contains native range inputs.
+    const close = element({ id: "equalizer-close" });
+    const shade = element({ id: "equalizer-shade" });
+    const titleButtons = element({ id: "eq-buttons", children: [shade, close] });
+    const protectedControls = [titleButtons, close, shade];
+    let content;
+    let decorative = [];
+    if (shaded) {
+      const volume = element({ tag: "input", id: "equalizer-volume" });
+      const balance = element({ tag: "input", id: "equalizer-balance" });
+      protectedControls.push(volume, balance);
+      content = element({ children: [titleButtons, volume, balance] });
+    } else {
+      const bands = ["preamp", 60, 170, 310, 600, 1000, 3000, 6000, 12000, 14000, 16000].map((band) =>
+        element({ id: band === "preamp" ? band : `band-${band}`, className: "band", children: [element({ children: [element()] })] })
+      );
+      const on = element({ id: "on" }), auto = element({ id: "auto" });
+      const presets = element({ id: "presets" });
+      const presetsContext = element({ id: "presets-context", children: [presets] });
+      const levels = ["plus12db", "zerodb", "minus12db"].map((id) => element({ id }));
+      const titleBar = element({ className: "equalizer-top", children: [titleButtons] });
+      protectedControls.push(titleBar);
+      decorative = [...bands, on, auto, presetsContext, presets, ...levels];
+      content = element({ children: [
+        titleBar,
+        on, auto, element({ id: "eq-graph" }), presetsContext, bands[0], ...levels,
+        element({ children: bands.slice(1) }),
+      ] });
+    }
+    panel = element({ id: "equalizer-window", children: [content] });
+    return { panel, decorative, protectedControls };
   }
   const oldDocument = globalThis.document;
   const oldRaf = globalThis.requestAnimationFrame;
@@ -66,7 +118,7 @@ function harness(t) {
   return { policy, state, store, classes, replaceControls, flush() { while (frames.length) frames.shift()(); } };
 }
 
-test("decorative EQ stays flat/OFF even if a preset or shortcut dispatches EQ changes", (t) => {
+test("decorative EQ stays flat/OFF after direct EQ actions", (t) => {
   const h = harness(t);
   h.policy.applyForSkin("skin:with-eq");
   assert.equal(h.state.equalizer.on, false);
@@ -81,32 +133,53 @@ test("decorative EQ stays flat/OFF even if a preset or shortcut dispatches EQ ch
   h.flush();
 });
 
-test("source-specific disabled semantics survive control replacement without disabling working window controls", (t) => {
+function assertDecorativeControls(controls, provider) {
+  for (const control of controls) {
+    assert.equal(control.attributes["aria-disabled"], "true", control.attributes.id);
+    assert.equal(control.tabIndex, -1, control.attributes.id);
+    assert.match(control.attributes["aria-description"], provider);
+  }
+}
+
+function assertProtectedControls(controls) {
+  for (const control of controls) {
+    assert.equal(control.attributes["aria-disabled"], undefined, control.attributes.id);
+    assert.equal(control.attributes["aria-description"], undefined, control.attributes.id);
+    assert.equal(control.attributes.tabindex, undefined, control.attributes.id);
+    if ("disabled" in control) {
+      assert.equal(control.disabled, false, control.attributes.id);
+      assert.equal(control.tabIndex, 0, control.attributes.id);
+    }
+  }
+}
+
+test("source descriptions survive shade replacements and preserve window and compact controls", (t) => {
   const h = harness(t);
   const first = h.replaceControls();
   h.policy.applyForSkin(null);
   h.flush();
   assert.match(first.panel.title, /Spotify Settings > Playback > Equalizer/);
   assert.equal(first.panel.attributes.role, "group");
-  assert.equal(first.slider.disabled, true);
-  assert.equal(first.slider.tabIndex, -1);
-  assert.equal(first.slider.attributes["aria-disabled"], "true");
-  assert.equal(first.on.tabIndex, -1);
-  assert.equal(first.on.attributes["aria-disabled"], "true");
+  assertDecorativeControls(first.decorative, /Spotify/);
+  assertProtectedControls(first.protectedControls);
 
   h.policy.setProvider("soundcloud");
+  h.flush(); // Finish the provider-change frame before testing the listener.
+  const compact = h.replaceControls({ shaded: true });
+  h.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "equalizer" });
+  assert.equal(compact.panel.attributes["aria-description"], undefined);
+  h.flush();
+  assert.match(compact.panel.attributes["aria-description"], /EQ does not affect SoundCloud playback in Nostalgify/);
+  assertProtectedControls(compact.protectedControls);
+
   const replacement = h.replaceControls();
-  h.store.dispatch({ type: "WINDOW_SHADE_CHANGED" });
+  h.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "equalizer" });
+  assert.equal(replacement.panel.attributes["aria-description"], undefined);
+  assert.equal(replacement.decorative[0].attributes["aria-disabled"], undefined);
   h.flush();
   assert.match(replacement.panel.attributes["aria-description"], /EQ does not affect SoundCloud playback in Nostalgify/);
-  assert.match(replacement.slider.attributes["aria-description"], /SoundCloud/);
-  assert.equal(replacement.slider.disabled, true);
-  assert.equal(replacement.presets.children[0].tabIndex, -1);
-  for (const control of [replacement.close, replacement.shade, replacement.volume]) {
-    assert.equal(control.tabIndex, 0);
-    assert.equal(control.attributes["aria-disabled"], undefined);
-  }
-  assert.equal(replacement.volume.disabled, false);
+  assertDecorativeControls(replacement.decorative, /SoundCloud/);
+  assertProtectedControls(replacement.protectedControls);
   h.policy.setProvider("spotify");
   assert.match(replacement.panel.title, /Spotify Settings/);
 });
