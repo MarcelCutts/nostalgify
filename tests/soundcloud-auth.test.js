@@ -98,6 +98,90 @@ test('missing authentication never opens the browser', async (t) => {
   assert.equal(opens, 0);
 });
 
+test('token request times out during a shared storage read and a later request can use its result', async (t) => {
+  const loading = deferred(); const release = deferred();
+  const store = memoryStore(saved());
+  let reads = 0;
+  let requests = 0;
+  store.load = async () => { reads++; loading.resolve(); return release.promise; };
+  const { auth } = await fixture(t, { store, timeoutMs: 30,
+    fetch: async () => { requests++; return response(); },
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let outcome = 'pending';
+  const first = auth.getAccessToken().then(() => { outcome = 'resolved'; }, (error) => { outcome = error.code; });
+  try {
+    await loading.promise;
+    t.mock.timers.tick(30);
+    await new Promise(setImmediate);
+    assert.equal(outcome, 'auth_timeout', 'the caller settles before storage returns');
+    const retry = auth.getAccessToken();
+    await new Promise(setImmediate);
+    assert.equal(reads, 1, 'retry shares the pending read after the auth queue is released');
+    assert.equal(requests, 0);
+    release.resolve(store.value);
+    assert.equal(await retry, 'access-old');
+    assert.equal(outcome, 'auth_timeout', 'the late read cannot resolve the timed-out caller');
+    assert.equal(requests, 0);
+    assert.equal(store.saves, 0);
+    assert.equal(store.clears, 0);
+  } finally { release.resolve(store.value); await first; }
+});
+
+test('disconnect cancels a token request before its pending storage read finishes', async (t) => {
+  const loading = deferred(); const release = deferred();
+  const store = memoryStore(saved());
+  store.load = async () => { loading.resolve(); return release.promise; };
+  let requests = 0;
+  const { auth } = await fixture(t, { store, fetch: async () => { requests++; return response(); } });
+  let outcome = 'pending';
+  const pending = auth.getAccessToken().then(() => { outcome = 'resolved'; }, (error) => { outcome = error.code; });
+  let disconnecting;
+  try {
+    await loading.promise;
+    disconnecting = auth.disconnect();
+    await new Promise(setImmediate);
+    assert.equal(outcome, 'auth_cancelled', 'the caller does not wait for Keychain');
+    assert.equal(store.clears, 0, 'the clear still waits for the underlying read');
+    release.resolve(store.value);
+    await disconnecting;
+    await new Promise(setImmediate);
+    assert.equal(store.value, null);
+    assert.equal((await auth.status()).connected, false);
+    await assert.rejects(auth.getAccessToken(), { code: 'auth_required' });
+    assert.equal(requests, 0, 'late saved credentials do not authenticate or refresh');
+  } finally { release.resolve(store.value); await pending; await disconnecting; }
+});
+
+test('a storage rejection after the token request timeout is handled and permits a fresh read', async (t) => {
+  const loading = deferred(); const release = deferred();
+  const store = memoryStore(saved());
+  let reads = 0;
+  store.load = async () => {
+    if (++reads > 1) return store.value;
+    loading.resolve();
+    await release.promise;
+    throw Object.assign(new Error('keychain temporarily unavailable'), { code: 'storage_unavailable' });
+  };
+  const { auth } = await fixture(t, { store, timeoutMs: 30 });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let outcome = 'pending';
+  const pending = auth.getAccessToken().then(() => { outcome = 'resolved'; }, (error) => { outcome = error.code; });
+  try {
+    await loading.promise;
+    t.mock.timers.tick(30);
+    await new Promise(setImmediate);
+    assert.equal(outcome, 'auth_timeout');
+    release.resolve();
+    // Let the late rejection reach the shared load and storage queues. The
+    // test runner also rejects unhandled promises from this abandoned wait.
+    await new Promise(setImmediate);
+    assert.equal(await auth.getAccessToken(), 'access-old');
+    assert.equal(reads, 2);
+    assert.equal(outcome, 'auth_timeout');
+  } finally { release.resolve(); await pending; }
+});
+
 test('concurrent expired-token requests share one refresh and durably rotate credentials', async (t) => {
   const store = memoryStore(saved(CLOCK - 1));
   let requests = 0;

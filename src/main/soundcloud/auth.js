@@ -301,13 +301,15 @@ function createSoundCloudAuth({ clientId, clientSecret, redirectUri = DEFAULT_RE
   function getAccessToken() {
     try { requireConfigured(); } catch (error) { return Promise.reject(error); }
     return serialized(async (epoch) => {
-      await loadTokens();
-      assertCurrent(epoch);
-      if (!tokens && !applicationCredentials) throw required();
-      if (tokens?.expiresAt > now() + 60000) return tokens.accessToken;
-      const previous = tokens;
       const op = operation(epoch);
       try {
+        // Bound this caller's wait even when a shared Keychain read is still
+        // pending. The storage operation itself finishes independently.
+        await op.wait(loadTokens());
+        op.check();
+        if (!tokens && !applicationCredentials) throw required();
+        if (tokens?.expiresAt > now() + 60000) return tokens.accessToken;
+        const previous = tokens;
         // A refresh token is single-use. Remove the saved token before sending
         // it, so an ambiguous network failure cannot cause its reuse.
         tokens = null;
