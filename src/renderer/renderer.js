@@ -212,13 +212,6 @@ async function main() {
     "click",
     (e) => {
       if (!(e.target instanceof Element)) return;
-      // ADD > File and ADD > Dir point to the supported streaming links.
-      if (e.target.closest("#playlist-add-menu .add-file, #playlist-add-menu .add-dir")) {
-        e.stopPropagation();
-        e.preventDefault();
-        flash("Copy a Spotify or SoundCloud link, then use ADD URL", 3500);
-        return;
-      }
       if (e.target.closest("#equalizer-button")) {
         if (eq.canShowPanel()) return;
         e.stopPropagation();

@@ -1,6 +1,6 @@
 // Only fixed application actions cross the bridge. Labels, roles, skin paths,
 // and native menu callbacks are owned by the main process.
-function contextMenuTemplate(kind, state, { action, skins, zoom }) {
+function contextMenuTemplate(kind, state, { action, skinMenu, zoomMenu }) {
   if (!state || typeof state !== "object" || Array.isArray(state)) return [];
   const item = (label, name, options = {}) => ({ label, ...options, click: () => action(name) });
   const check = (label, name, checked, enabled = true) => item(label, name, {
@@ -11,38 +11,38 @@ function contextMenuTemplate(kind, state, { action, skins, zoom }) {
     item("Previous Track", "previous"), item("Play", "play"),
     item("Pause", "pause"), item("Stop", "stop"), item("Next Track", "next"),
     separator,
-    check("Shuffle", "shuffle", state.shuffle), check("Repeat", "repeat", state.repeat),
-    separator, item("Open Current Source", "source"),
+    check("Shuffle", "toggleShuffle", state.shuffle), check("Repeat", "toggleRepeat", state.repeat),
+    separator, item("Open Current Source", "openCurrentSource"),
   ];
   const options = [
-    check("Time Remaining", "time", state.remaining),
-    check("Double-size Skin", "double", state.doubled),
-    { label: "Window Size", submenu: zoom },
+    check("Time Remaining", "toggleTimeMode", state.remaining),
+    check("Double-size Skin", "toggleDoubleSize", state.doubled),
+    { label: "Window Size", submenu: zoomMenu },
   ];
   const remove = [
-    item("Remove Selected", "remove", { enabled: state.hasSelection === true }),
-    item("Keep Only Selected", "crop", { enabled: state.hasSelection === true }),
-    separator, item("Clear Shelf", "clear"),
+    item("Remove Selected", "removeSelected", { enabled: state.hasSelection === true }),
+    item("Keep Only Selected", "keepOnlySelected", { enabled: state.hasSelection === true }),
+    separator, item("Clear Shelf", "clearShelf"),
   ];
-  const select = [item("Select All", "selectAll"), item("Select None", "selectNone"), item("Invert Selection", "invert")];
-  const sort = [item("Sort by Title", "sort"), item("Reverse Order", "reverse"), item("Randomize Order", "randomize")];
+  const select = [item("Select All", "selectAll"), item("Select None", "selectNone"), item("Invert Selection", "invertSelection")];
+  const sort = [item("Sort by Title", "sortByTitle"), item("Reverse Order", "reverseOrder"), item("Randomize Order", "randomizeOrder")];
   switch (kind) {
     case "main": return [
       { role: "about", label: "About Nostalgify" }, separator,
-      item("Add Music Link from Clipboard", "add"),
+      item("Add Music Link from Clipboard", "addMusicLink"),
       { label: "Playback", submenu: playback }, separator,
-      check("Equalizer", "equalizer", state.equalizerOpen, state.equalizerAllowed),
-      check("Playlist Editor", "playlist", state.playlistOpen),
-      { label: "Skins", submenu: skins },
+      check("Equalizer Panel", "toggleEqualizerPanel", state.equalizerPanelOpen, state.equalizerPanelAvailable),
+      check("Playlist Editor", "togglePlaylistWindow", state.playlistOpen),
+      { label: "Skins", submenu: skinMenu },
       { label: "Options", submenu: options }, separator,
       { role: "minimize" }, { role: "quit", label: "Quit Nostalgify" },
     ];
-    case "options": return [...options, separator, { label: "Skins", submenu: skins }];
-    case "add": return [item("Add Music Link from Clipboard", "add")];
+    case "options": return [...options, separator, { label: "Skins", submenu: skinMenu }];
+    case "add": return [item("Add Music Link from Clipboard", "addMusicLink")];
     case "remove": return remove;
     case "select": return select;
     case "misc": return sort;
-    case "list": return [{ label: "Your shelf is saved automatically", enabled: false }, separator, item("Clear Shelf", "clear")];
+    case "list": return [{ label: "Your shelf is saved automatically", enabled: false }, separator, item("Clear Shelf", "clearShelf")];
     default: return [];
   }
 }

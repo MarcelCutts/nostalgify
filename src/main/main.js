@@ -591,7 +591,7 @@ function showContextMenu(event, kind, state) {
       closeContextMenu();
       if (!contents.isDestroyed() && frame === contents.mainFrame) contents.send("menu:action", action);
     },
-    skins: skinMenuTemplate(), zoom: zoomMenuTemplate(),
+    skinMenu: skinMenuTemplate(), zoomMenu: zoomMenuTemplate(),
   });
   if (!template.length) return;
   closeContextMenu();

@@ -5,8 +5,8 @@ export function installContextMenus({ webamp, shelf, eq, transport }) {
   function show(kind) {
     const s = store.getState();
     window.nostalgify.showContextMenu(kind, {
-      equalizerOpen: s.windows.genWindows.equalizer.open,
-      equalizerAllowed: eq.allowed(),
+      equalizerPanelOpen: s.windows.genWindows.equalizer.open,
+      equalizerPanelAvailable: eq.canShowPanel(),
       playlistOpen: s.windows.genWindows.playlist.open,
       remaining: s.media.timeMode === "REMAINING",
       doubled: s.display.doubled,
@@ -51,32 +51,32 @@ export function installContextMenus({ webamp, shelf, eq, transport }) {
       dispatch("SELECT_ZERO");
     };
     switch (action) {
-      case "add": void shelf.handleAddUrl(); break;
+      case "addMusicLink": void shelf.handleAddUrl(); break;
       case "play": transport("playOrFallback"); break;
       case "pause": case "previous": case "next": transport(action); break;
       case "stop": webamp.stop(); break;
-      case "source": transport("activate"); break;
-      case "shuffle": dispatch("TOGGLE_SHUFFLE"); break;
-      case "repeat": dispatch("TOGGLE_REPEAT"); break;
-      case "equalizer": if (eq.allowed()) dispatch("TOGGLE_WINDOW", { windowId: "equalizer" }); break;
-      case "playlist": dispatch("TOGGLE_WINDOW", { windowId: "playlist" }); break;
-      case "time": dispatch("TOGGLE_TIME_MODE"); break;
-      case "double": dispatch("TOGGLE_DOUBLESIZE_MODE"); break;
-      case "remove": remove(selected); break;
-      case "crop":
+      case "openCurrentSource": transport("activate"); break;
+      case "toggleShuffle": dispatch("TOGGLE_SHUFFLE"); break;
+      case "toggleRepeat": dispatch("TOGGLE_REPEAT"); break;
+      case "toggleEqualizerPanel": if (eq.canShowPanel()) dispatch("TOGGLE_WINDOW", { windowId: "equalizer" }); break;
+      case "togglePlaylistWindow": dispatch("TOGGLE_WINDOW", { windowId: "playlist" }); break;
+      case "toggleTimeMode": dispatch("TOGGLE_TIME_MODE"); break;
+      case "toggleDoubleSize": dispatch("TOGGLE_DOUBLESIZE_MODE"); break;
+      case "removeSelected": remove(selected); break;
+      case "keepOnlySelected":
         if (selected.length) remove(s.playlist.trackOrder.filter((id) => !selected.includes(id)));
         break;
       // Shelf edits should not stop the independent provider's current song.
-      case "clear": remove(s.playlist.trackOrder); break;
+      case "clearShelf": remove(s.playlist.trackOrder); break;
       case "selectAll": dispatch("SELECT_ALL"); break;
       case "selectNone": dispatch("SELECT_ZERO"); break;
-      case "invert": dispatch("INVERT_SELECTION"); break;
-      case "sort": dispatch("SET_TRACK_ORDER", {
+      case "invertSelection": dispatch("INVERT_SELECTION"); break;
+      case "sortByTitle": dispatch("SET_TRACK_ORDER", {
         trackOrder: [...s.playlist.trackOrder].sort((a, b) =>
           String(s.tracks[a]?.title || "").localeCompare(String(s.tracks[b]?.title || ""))),
       }); break;
-      case "reverse": dispatch("REVERSE_LIST"); break;
-      case "randomize": dispatch("RANDOMIZE_LIST"); break;
+      case "reverseOrder": dispatch("REVERSE_LIST"); break;
+      case "randomizeOrder": dispatch("RANDOMIZE_LIST"); break;
     }
   });
 }
