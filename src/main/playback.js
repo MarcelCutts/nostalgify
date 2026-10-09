@@ -28,6 +28,7 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
   const snapshot = () => ({ ...state, track: state.track && { ...state.track } });
   const current = (g) => !disposed && g === generation && desired === "soundcloud";
   const fail = (error) => {
+    wantsPlay = false;
     state.state = "paused";
     state.error = error?.code || "playback";
     state.message = error?.message || "SoundCloud playback failed. Try another track.";
@@ -36,6 +37,10 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
   function spotifyCommand(cmd, arg, g = generation) {
     const task = spotifyPending.catch(() => {}).then(async () => {
       if (disposed || generation !== g || desired !== "spotify") return;
+      if (cmd === "playShelf") {
+        await spotify.start();
+        if (disposed || generation !== g || desired !== "spotify") return;
+      }
       if (cmd !== "stop") return spotify.command(cmd, arg);
       // Keep both halves of Stop ahead of later native commands, and never
       // rewind a replacement selection after its source changes.
@@ -262,8 +267,9 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
       if (cmd === "previous" && state.position <= 3 && index > 0) return await loadTrack(index - 1);
       if (cmd === "previous") { cmd = "seek"; arg = 0; }
       if (cmd === "playpause") {
-        const pending = !loadDispatched && !state.error && (contextLoading || session);
-        cmd = state.state === "playing" || state.state === "buffering" || (pending && wantsPlay) ? "pause" : "play";
+        // Audio reports may trail the command acknowledgement. Toggle the
+        // latest requested state, including while a load is still pending.
+        cmd = !state.error && (contextLoading || session) && wantsPlay ? "pause" : "play";
       }
       if (cmd === "playOrFallback") cmd = "play";
       // Retry only on an explicit Play. A fresh stream may recover an expired
@@ -273,7 +279,7 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
         return await resolveContext(contextUri);
       }
       if (cmd === "play" && (state.error || !session) && index >= 0) {
-        return await loadTrack(index, generation, true, state.error ? state.position : 0);
+        return await loadTrack(index, generation, true, state.state === "stopped" ? 0 : state.position);
       }
       if (cmd === "play" || cmd === "pause") {
         wantsPlay = cmd === "play";
@@ -283,14 +289,25 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
           return;
         }
       }
-      if (!session) {
-        state.message = "Paste a SoundCloud track or playlist to begin";
-        return;
-      }
       if (cmd === "seek") {
         if (!Number.isFinite(arg)) throw new Error("Invalid seek position");
         pendingPosition = Math.max(0, Math.min(state.track?.duration || Infinity, arg));
-        if (loadDispatched) await audio.send({ type: "seek", session, position: pendingPosition });
+        if (!session && index >= 0) {
+          // The final ended session has been released, but the selected track
+          // still exists. Keep its seek position for the next explicit Play.
+          wantsPlay = false;
+          state.position = pendingPosition;
+          state.state = "paused";
+          state.message = preview ? "SoundCloud preview" : "";
+          return;
+        }
+      }
+      if (!session) {
+        state.message = index < 0 ? "Paste a SoundCloud track or playlist to begin" : "";
+        return;
+      }
+      if (cmd === "seek" && loadDispatched) {
+        await audio.send({ type: "seek", session, position: pendingPosition });
       } else if (cmd === "play" || cmd === "pause") {
         await audio.send({ type: cmd, session });
       }
@@ -324,6 +341,7 @@ function createPlayback({ spotify, soundcloud, audio, media, openExternal, onPro
       if (update.state === "ended") {
         // Duplicate ended notifications must not advance the queue twice.
         state.state = "stopped";
+        wantsPlay = false;
         const ended = session;
         session = null;
         void nextTrack(true).catch((error) => { if (session === ended) fail(error); });

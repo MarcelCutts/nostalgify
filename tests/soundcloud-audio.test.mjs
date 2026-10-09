@@ -112,7 +112,49 @@ test("source changes destroy prior media and suppress stale events and play reje
   assert.equal(h.reports.at(-1).session, "new");
   assert.equal(h.reports.at(-1).state, "loading");
   assert.ok(!JSON.stringify(h.reports).includes("signed-url"));
+  assert.deepEqual(h.acknowledgements.find((ack) => ack.requestId === "play-old"),
+    { requestId: "play-old", session: "old" });
   h.audio.dispose();
+});
+
+test("Play acknowledges acceptance while buffering longer than the IPC deadline", async () => {
+  const h = harness();
+  h.load("buffering", { autoPlay: false });
+  h.advance();
+  let finish;
+  h.audios[0].playResult = new Promise((resolve) => { finish = resolve; });
+  h.command({ type: "play", session: "buffering", requestId: "slow-play" });
+  assert.deepEqual(h.acknowledgements.at(-1), { requestId: "slow-play", session: "buffering" });
+  h.advance(11000);
+  assert.ok(h.reports.every((report) => report.state !== "error"));
+  finish();
+  await Promise.resolve();
+  h.audios[0].event("playing");
+  h.advance();
+  assert.equal(h.reports.at(-1).state, "playing");
+  assert.equal(h.acknowledgements.filter((ack) => ack.requestId === "slow-play").length, 1);
+  h.audio.dispose();
+});
+
+test("Play failures arrive through state after the acceptance acknowledgement", async () => {
+  for (const error of [new Error("https://private.example/signed"), new DOMException("private detail", "NotAllowedError")]) {
+    const h = harness();
+    h.load("failed", { autoPlay: false });
+    h.advance();
+    let fail;
+    h.audios[0].playResult = new Promise((_resolve, reject) => { fail = reject; });
+    h.command({ type: "play", session: "failed", requestId: "play-failed" });
+    assert.deepEqual(h.acknowledgements.at(-1), { requestId: "play-failed", session: "failed" });
+    fail(error);
+    await Promise.resolve();
+    await Promise.resolve();
+    h.advance();
+    assert.equal(h.reports.at(-1).state, "error");
+    assert.match(h.reports.at(-1).error, error.name === "NotAllowedError" ? /Press Play to allow/ : /could not play/);
+    assert.ok(!JSON.stringify(h.reports).includes("private"));
+    assert.equal(h.acknowledgements.filter((ack) => ack.requestId === "play-failed").length, 1);
+    h.audio.dispose();
+  }
 });
 
 test("loading without autoplay reports paused without depending on a native pause event", () => {

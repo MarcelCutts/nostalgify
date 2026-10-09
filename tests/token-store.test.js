@@ -5,6 +5,7 @@ const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const { createTokenStore } = require('../src/main/soundcloud/token-store');
+const { createSoundCloudAuth } = require('../src/main/soundcloud/auth');
 
 function encryptionAdapter(overrides = {}) {
   const key = crypto.randomBytes(32);
@@ -30,6 +31,16 @@ async function fixture(t, overrides = {}) {
   t.after(() => fs.rm(dir, { recursive: true, force: true }));
   const filePath = path.join(dir, 'user', 'soundcloud.tokens');
   return { dir, filePath, store: createTokenStore({ filePath, safeStorage: encryptionAdapter(overrides) }) };
+}
+
+function authForStore(t, store) {
+  const auth = createSoundCloudAuth({
+    clientId: 'test-client', store,
+    fetch: async () => assert.fail('storage checks must not request a token'),
+    openExternal: async () => assert.fail('storage checks must not open a browser'),
+  });
+  t.after(() => auth.dispose());
+  return auth;
 }
 
 test('tokens round trip encrypted with private file permissions', async (t) => {
@@ -97,6 +108,65 @@ test('corrupt ciphertext reports a fixed error without echoing token contents', 
   await fs.mkdir(path.dirname(filePath));
   await fs.writeFile(filePath, 'plaintext-secret-token');
   await assert.rejects(store.load(), (error) => error.code === 'storage_error' && !error.message.includes('plaintext-secret-token'));
+  await assert.rejects(authForStore(t, store).status(), (error) => {
+    assert.equal(error.code, 'storage_error');
+    assert.match(error.message, /Forget Local SoundCloud Sign-in/);
+    assert.doesNotMatch(error.message, /plaintext-secret-token|Unlock/);
+    return true;
+  });
+});
+
+test('temporary decrypt denial remains retryable when Electron availability reports true', async (t) => {
+  const { filePath } = await fixture(t);
+  const adapter = encryptionAdapter();
+  const store = createTokenStore({ filePath, safeStorage: adapter, platform: 'darwin' });
+  await store.save({ token: 'preserved' });
+  const previous = await fs.readFile(filePath);
+  const decrypt = adapter.decryptStringAsync;
+  adapter.decryptStringAsync = async () => {
+    throw new Error('safeStorage.decryptStringAsync is temporarily unavailable. Please try again.');
+  };
+  await assert.rejects(store.load(), { code: 'storage_unavailable', reason: 'temporary' });
+  await assert.rejects(authForStore(t, store).status(), (error) => {
+    assert.equal(error.code, 'storage_unavailable');
+    assert.match(error.message, /Restart Nostalgify and allow access/);
+    assert.doesNotMatch(error.message, /Forget|corrupt|safeStorage/);
+    return true;
+  });
+  assert.deepEqual(await fs.readFile(filePath), previous);
+  adapter.decryptStringAsync = decrypt;
+  assert.deepEqual(await store.load(), { token: 'preserved' });
+});
+
+test('filesystem failures identify read, save and clear operations without exposing native errors', async (t) => {
+  for (const [operation, method] of [['load', 'open'], ['save', 'rename'], ['clear', 'rm']]) {
+    const { store, filePath } = await fixture(t);
+    await store.save({ token: 'preserved' });
+    const original = fs[method];
+    const nativeError = Object.assign(new Error('sensitive file path'), { code: 'EACCES' });
+    const mock = t.mock.method(fs, method, async (...args) => {
+      if (method === 'rename' || args[0] === filePath) throw nativeError;
+      return original(...args);
+    });
+    try {
+      await assert.rejects(store[operation]({ token: 'next' }), (error) => {
+        assert.equal(error.code, 'storage_error');
+        assert.equal(error.reason, 'filesystem');
+        assert.equal(error.operation, operation);
+        assert.doesNotMatch(error.message, /sensitive|keychain/i);
+        return true;
+      });
+      if (operation === 'load' || operation === 'clear') {
+        const auth = authForStore(t, store);
+        await assert.rejects(operation === 'load' ? auth.status() : auth.disconnect(), (error) => {
+          assert.match(error.message, /directory permissions and available disk space/);
+          assert.doesNotMatch(error.message, /sensitive|keychain|Forget/i);
+          return true;
+        });
+      }
+    } finally { mock.mock.restore(); }
+    assert.deepEqual(await store.load(), { token: 'preserved' });
+  }
 });
 
 test('failed encryption preserves the previous file and cleans temporary output', async (t) => {
@@ -131,7 +201,7 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-test('pending Keychain operations yield to the event loop and serialize a queued clear', { timeout: 5000 }, async (t) => {
+test('queued clear waits for each in-flight asynchronous storage operation', async (t) => {
   for (const method of ['isAsyncEncryptionAvailable', 'encryptStringAsync', 'decryptStringAsync']) {
     const { filePath } = await fixture(t);
     const adapter = encryptionAdapter();
@@ -145,13 +215,10 @@ test('pending Keychain operations yield to the event loop and serialize a queued
       await release.promise;
       return original(...args);
     };
-    let settled = false;
-    const pending = (method === 'decryptStringAsync' ? store.load() : store.save({ token: 'after' }))
-      .finally(() => { settled = true; });
-    await entered.promise;
+    const pending = method === 'decryptStringAsync' ? store.load() : store.save({ token: 'after' });
+    await Promise.race([entered.promise, pending.then(() => assert.fail(`operation completed without calling ${method}`))]);
     const clearing = store.clear();
     await new Promise((resolve) => setImmediate(resolve));
-    assert.equal(settled, false, `${method} is still awaiting Keychain`);
     assert.ok((await fs.stat(filePath)).isFile(), 'clear cannot race the in-flight operation');
     release.resolve();
     await Promise.all([pending, clearing]);
@@ -159,7 +226,7 @@ test('pending Keychain operations yield to the event loop and serialize a queued
   }
 });
 
-test('key rotation rewrites atomically before queued saves and clears', { timeout: 5000 }, async (t) => {
+test('key rotation rewrites atomically before queued saves and clears', async (t) => {
   for (const nextOperation of ['save', 'clear']) {
     const { filePath } = await fixture(t);
     const adapter = encryptionAdapter();
@@ -177,7 +244,7 @@ test('key rotation rewrites atomically before queued saves and clears', { timeou
       return encrypt(value);
     };
     const loading = store.load();
-    await entered.promise;
+    await Promise.race([entered.promise, loading.then(() => assert.fail('load completed without re-encrypting'))]);
     const next = nextOperation === 'save' ? store.save({ token: 'new' }) : store.clear();
     assert.deepEqual(await fs.readFile(filePath), previous, 'old ciphertext survives until rotation commits');
     release.resolve();
@@ -214,7 +281,13 @@ test('failed rotation preserves ciphertext and a later load can retry', async (t
   const encrypt = adapter.encryptStringAsync;
   adapter.decryptStringAsync = async (value) => ({ ...await decrypt(value), shouldReEncrypt: true });
   adapter.encryptStringAsync = async () => { throw new Error('sensitive adapter detail'); };
-  await assert.rejects(store.load(), (error) => error.code === 'storage_error' && !error.message.includes('sensitive'));
+  await assert.rejects(store.load(), (error) => error.code === 'storage_error' &&
+    error.reason === 'encryption' && error.operation === 'rotate' && !error.message.includes('sensitive'));
+  await assert.rejects(authForStore(t, store).status(), (error) => {
+    assert.match(error.message, /was read but could not be re-encrypted/);
+    assert.doesNotMatch(error.message, /Forget|sensitive/);
+    return true;
+  });
   assert.deepEqual(await fs.readFile(filePath), previous);
   assert.deepEqual(await fs.readdir(path.dirname(filePath)), ['soundcloud.tokens']);
   adapter.encryptStringAsync = encrypt;

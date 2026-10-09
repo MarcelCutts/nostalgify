@@ -157,7 +157,9 @@ export function createSoundCloudAudio({
         const instance = active;
         if (!instance && ["pause", "stop"].includes(command.type)) return;
         if (!instance || command.session !== instance.session) throw new Error("The SoundCloud track changed. Try again.");
-        if (command.type === "play") await play(instance);
+        // Acknowledge acceptance without waiting for network buffering. Native
+        // playback events and play() failures report the outcome asynchronously.
+        if (command.type === "play") void play(instance).catch(() => {});
         else if (command.type === "pause") {
           instance.audio.pause();
           if (instance.state !== "error") state(instance, "paused");

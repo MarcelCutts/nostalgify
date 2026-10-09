@@ -27,6 +27,11 @@ function fixture(t, overrides = {}) {
   let spotifyPlaying = true;
   let instance;
   let nextHandle = 0;
+  const reports = [];
+  const report = (update) => {
+    if (overrides.deferAudioReports) reports.push(update);
+    else instance.audioState(update);
+  };
   const spotify = {
     async getState() { return { running: true, state: spotifyPlaying ? "playing" : "paused", track: { id: "spotify:track:one" } }; },
     async command(cmd, arg) {
@@ -49,19 +54,19 @@ function fixture(t, overrides = {}) {
       if (message.type === "load") {
         loadedSession = message.session;
         playingSession = message.autoPlay ? message.session : null;
-        instance.audioState({ session: message.session, state: message.autoPlay ? "playing" : "paused", position: message.position || 0 });
+        report({ session: message.session, state: message.autoPlay ? "playing" : "paused", position: message.position || 0 });
       } else if (message.session === loadedSession) {
         if (message.type === "pause") {
           playingSession = null;
-          instance.audioState({ session: message.session, state: "paused" });
+          report({ session: message.session, state: "paused" });
         } else if (message.type === "play") {
           playingSession = message.session;
-          instance.audioState({ session: message.session, state: "playing" });
+          report({ session: message.session, state: "playing" });
         } else if (message.type === "stop") {
           playingSession = null;
           loadedSession = null;
         } else if (message.type === "seek") {
-          instance.audioState({ session: message.session, state: playingSession ? "playing" : "paused", position: message.position });
+          report({ session: message.session, state: playingSession ? "playing" : "paused", position: message.position });
         }
       }
       if (overrides.onAudio) await overrides.onAudio(message);
@@ -84,6 +89,7 @@ function fixture(t, overrides = {}) {
     get playing() { return playingSession !== null; },
     get spotifyPlaying() { return spotifyPlaying; },
     setSpotifyPlaying(value) { spotifyPlaying = value; },
+    flushReports() { for (const update of reports.splice(0)) instance.audioState(update); },
     destroyRenderer() { playingSession = null; loadedSession = null; },
     end() {
       const session = loadedSession;
@@ -94,7 +100,7 @@ function fixture(t, overrides = {}) {
   };
 }
 
-test("switching sources pauses the old source before starting the new one", async (t) => {
+test("switching sources pauses Spotify or releases SoundCloud before starting the new source", async (t) => {
   const f = fixture(t);
   await f.player.command("playShelf", "soundcloud:tracks:1");
   assert.equal(f.player.getProvider(), "soundcloud");
@@ -108,6 +114,83 @@ test("switching sources pauses the old source before starting the new one", asyn
   assert.equal(f.handles.size, 0);
   assert.ok(f.calls.findIndex((c) => c.type === "stop" && c.session === session) < f.calls.findIndex((c) => c.cmd === "playShelf"));
 });
+
+test("Spotify shelf playback waits for startup before issuing its native command", async (t) => {
+  const ready = deferred();
+  let starting = false;
+  const f = fixture(t, { initialProvider: "soundcloud", spotify: {
+    async start() { starting = true; await ready.promise; },
+  } });
+  const selecting = f.player.command("playShelf", "spotify:track:new");
+  try {
+    await until(() => starting);
+    assert.equal(f.calls.some((call) => call.cmd === "playShelf"), false);
+  } finally {
+    ready.resolve();
+    await selecting;
+  }
+  assert.equal(f.calls.filter((call) => call.cmd === "playShelf").length, 1);
+});
+
+test("a source selection during Spotify startup cancels the obsolete shelf command", async (t) => {
+  const ready = deferred();
+  let starting = false;
+  const f = fixture(t, { spotify: { async start() { starting = true; await ready.promise; } } });
+  const selecting = f.player.command("playShelf", "spotify:track:old");
+  let replacement;
+  try {
+    await until(() => starting);
+    replacement = f.player.command("playShelf", "soundcloud:tracks:1");
+    await new Promise(setImmediate);
+  } finally {
+    ready.resolve();
+    await Promise.all([selecting, replacement]);
+  }
+  assert.equal(f.calls.some((call) => call.cmd === "playShelf"), false);
+  assert.equal(f.playing, true);
+  assert.equal((await f.player.getState()).provider, "soundcloud");
+});
+
+test("rapid Play/Pause toggles follow command intent before delayed audio reports", async (t) => {
+  const f = fixture(t, { deferAudioReports: true });
+  await f.player.command("playShelf", "soundcloud:tracks:1");
+  f.flushReports();
+  assert.equal((await f.player.getState()).state, "playing");
+  const start = f.calls.length;
+  await f.player.command("playpause");
+  assert.equal((await f.player.getState()).state, "playing", "the renderer report has not arrived");
+  await f.player.command("playpause");
+  await f.player.command("playpause");
+  assert.deepEqual(f.calls.slice(start).map((call) => call.type), ["pause", "play", "pause"]);
+  assert.equal(f.playing, false);
+  f.flushReports();
+  assert.equal((await f.player.getState()).state, "paused");
+  await f.player.command("playpause");
+  assert.equal(f.playing, true);
+});
+
+for (const command of ["seek", "previous"]) {
+  test(`${command} after the final track ends keeps a position for the next Play`, async (t) => {
+    const f = fixture(t, { soundcloud: { loadContext: async () => [track(1)] } });
+    await f.player.command("playShelf", "soundcloud:tracks:1");
+    const oldSession = f.end();
+    await new Promise(setImmediate);
+    await f.player.command(command, 25);
+    const position = command === "seek" ? 25 : 0;
+    const state = await f.player.getState();
+    assert.equal(state.track.id, "soundcloud:tracks:1");
+    assert.equal(state.position, position);
+    assert.equal(state.state, "paused");
+    assert.doesNotMatch(state.message, /Paste/);
+    assert.equal(f.calls.filter((call) => call.type === "load").length, 1, "seek does not fetch a stream");
+    f.player.audioState({ session: oldSession, state: "ended", position: 60 });
+    await f.player.command("play");
+    const load = f.calls.filter((call) => call.type === "load").at(-1);
+    assert.notEqual(load.session, oldSession);
+    assert.equal(load.position, position);
+    assert.equal(f.playing, true);
+  });
+}
 
 test("a Spotify poll completing after source selection cannot replace SoundCloud state", async (t) => {
   const poll = deferred();

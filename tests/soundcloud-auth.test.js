@@ -141,7 +141,7 @@ test('disconnect cancels a token request before its pending storage read finishe
     await loading.promise;
     disconnecting = auth.disconnect();
     await new Promise(setImmediate);
-    assert.equal(outcome, 'auth_cancelled', 'the caller does not wait for Keychain');
+    assert.equal(outcome, 'auth_cancelled', 'the caller does not wait for storage');
     assert.equal(store.clears, 0, 'the clear still waits for the underlying read');
     release.resolve(store.value);
     await disconnecting;
@@ -260,12 +260,29 @@ test('storage failures reject user tokens without publishing a usable session', 
   const { auth } = await fixture(t, { store });
   await assert.rejects(auth.getAccessToken(), (error) => {
     assert.equal(error.code, 'storage_error');
-    assert.match(error.message, /Playback > Forget Local SoundCloud Sign-in, then connect again/);
+    assert.match(error.message, /restart Nostalgify/);
+    assert.doesNotMatch(error.message, /Forget/);
     assert.doesNotMatch(error.message, /raw token|access-new|refresh-new/);
     return true;
   });
   assert.equal(store.value, null);
   assert.equal((await auth.status()).connected, false);
+});
+
+test('failed credential persistence reports filesystem recovery without echoing store text', async (t) => {
+  const store = memoryStore(saved(CLOCK - 1));
+  store.save = async () => { throw Object.assign(new Error('raw token access-new'), {
+    code: 'storage_error', reason: 'filesystem', operation: 'save',
+  }); };
+  const { auth } = await fixture(t, { store });
+  await assert.rejects(auth.getAccessToken(), (error) => {
+    assert.equal(error.code, 'storage_error');
+    assert.match(error.message, /could not be saved/);
+    assert.match(error.message, /directory permissions and available disk space/);
+    assert.doesNotMatch(error.message, /keychain|Forget|raw token|access-new/i);
+    return true;
+  });
+  assert.equal(store.value, null);
 });
 
 test('timeout and disconnect close callback listeners', async (t) => {
@@ -318,6 +335,47 @@ test('application grant uses HTTP Basic only and caches tokens without a browser
   assert.deepEqual(await Promise.all(Array.from({ length: 8 }, () => auth.getAccessToken())), Array(8).fill('access-new'));
   assert.equal(requests, 1); assert.equal(opens, 0); assert.equal(store.saves, 0);
   assert.deepEqual(await auth.status(), { configured: true, connected: true, authMode: 'application' });
+});
+
+test('token quotas stop concurrent requests and reconnects until Retry-After expires', async (t) => {
+  let clock = CLOCK;
+  let requests = 0;
+  const { auth } = await fixture(t, { clientSecret: 'test-secret', now: () => clock,
+    fetch: async () => ++requests === 1
+      ? new Response('sensitive upstream token', { status: 429, headers: { 'retry-after': '3600' } }) : response(),
+  });
+  const results = await Promise.allSettled([auth.getAccessToken(), auth.getAccessToken(), auth.reconnect()]);
+  for (const result of results) {
+    assert.equal(result.status, 'rejected');
+    assert.equal(result.reason.code, 'rate_limited');
+    assert.equal(result.reason.status, 429);
+    assert.equal(result.reason.retryAfterMs, 3600000);
+    assert.doesNotMatch(result.reason.message, /sensitive|test-secret|credentials/);
+  }
+  assert.equal(requests, 1);
+  await auth.disconnect();
+  clock += 3599999;
+  await assert.rejects(auth.reconnect(), (error) => error.code === 'rate_limited' && error.retryAfterMs === 1);
+  assert.equal(requests, 1, 'forgetting local sign-in cannot bypass a server quota');
+  clock += 1;
+  assert.equal(await auth.getAccessToken(), 'access-new');
+  assert.equal(requests, 2);
+});
+
+test('token quotas honor HTTP dates and safely default malformed or absent Retry-After', async (t) => {
+  for (const [header, delay] of [
+    [new Date(CLOCK + 86400000).toUTCString(), 86400000],
+    [undefined, 60000], ['invalid secret header', 60000], ['1e100', 60000],
+  ]) {
+    let requests = 0;
+    const { auth } = await fixture(t, { clientSecret: 'test-secret', fetch: async () => {
+      requests++;
+      return new Response('upstream secret', { status: 429, headers: header ? { 'retry-after': header } : {} });
+    } });
+    await assert.rejects(auth.getAccessToken(), (error) => error.code === 'rate_limited' && error.retryAfterMs === delay);
+    await assert.rejects(auth.reconnect(), (error) => error.retryAfterMs === delay && !error.message.includes('secret'));
+    assert.equal(requests, 1);
+  }
 });
 
 test('application tokens without a refresh token obtain a new grant on expiry', async (t) => {
