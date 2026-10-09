@@ -24,12 +24,17 @@ h1, h2 { font-size: 1.25rem; letter-spacing: -.5px; margin: 0; font-weight: 600;
 #app { position: absolute; inset: auto; top: 0; left: 0; width: 275px; transform-origin: top left; }
 #webamp, #webamp * { box-sizing: content-box; }
 #webamp { user-select: none; }
+/* Keep sprite text in its real box: off-screen text-indent leaks huge frames to WKWebView accessibility. */
+#app #webamp .character { text-indent: 0; color: transparent; font-size: 0; line-height: 0; overflow: hidden; }
+#webamp [data-skin-artwork] { position: absolute; pointer-events: none; }
+#webamp [data-skin-artwork=title] { top: 0; left: 24px; right: 40px; height: 14px; }
+#webamp [data-skin-artwork=equalizer] { top: 14px; left: 0; width: 275px; height: 102px; }
 #webamp [data-skin-control]:focus-visible, #webamp-context-menu [data-skin-control]:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .now-playing { margin: 25px 0 16px; text-align: center; }
 #track-title { margin: 0 0 5px; font-size: 1.25rem; font-weight: 620; letter-spacing: -.4px; }
 #track-artist { color: var(--muted); font-size: 1rem; margin: 0; }
 .seek-row { display: flex; align-items: center; gap: 12px; font-size: .875rem; font-variant-numeric: tabular-nums; color: var(--muted); }
-input[type=range] { accent-color: var(--accent); min-width: 0; min-height: 44px; cursor: pointer; }
+.seek-row input[type=range], .playback-options input[type=range] { accent-color: var(--accent); min-width: 0; min-height: 44px; cursor: pointer; }
 #seek { width: 100%; }
 .seek-row span { flex-shrink: 0; }
 .transport { display: flex; justify-content: center; align-items: center; gap: 30px; margin: 10px 0; }

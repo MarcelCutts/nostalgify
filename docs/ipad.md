@@ -82,7 +82,7 @@ volume buttons or Control Center.
 
 ## Import local audio and skins
 
-Use **Import audio** to select unprotected files from Files. Download cloud-backed
+Use **Import from Files** to select unprotected audio files. Download cloud-backed
 files first if a provider cannot supply them immediately. Nostalgify copies audio
 into its own app storage, so it can play without maintaining access to the
 original location. Common AAC/M4A, MP3 and WAV files are good first checks; actual
@@ -96,8 +96,7 @@ in Files. Uninstalling the app deletes its imported library.
 
 If iPadOS restarts its audio services, Nostalgify rebuilds the local player,
 retains the selected track and queue, and restores the last available playback
-position. Playback remains
-paused until you press Play. Recovery while Spotify is selected does not activate
+position. Playback remains paused until you press Play. Recovery while Spotify is selected does not activate
 Nostalgify's local audio session.
 
 Use the skin import control for a classic Winamp 2 `.wsz` or `.zip` file from the

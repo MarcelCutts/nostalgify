@@ -1,7 +1,7 @@
 // Webamp's sprite controls are divs. Keep their original handlers and artwork,
 // while exposing actual actions and complete readouts to iPad accessibility APIs.
 export function installSkinAccessibility(root) {
-  const bitmapReadouts = "#marquee, #kbps, #khz, #time, .mini-time";
+  const bitmapReadouts = "#kbps, #khz, #time, .mini-time";
   const decorativeEQ = ".band, #on, #auto, #presets-context, #presets, #plus12db, #zerodb, #minus12db";
   const menus = {
     "playlist-add-menu": "Add music to playlist",
@@ -18,6 +18,11 @@ export function installSkinAccessibility(root) {
     "new-list": "New list", "save-list": "Save list", "load-list": "Load list",
   };
   const buttons = {
+    "#previous": "Main classic player: Previous track", "#play": "Main classic player: Play", "#pause": "Main classic player: Pause",
+    "#stop": "Main classic player: Stop", "#next": "Main classic player: Next track", "#eject": "Main classic player: Open music",
+    "#equalizer-button": "EQ: Toggle equalizer", "#playlist-button": "PL: Toggle playlist", "#shade": "Toggle compact player",
+    "#equalizer-shade": "Toggle compact equalizer", "#equalizer-close": "Close equalizer",
+    "#shuffle": "Main classic player: Shuffle", "#repeat": "Main classic player: Repeat",
     "#playlist-shade-button": "Toggle compact playlist", "#playlist-close-button": "Close playlist",
     "#playlist-scroll-up-button": "Scroll playlist up", "#playlist-scroll-down-button": "Scroll playlist down",
     ".playlist-previous-button": "Classic player: Previous track", ".playlist-play-button": "Classic player: Play", ".playlist-pause-button": "Classic player: Pause",
@@ -36,13 +41,41 @@ export function installSkinAccessibility(root) {
     element.setAttribute("aria-label", label);
     for (const child of element.children) child.setAttribute("aria-hidden", "true");
   };
+  const describeArtwork = (parent, kind, label) => {
+    if (!parent) return;
+    let image = parent.querySelector(`:scope > [data-skin-artwork="${kind}"]`);
+    if (!image) {
+      image = document.createElement("span");
+      image.dataset.skinArtwork = kind;
+      parent.append(image);
+    }
+    describeReadout(image, label);
+  };
   function update() {
     // Avoid exposing individual off-screen glyphs where the shell supplies full
     // current-track/status text and spoken playback time.
     for (const element of root.querySelectorAll(bitmapReadouts)) element.setAttribute("aria-hidden", "true");
+    for (const element of root.querySelectorAll("#marquee")) {
+      const text = element.textContent;
+      // Webamp repeats long messages around this separator for animation. Only
+      // remove an exact repeated copy; a real title may itself contain ***.
+      const separator = "  ***  ", half = (text.length - separator.length) / 2;
+      const repeated = Number.isInteger(half) && text.slice(half, half + separator.length) === separator && text.slice(0, half) === text.slice(half + separator.length);
+      describeReadout(element, `Classic player display: ${(repeated ? text.slice(0, half) : text).trimEnd()}`);
+    }
+    describeArtwork(root.querySelector("#title-bar"), "title", "Winamp");
+    describeArtwork(root.querySelector(".equalizer-top"), "title", "Winamp equalizer");
+    const equalizerBody = root.querySelector(".equalizer-top")?.parentElement;
+    describeArtwork(equalizerBody, "equalizer", "Equalizer artwork: On, Auto, Presets, preamp and frequency bands. These decorative controls do not affect playback.");
     // EQ artwork has no audio effect; preserve its description and window actions.
     for (const element of root.querySelector("#equalizer-window")?.querySelectorAll(decorativeEQ) || []) element.setAttribute("aria-hidden", "true");
     for (const [selector, label] of Object.entries(buttons)) for (const element of root.querySelectorAll(selector)) setControl(element, label);
+    for (const element of root.querySelectorAll("#equalizer-button, #playlist-button, #shuffle, #repeat")) element.setAttribute("aria-pressed", String(element.classList.contains("selected")));
+    for (const element of root.querySelectorAll("#balance, #equalizer-balance")) {
+      element.disabled = true;
+      element.tabIndex = -1;
+      element.setAttribute("aria-label", "Balance (unavailable)");
+    }
     for (const [id, label] of Object.entries(menus)) {
       const element = root.querySelector(`#${id}`);
       if (!element) continue;
@@ -79,11 +112,19 @@ export function installSkinAccessibility(root) {
       // Webamp's FocusTarget moves focus from body to this generic container
       // when a focused menu item unmounts. That is also a recovery state.
       const windowContainer = root.querySelector("#playlist-window, #playlist-window-shade")?.parentElement;
-      const windowFallback = currentFocus === windowContainer && currentFocus?.getAttribute("tabindex") === "-1";
+      const windowFallback = currentFocus?.getAttribute("tabindex") === "-1" && (currentFocus === windowContainer || currentFocus.matches("#main-window > [tabindex], #equalizer-window > [tabindex]"));
       if (currentFocus !== expectedFocus && currentFocus !== document.body && !windowFallback && currentFocus?.isConnected) return;
       callback();
     });
   };
+  // Selecting an EQ window remounts its keyed title buttons. Recover the same
+  // control after React replaces it, without overriding a newer focus choice.
+  root.addEventListener("focusin", event => {
+    const control = event.target.closest?.('[data-skin-control="true"][id]');
+    if (control) afterRender(() => {
+      if (!control.isConnected) root.querySelector(`#${CSS.escape(control.id)}`)?.focus();
+    });
+  }, true);
   document.addEventListener("click", event => {
     const handle = event.target.closest?.('.handle[data-skin-control="true"]');
     if (handle && root.contains(handle)) contextOpener = handle;
@@ -92,6 +133,10 @@ export function installSkinAccessibility(root) {
   document.addEventListener("keydown", event => {
     const control = event.target.closest?.('[data-skin-control="true"]');
     if (!control) return;
+    if (control.getAttribute("aria-disabled") === "true") {
+      if (["Enter", " ", "ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) { event.preventDefault(); event.stopPropagation(); }
+      return;
+    }
     const menu = control.closest('[role="menu"]');
     const launcher = control.closest(".playlist-menu");
     if (["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) {
@@ -116,13 +161,14 @@ export function installSkinAccessibility(root) {
         if (popup) menuItems(popup)[0]?.focus();
         else if (launcher?.querySelector("ul")) menuItems(launcher)[0]?.focus();
         else if (owner) owner.focus();
+        else if (!control.isConnected && control.id) root.querySelector(`#${CSS.escape(control.id)}`)?.focus();
       });
     }
   });
   update();
-  // React replaces sprites on skin/shade/menu changes. Observe children only;
-  // our own ARIA writes must never trigger a mutation feedback loop.
+  // React replaces sprites/text on skin/shade/menu changes and toggles selected
+  // classes. Our own ARIA writes never trigger a mutation feedback loop.
   const observer = new MutationObserver(update);
-  observer.observe(root, { childList: true, subtree: true });
+  observer.observe(root, { childList: true, characterData: true, attributes: true, attributeFilter: ["class"], subtree: true });
   observer.observe(document.body, { childList: true });
 }

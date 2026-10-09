@@ -45,11 +45,49 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.getByRole("link", { name: "Nostalgify for iPad player" }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "Save Spotify link" }).textContent(), "Save", "spoken command includes the visible button label");
     assert.equal(await page.locator("#main-window").isVisible(), true);
-    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("aria-hidden") === "true");
-    assert.equal(await page.locator("#webamp #marquee").ariaSnapshot(), "", "bitmap marquee glyphs must not be separate accessibility elements");
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
+    assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "bitmap marquee is one complete accessible message, without separate glyphs");
+    assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
+    assert.equal(await page.getByRole("slider", { name: "Balance (unavailable)" }).isDisabled(), true);
+    assert.equal(await page.locator("#webamp #next").getAttribute("aria-disabled"), "true");
+    for (const key of ["Tab", "Shift+Tab"]) {
+      await page.locator("#webamp #next").focus();
+      await page.keyboard.press(key);
+      assert.equal(await page.locator("#webamp #next").evaluate(element => element === document.activeElement), false, `${key} must leave an unavailable classic control`);
+    }
+    const spriteGeometry = await page.evaluate(() => ({
+      volume: document.querySelector("#webamp #volume").clientHeight,
+      seek: document.querySelector("#webamp #position").clientHeight,
+      outerSeek: document.querySelector("#seek").clientHeight,
+      glyphIndent: getComputedStyle(document.querySelector("#webamp .character")).textIndent,
+    }));
+    assert.ok(spriteGeometry.volume < 44 && spriteGeometry.seek < 44, "outer 44px targets must not enlarge classic sprite sliders");
+    assert.ok(spriteGeometry.outerSeek >= 44, "the accessible outer slider retains its large target");
+    assert.equal(spriteGeometry.glyphIndent, "0px", "bitmap glyphs must not create off-screen accessibility bounds");
+    const message = "A long title with  ***  inside must stay complete";
+    await page.evaluate(value => window.__webamp.store.dispatch({ type: "SET_USER_MESSAGE", message: value }), message);
+    await page.waitForFunction(value => document.querySelector("#marquee").getAttribute("aria-label") === `Classic player display: ${value}`, message);
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "UNSET_USER_MESSAGE" }));
     assert.equal(await page.locator("#equalizer-window .band").first().getAttribute("aria-hidden"), "true", "decorative EQ bands are omitted while its working title controls remain");
     assert.equal(await page.locator("#webamp #play").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working classic transport remains exposed");
     assert.equal(await page.locator("#equalizer-window #equalizer-close").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working EQ window controls remain exposed");
+    await page.getByRole("button", { name: "EQ: Toggle equalizer" }).focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => !document.getElementById("equalizer-window"));
+    await page.keyboard.press("Space");
+    await page.locator("#equalizer-window").waitFor();
+    await page.getByRole("button", { name: "Toggle compact equalizer", exact: true }).focus();
+    await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
+    await page.keyboard.press("Enter");
+    assert.equal(await page.locator("#equalizer-balance").isDisabled(), true, "compact EQ balance must also be honestly unavailable");
+    await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
+    await page.keyboard.press("Space");
+    await page.getByRole("img", { name: /^Equalizer artwork:/ }).waitFor();
+    const eqBox = await page.locator("#equalizer-window").boundingBox();
+    const artworkBox = await page.getByRole("img", { name: /^Equalizer artwork:/ }).boundingBox();
+    assert.ok(artworkBox.x >= eqBox.x && artworkBox.y >= eqBox.y && artworkBox.x + artworkBox.width <= eqBox.x + eqBox.width + 1 && artworkBox.y + artworkBox.height <= eqBox.y + eqBox.height + 1, "decorative artwork accessibility frame stays inside the EQ window");
     const frame = await page.locator("#player-viewport").boundingBox();
     const classicPlayer = await page.locator("#main-window").boundingBox();
     assert.ok(classicPlayer.x >= frame.x && classicPlayer.y >= frame.y, "classic player must render inside its frame");
@@ -162,6 +200,11 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.locator("#source-label").tap();
     assert.equal(await page.getByRole("img", { name: "Winamp playlist", exact: true }).count(), 1);
     assert.match(await page.locator(".playlist-running-time-display").ariaSnapshot(), /img "Selected and total playlist duration: 0:00\/0:00"/);
+    assert.ok(await page.locator(".playlist-running-time-display").evaluate(element => {
+      const range = document.createRange(); range.selectNodeContents(element);
+      const box = range.getBoundingClientRect(), player = document.querySelector("#playlist-window").getBoundingClientRect();
+      return box.left >= player.left - 1 && box.right <= player.right + 1;
+    }), "bitmap text ranges stay within the playlist instead of producing 17000px accessibility frames");
     await page.locator("#local-library .music-play").focus();
     await page.keyboard.press("Enter");
     await page.waitForFunction(() => window.__ipad.host.getCachedState().provider === "local");
@@ -174,6 +217,12 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Pause");
     assert.equal(await page.locator("#source-label").getAttribute("aria-label"), "Playback source: Local files");
     assert.equal(await page.getByRole("status", { name: "Playback source: Local files" }).count(), 1);
+    await page.getByRole("button", { name: "Main classic player: Pause", exact: true }).focus();
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    await page.getByRole("button", { name: "Main classic player: Play", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "playing");
     await page.locator("#seek").focus();
     const positionBefore = await page.evaluate(() => window.__ipad.host.getCachedState().position);
     await page.keyboard.press("ArrowRight");
@@ -204,12 +253,15 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
     assert.equal(await page.locator("#skin-select").inputValue(), stableSkin);
     assert.equal(await page.locator("#skin-select option").count(), 2);
-    assert.equal(await page.locator("#webamp #marquee").ariaSnapshot(), "", "skin reload must preserve readable accessibility output without per-glyph duplicates");
+    assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "skin reload preserves a single readable message");
     await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
     await page.waitForFunction(() => document.querySelector("#main-window .mini-time")?.getAttribute("aria-hidden") === "true");
     assert.equal(await page.locator("#main-window .mini-time").ariaSnapshot(), "", "new compact-mode bitmap readouts must not expose individual characters");
     await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
-    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("aria-hidden") === "true");
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
+    assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1, "shade and skin updates do not duplicate the main title description");
+    assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
     await page.locator("#skin-select").selectOption("");
     await page.waitForFunction(async () => (await window.__ipad.host.getPreferences()).skinId === null);
     await page.locator("#skin-file").setInputFiles({ name: "broken.wsz", mimeType: "application/zip", buffer: Buffer.from([80, 75, 3, 4, 0, 0]) });
