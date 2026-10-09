@@ -130,9 +130,15 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.keyboard.press("ArrowDown");
     await page.getByRole("menuitem", { name: "Invert selection" }).waitFor();
     await page.keyboard.press("ArrowDown");
-    await page.keyboard.press("Enter");
+    // Move focus during the same event turn as the command: the old menu's
+    // queued post-render callback must not steal it back on the next frame.
+    await page.evaluate(() => {
+      document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      document.getElementById("playlist-misc-menu").focus();
+    });
     await page.waitForFunction(() => window.__webamp.store.getState().playlist.selectedTracks.length === 0);
-    await page.getByRole("button", { name: "Misc: Playlist options" }).focus();
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.equal(await page.locator("#playlist-misc-menu").evaluate(element => element === document.activeElement), true, "a deferred menu callback must preserve newer user focus");
     await page.keyboard.press("Enter");
     await page.getByRole("menuitem", { name: "Sort list", exact: true }).waitFor();
     const menuPosition = await page.evaluate(() => window.__ipad.host.getCachedState().position);

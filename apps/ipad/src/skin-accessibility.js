@@ -69,7 +69,21 @@ export function installSkinAccessibility(root) {
     }
   }
   const menuItems = menu => [...menu.querySelectorAll('[role="menuitem"]')];
-  const afterRender = callback => requestAnimationFrame(() => { update(); callback(); });
+  const afterRender = callback => {
+    const expectedFocus = document.activeElement;
+    requestAnimationFrame(() => {
+      update();
+      // A menu command can finish before this frame. Preserve a newer focus
+      // choice instead of returning it to the previous menu's launcher.
+      const currentFocus = document.activeElement;
+      // Webamp's FocusTarget moves focus from body to this generic container
+      // when a focused menu item unmounts. That is also a recovery state.
+      const windowContainer = root.querySelector("#playlist-window, #playlist-window-shade")?.parentElement;
+      const windowFallback = currentFocus === windowContainer && currentFocus?.getAttribute("tabindex") === "-1";
+      if (currentFocus !== expectedFocus && currentFocus !== document.body && !windowFallback && currentFocus?.isConnected) return;
+      callback();
+    });
+  };
   document.addEventListener("click", event => {
     const handle = event.target.closest?.('.handle[data-skin-control="true"]');
     if (handle && root.contains(handle)) contextOpener = handle;
