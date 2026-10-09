@@ -572,6 +572,8 @@ function zoomMenuTemplate() {
 }
 
 let contextMenu = null;
+// The self-test observes native presentation, not just our JavaScript reference.
+const contextMenuEvents = { shown: 0, closed: 0 };
 function closeContextMenu() {
   contextMenu?.closePopup(win);
   contextMenu = null;
@@ -593,7 +595,8 @@ function showContextMenu(event, kind, state) {
   const menu = Menu.buildFromTemplate(template);
   contextMenu = menu;
   const clear = () => { if (contextMenu === menu) contextMenu = null; };
-  menu.once("menu-will-close", clear);
+  menu.once("menu-will-show", () => { contextMenuEvents.shown++; });
+  menu.once("menu-will-close", () => { contextMenuEvents.closed++; clear(); });
   // Let macOS position the popup at the pointer and constrain it to the screen,
   // independent of Chromium's zoom and the transparent player window's bounds.
   menu.popup({ window: win, callback: clear });
@@ -706,6 +709,7 @@ function createWindow() {
       getSpotifyState,
       playback,
       contextMenu: () => contextMenu,
+      contextMenuEvents: () => ({ ...contextMenuEvents }),
       closeContextMenu,
     });
   }

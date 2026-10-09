@@ -15,6 +15,13 @@ export function installContextMenus({ webamp, shelf, eq, transport }) {
       hasSelection: s.playlist.selectedTracks.some((id) => s.playlist.trackOrder.includes(id)),
     });
   }
+  // Webamp starts dragging on right-mousedown too. A native popup can consume
+  // its mouseup, so prevent that drag from starting before opening the menu.
+  window.addEventListener("mousedown", (event) => {
+    if (event.button === 2 && event.target instanceof Element && event.target.closest("#webamp")) {
+      event.stopPropagation();
+    }
+  }, true);
   window.addEventListener("contextmenu", (event) => {
     if (!(event.target instanceof Element) || !event.target.closest("#webamp")) return;
     event.preventDefault();
