@@ -1,6 +1,6 @@
-// Nostalgify: classic Winamp skins as a remote control for the Spotify desktop app.
-// The main process owns everything that touches macOS: AppleScript calls to
-// Spotify, the skins folder, the native menu, and the window itself.
+// Nostalgify: classic Winamp skins for Spotify desktop control and SoundCloud playback.
+// The main process owns provider coordination, SoundCloud credentials and media
+// requests, Spotify AppleScript calls, skins, native menus, and the app window.
 const { app, BrowserWindow, ipcMain, protocol, Menu, shell, screen, net, clipboard, safeStorage, dialog } = require("electron");
 const path = require("path");
 const fs = require("fs");

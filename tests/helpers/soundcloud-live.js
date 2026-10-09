@@ -1,4 +1,6 @@
-// Opt-in, read-only live service check. No fixture fetch or user-account writes.
+// Opt-in live playback test using SoundCloud catalogue/media reads, with no mocks
+// for SoundCloud. Changes the local shelf and playback state; live-real mode also
+// controls the real Spotify app and temporarily changes its volume.
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");

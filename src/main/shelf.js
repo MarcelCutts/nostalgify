@@ -1,4 +1,4 @@
-// Version 2 entries carry their provider. Older Spotify-only shelves migrate on read.
+// Entries carry their provider; derive it when reading legacy Spotify-only shelves.
 function cleanShelf(list) {
   if (!Array.isArray(list)) return [];
   const seen = new Set();

@@ -1,7 +1,7 @@
 // Webamp normally owns audio playback through its Media class. This replacement
 // relays Webamp's transport and volume to the active provider. SoundCloud's
 // actual audio lives in soundcloudAudio; Spotify remains an external player.
-import { createFakeVis } from "./fakeVis.js";
+import { createDecorativeVisualizer } from "./decorativeVisualizer.js";
 
 export const bridge = {
   media: null,
@@ -30,14 +30,14 @@ export function quietly(fn) {
   }
 }
 
-export class SpotifyMedia {
+export class PlaybackMedia {
   constructor() {
     this._handlers = {};
     this._elapsed = 0;
     this._duration = 0;
     this._volumeReady = false; // ignore Webamp's default volume until the first state update
     this.lastUserVolumeAt = 0;
-    this._vis = createFakeVis();
+    this._visualizer = createDecorativeVisualizer();
     bridge.media = this;
   }
 
@@ -54,8 +54,8 @@ export class SpotifyMedia {
     this._duration = duration;
     this.emit("timeupdate");
   }
-  setVisPlaying(on) {
-    this._vis.setPlaying(on);
+  setVisualizerPlaying(on) {
+    this._visualizer.setPlaying(on);
   }
   markVolumeReady() {
     this._volumeReady = true;
@@ -78,12 +78,12 @@ export class SpotifyMedia {
     if (!bridge.quiet) await sendCommand("play");
   }
   pause() {
-    this._vis.setPlaying(false);
+    this._visualizer.setPlaying(false);
     if (!bridge.quiet) void sendCommand("pause");
   }
   stop() {
-    // Spotify has no "stop", so pause and rewind like Winamp does.
-    this._vis.setPlaying(false);
+    // Model Winamp Stop as pause, then seek to the beginning for either provider.
+    this._visualizer.setPlaying(false);
     if (!bridge.quiet) {
       void sendCommand("pause").then((result) => {
         if (!result?.error) return sendCommand("seek", 0);
@@ -107,7 +107,7 @@ export class SpotifyMedia {
   // Track changes originate from the provider, so loading just tells Webamp
   // the "file" is ready. Duration was set beforehand by the sync loop.
   async loadFromUrl(url, autoPlay) {
-    // Shelf entries aren't songs. Playing one is handled by the shelf.
+    // Shelf entries identify saved music links; playback is started by the shelf.
     if (String(url).startsWith("shelf:")) return;
     this.emit("fileLoaded");
     if (autoPlay) this.emit("playing");
@@ -121,7 +121,7 @@ export class SpotifyMedia {
   enableEq() {}
 
   getAnalyser() {
-    return this._vis.analyser;
+    return this._visualizer.analyser;
   }
   dispose() {}
 }

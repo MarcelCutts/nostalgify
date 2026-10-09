@@ -1,6 +1,6 @@
 // Saved Spotify and SoundCloud links in Winamp's playlist window. Links come
 // from drag and drop, paste, or ADD > URL, which reads the clipboard.
-import { sendCommand } from "./spotifyMedia.js";
+import { sendCommand } from "./playbackMedia.js";
 
 const KIND_LABEL = { album: "album", playlist: "playlist", artist: "artist", track: "song" };
 const LIKED = { provider: "spotify", kind: "liked", uri: "liked", title: "Liked Songs" };

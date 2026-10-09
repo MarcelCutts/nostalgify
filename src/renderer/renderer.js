@@ -1,5 +1,5 @@
 import Webamp from "webamp";
-import { SpotifyMedia, bridge, quietly, sendCommand } from "./spotifyMedia.js";
+import { PlaybackMedia, bridge, quietly, sendCommand } from "./playbackMedia.js";
 import { manageLayout, addResizeGrips } from "./layout.js";
 import { createEqPolicy } from "./eq.js";
 import { createShelf } from "./shelf.js";
@@ -63,7 +63,7 @@ async function main() {
     },
     enableHotkeys: false,
     handleAddUrlEvent: () => shelf.handleAddUrl(),
-    __customMediaClass: SpotifyMedia,
+    __customMediaClass: PlaybackMedia,
     __customMiddlewares: [forwardToProvider],
   });
   const store = webamp.store;
@@ -276,7 +276,7 @@ async function main() {
           store.dispatch({ type: "PLAY_TRACK", id: null });
           store.dispatch({ type: "STOP" });
         });
-        bridge.media.setVisPlaying(false);
+        bridge.media.setVisualizerPlaying(false);
       }
     }
     // Webamp clears user messages after some interactions, so keep re-setting it.
@@ -358,7 +358,7 @@ async function main() {
       if (playing && status !== "PLAYING") store.dispatch({ type: "IS_PLAYING" });
       if (!playing && status === "PLAYING") store.dispatch({ type: "PAUSE" });
     });
-    media.setVisPlaying(playing);
+    media.setVisualizerPlaying(playing);
 
     const st = store.getState().media;
     quietly(() => {
