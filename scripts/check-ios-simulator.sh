@@ -90,19 +90,23 @@ xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Relea
 python3 - "$NOSTALGIFY_DERIVED_DATA/Build/Products" "$NOSTALGIFY_IOS_RESULTS/release-fixture-check.json" <<'PY'
 import json, pathlib, plistlib, sys
 products = pathlib.Path(sys.argv[1])
-def executable(configuration):
+def executable_images(configuration):
     for app in (products / configuration).glob('*.app'):
         with (app / 'Info.plist').open('rb') as file:
             info = plistlib.load(file)
         if info.get('CFBundleIdentifier') == 'dev.nostalgify.ipad':
-            return (app / info['CFBundleExecutable']).read_bytes()
+            # Xcode's Debug executable can be only a trampoline: the application
+            # code then lives in App.debug.dylib. Include first-party dylibs for
+            # both configurations so neither layout can bypass this check.
+            paths = [app / info['CFBundleExecutable'], *sorted(app.glob('*.dylib'))]
+            return {path.name: path.read_bytes() for path in paths}
     raise SystemExit(f'Built app executable missing for {configuration}.')
-debug = executable('Debug-iphonesimulator')
-release = executable('Release-iphoneos')
+debug = executable_images('Debug-iphonesimulator')
+release = executable_images('Release-iphoneos')
 markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed']
-debug_fixture = markers[1] in debug
-release_markers = [marker.decode() for marker in markers if marker in release]
-result = {'passed': debug_fixture and not release_markers, 'debugFixturePresent': debug_fixture, 'releaseFixtureMarkers': release_markers}
+debug_fixture = any(markers[1] in image for image in debug.values())
+release_markers = [marker.decode() for marker in markers if any(marker in image for image in release.values())]
+result = {'passed': debug_fixture and not release_markers, 'debugFixturePresent': debug_fixture, 'releaseFixtureMarkers': release_markers, 'debugImages': list(debug), 'releaseImages': list(release)}
 pathlib.Path(sys.argv[2]).write_text(json.dumps(result, indent=2) + '\n')
 if not result['passed']:
     raise SystemExit('Release fixture exclusion failed; inspect release-fixture-check.json.')

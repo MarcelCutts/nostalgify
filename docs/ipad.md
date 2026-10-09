@@ -94,8 +94,9 @@ lock-screen controls. Switching sources pauses the current source before the
 next starts. Removing a file deletes Nostalgify's imported copy, not the original
 in Files. Uninstalling the app deletes its imported library.
 
-If iPadOS restarts its audio services, Nostalgify rebuilds the local player and
-preserves the selected track, queue and playback position. Playback remains
+If iPadOS restarts its audio services, Nostalgify rebuilds the local player,
+retains the selected track and queue, and restores the last available playback
+position. Playback remains
 paused until you press Play. Recovery while Spotify is selected does not activate
 Nostalgify's local audio session.
 
