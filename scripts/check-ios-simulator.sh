@@ -12,7 +12,8 @@ fi
 mkdir -p out/ios-ci
 NOSTALGIFY_IOS_RESULTS=$(mktemp -d "$PWD/out/ios-ci/run.XXXXXX")
 NOSTALGIFY_SIMULATOR_ID=''
-NOSTALGIFY_TEST_LOG_START=''
+NOSTALGIFY_VALIDATION_LOG_START=''
+NOSTALGIFY_UI_TESTS_STARTED=false
 NOSTALGIFY_PROJECT="$PWD/apps/ipad/ios/App/App.xcodeproj"
 NOSTALGIFY_DERIVED_DATA="$NOSTALGIFY_IOS_RESULTS/DerivedData"
 NOSTALGIFY_PACKAGE_LOCK="$NOSTALGIFY_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
@@ -52,12 +53,12 @@ PY
   fi
   if [ -n "$NOSTALGIFY_SIMULATOR_ID" ]; then
     # UI tests attach their own app screenshot and hierarchy to tests.xcresult.
-    # Also retain the simulator screen if a failure prevented the launch check.
-    if [ ! -f "$NOSTALGIFY_IOS_RESULTS/launch.png" ]; then
+    # Preserve the failure screen separately from the earlier preflight launch.
+    if [ "$NOSTALGIFY_VALIDATION_STATUS" -ne 0 ] || [ ! -f "$NOSTALGIFY_IOS_RESULTS/launch.png" ]; then
       xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/failure-screen.png" \
         >/dev/null 2>&1 || true
     fi
-    if [ "$NOSTALGIFY_VALIDATION_STATUS" -ne 0 ] && [ -n "$NOSTALGIFY_TEST_LOG_START" ]; then
+    if [ "$NOSTALGIFY_VALIDATION_STATUS" -ne 0 ] && [ "$NOSTALGIFY_UI_TESTS_STARTED" = true ]; then
       # Compare a fresh fixture launch outside XCTest after its verdict is final.
       # This is diagnostic evidence only: no test is retried and the failed exit
       # status is preserved. Never run the comparison for a successful suite.
@@ -99,10 +100,10 @@ PY
         "$NOSTALGIFY_IOS_RESULTS/startup-probes/" 2>/dev/null || true
     fi
     # The first cold launch may fail well before the last five minutes. Retain
-    # the whole test interval, bounded by this job's 45-minute deadline.
+    # the preflight and test interval, bounded by the 45-minute job deadline.
     NOSTALGIFY_LOG_TIME_ARGUMENTS=(--last 45m)
-    if [ -n "$NOSTALGIFY_TEST_LOG_START" ]; then
-      NOSTALGIFY_LOG_TIME_ARGUMENTS=(--start "$NOSTALGIFY_TEST_LOG_START")
+    if [ -n "$NOSTALGIFY_VALIDATION_LOG_START" ]; then
+      NOSTALGIFY_LOG_TIME_ARGUMENTS=(--start "$NOSTALGIFY_VALIDATION_LOG_START")
     fi
     xcrun simctl spawn "$NOSTALGIFY_SIMULATOR_ID" log show "${NOSTALGIFY_LOG_TIME_ARGUMENTS[@]}" --style compact \
       --predicate 'process == "App" OR process == "Nostalgify" OR process == "AppUITests-Runner" OR process == "testmanagerd" OR process == "runningboardd" OR process == "SpringBoard" OR subsystem BEGINSWITH "com.apple.WebKit"' \
@@ -212,23 +213,11 @@ xcrun simctl boot "$NOSTALGIFY_SIMULATOR_ID"
 xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/boot.log"
 
-# Use the local clock format expected by log show --start; keep its UTC offset
-# beside it so the interval can be matched to timestamped CI output.
-NOSTALGIFY_TEST_LOG_START=$(date '+%Y-%m-%d %H:%M:%S')
-date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/test-started-at.log"
-xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
-  -destination "platform=iOS Simulator,id=$NOSTALGIFY_SIMULATOR_ID" \
-  -parallel-testing-enabled NO \
-  -test-timeouts-enabled YES \
-  -default-test-execution-time-allowance 120 \
-  -maximum-test-execution-time-allowance 180 \
-  -collect-test-diagnostics never \
-  -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
-  -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
-  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
-  -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/tests.xcresult" \
-  CODE_SIGNING_ALLOWED=NO "SWIFT_STRICT_CONCURRENCY=$NOSTALGIFY_STRICT_CONCURRENCY" \
-  2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/tests.log"
+# Validate the first application launch outside XCTest before querying its
+# accessibility tree. This remains a required, bounded startup/bridge gate; the
+# subsequent UI cases start fresh app processes on a preflight-validated simulator.
+NOSTALGIFY_VALIDATION_LOG_START=$(date '+%Y-%m-%d %H:%M:%S')
+date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/validation-started-at.log"
 
 NOSTALGIFY_BUILT_APP=$(python3 - "$NOSTALGIFY_DERIVED_DATA/Build/Products/Debug-iphonesimulator" <<'PY'
 import pathlib, plistlib, sys
@@ -261,4 +250,22 @@ if result.get('libraryCount') != 2 or result.get('provider') != 'local' or resul
     raise SystemExit('Native self-check produced an unexpected final library/playback state.')
 print('Native import, queue advancement, persistence, mounted UI, and Capacitor bridge self-check passed.')
 PY
+# Do not leave the self-check process alive for the unit/UI test launches.
+xcrun simctl terminate "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad
+NOSTALGIFY_UI_TESTS_STARTED=true
+date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/test-started-at.log"
+xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
+  -destination "platform=iOS Simulator,id=$NOSTALGIFY_SIMULATOR_ID" \
+  -parallel-testing-enabled NO \
+  -test-timeouts-enabled YES \
+  -default-test-execution-time-allowance 120 \
+  -maximum-test-execution-time-allowance 180 \
+  -collect-test-diagnostics never \
+  -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
+  -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
+  -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/tests.xcresult" \
+  CODE_SIGNING_ALLOWED=NO "SWIFT_STRICT_CONCURRENCY=$NOSTALGIFY_STRICT_CONCURRENCY" \
+  2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/tests.log"
+
 echo 'iOS builds, native and UI tests, local playback self-check, and launch passed. Physical Spotify/audio tests remain required.'

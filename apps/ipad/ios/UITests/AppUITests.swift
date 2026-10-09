@@ -212,6 +212,7 @@ final class AppUITests: XCTestCase {
     }
 
     func testAccessibleControlsRemainUsableAfterRotation() throws {
+        playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             XCUIDevice.shared.orientation = orientation
             waitUntil("The app must adopt the requested \(orientation == .portrait ? "portrait" : "landscape") layout") {
@@ -221,18 +222,21 @@ final class AppUITests: XCTestCase {
             let settings = button("settings-toggle", "Settings")
             reveal(settings)
             let bounds = app.frame
-            XCTAssertGreaterThanOrEqual(settings.frame.width, 44)
-            XCTAssertGreaterThanOrEqual(settings.frame.height, 44)
-            XCTAssertGreaterThanOrEqual(settings.frame.minX, bounds.minX)
-            XCTAssertLessThanOrEqual(settings.frame.maxX, bounds.maxX)
-            playFixture()
+            let settingsFrame = settings.frame
+            XCTAssertGreaterThanOrEqual(settingsFrame.width, 44)
+            XCTAssertGreaterThanOrEqual(settingsFrame.height, 44)
+            XCTAssertGreaterThanOrEqual(settingsFrame.minX, bounds.minX)
+            XCTAssertLessThanOrEqual(settingsFrame.maxX, bounds.maxX)
             let pause = button("play-button", "Pause")
             reveal(pause)
-            XCTAssertGreaterThanOrEqual(pause.frame.width, 44)
-            XCTAssertGreaterThanOrEqual(pause.frame.height, 44)
-            XCTAssertTrue(bounds.intersects(pause.frame))
-            tap(pause)
+            XCTAssertEqual(pause.label, "Pause", "Native playback must remain active across rotation.")
+            let pauseFrame = pause.frame
+            XCTAssertGreaterThanOrEqual(pauseFrame.width, 44)
+            XCTAssertGreaterThanOrEqual(pauseFrame.height, 44)
+            XCTAssertTrue(bounds.intersects(pauseFrame))
         }
+        tap(button("play-button", "Pause"))
+        waitUntil("Pause must be confirmed after both rotations") { self.button("play-button", "Play").label == "Play" }
     }
 
     func testVoiceOverCanDiscoverAndLeaveSettingsOnCurrentPlatform() throws {
