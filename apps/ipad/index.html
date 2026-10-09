@@ -18,28 +18,28 @@
       <p id="demo-banner" class="demo-banner" hidden>DEVELOPMENT DEMO — simulated controls, no audio or account connection.</p>
       <p id="browser-banner" class="notice" hidden>Playback is available in the installed iPad app. This browser shows the interface only.</p>
       <main class="workspace">
-        <section id="player-area" class="player-area" aria-label="Music player">
-          <div class="section-heading"><span class="eyebrow">YOUR MUSIC, A FAMILIAR FACE</span><span id="source-label" class="source-label">Spotify</span></div>
-          <div id="player-viewport" class="player-viewport"><div id="player-size"><div id="app"></div></div></div>
-          <div class="now-playing"><p id="track-title">Ready when you are.</p><p id="track-artist">Connect Spotify or bring your own music.</p></div>
-          <div class="seek-row"><output id="elapsed" for="seek">0:00</output><input id="seek" type="range" min="0" max="100" value="0" step="0.1" aria-label="Playback position" disabled /><output id="duration" for="seek">0:00</output></div>
-          <div class="transport" aria-label="Playback controls">
+        <section id="player-area" class="player-area" aria-label="Music player" tabindex="-1">
+          <div class="section-heading"><span class="eyebrow">YOUR MUSIC, A FAMILIAR FACE</span><span id="source-label" class="source-label" role="status" aria-live="off" aria-label="Playback source: Spotify">Spotify</span></div>
+          <div id="player-viewport" class="player-viewport" role="group" aria-label="Classic skin controls"><div id="player-size"><div id="app"></div></div></div>
+          <div class="now-playing" aria-live="polite" aria-atomic="true"><p id="track-title" role="heading" aria-level="2" aria-label="No track selected">Ready when you are.</p><p id="track-artist">Connect Spotify or bring your own music.</p></div>
+          <div class="seek-row"><span id="elapsed" aria-hidden="true">0:00</span><input id="seek" type="range" min="0" max="100" value="0" step="1" aria-label="Playback position" aria-valuetext="0 seconds of 0 seconds" disabled /><span id="duration" aria-hidden="true">0:00</span></div>
+          <div class="transport" role="group" aria-label="Playback controls">
             <button id="previous-button" class="transport-side" aria-label="Previous track" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM20 5 9 12l11 7z" /></svg></button>
             <button id="play-button" class="transport-play" aria-label="Play" disabled>▶︎</button>
             <button id="next-button" class="transport-side" aria-label="Next track" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 5h3v14h-3zM4 5l11 7L4 19z" /></svg></button>
           </div>
-          <div class="playback-options"><button id="shuffle-button" class="quiet-button" aria-pressed="false" disabled>Shuffle</button><button id="repeat-button" class="quiet-button" aria-pressed="false" disabled>Repeat</button><label for="native-volume">Volume</label><input id="native-volume" type="range" min="0" max="100" value="100" aria-label="Playback volume" disabled /></div>
+          <div class="playback-options"><button id="shuffle-button" class="quiet-button" aria-pressed="false" disabled>Shuffle</button><button id="repeat-button" class="quiet-button" aria-pressed="false" disabled>Repeat</button><label for="native-volume">Volume</label><input id="native-volume" type="range" min="0" max="100" value="100" aria-label="Playback volume" aria-valuetext="100 percent" aria-describedby="volume-note" disabled /></div>
           <p id="volume-note" class="microcopy">Use the iPad volume buttons for Spotify.</p>
-          <p id="player-status" class="player-status" role="status" aria-live="polite">Starting player…</p>
-          <p id="error-message" class="error-message" role="alert" hidden></p>
+          <p id="player-status" class="player-status" role="status" aria-live="polite" aria-atomic="true">Starting player…</p>
+          <p id="error-message" class="error-message" role="alert" aria-atomic="true" hidden></p>
         </section>
         <aside class="collection" aria-label="Music collection">
           <div class="section-heading"><h1>Your collection</h1><span class="collection-count" id="collection-count">0 items</span></div>
-          <div class="source-tabs" role="group" aria-label="Music source"><button id="spotify-source" class="source-tab active" aria-pressed="true">Spotify</button><button id="local-source" class="source-tab" aria-pressed="false">Files</button></div>
+          <div class="source-tabs" role="group" aria-label="Browse music source"><button id="spotify-source" class="source-tab active" aria-controls="spotify-panel" aria-pressed="true">Spotify</button><button id="local-source" class="source-tab" aria-controls="local-panel" aria-pressed="false">Files</button></div>
           <section id="spotify-panel" aria-label="Spotify collection">
             <p class="panel-intro">Spotify plays the music. Nostalgify gives it a familiar home.</p>
             <button id="connect-button" class="primary-button full-width">Connect Spotify</button>
-            <form id="link-form" class="link-form"><label for="spotify-link">Add a Spotify track, album or playlist</label><div class="input-action"><input id="spotify-link" type="url" placeholder="https://open.spotify.com/…" autocomplete="off" spellcheck="false" /><button type="submit" aria-label="Save Spotify link">Add</button></div></form>
+            <form id="link-form" class="link-form"><label for="spotify-link">Add a Spotify track, album or playlist</label><div class="input-action"><input id="spotify-link" type="url" placeholder="https://open.spotify.com/…" autocomplete="off" autocapitalize="off" spellcheck="false" /><button type="submit" aria-label="Save Spotify link">Add</button></div></form>
             <div id="spotify-shelf" class="music-list"></div>
           </section>
           <section id="local-panel" aria-label="Imported audio" hidden><p class="panel-intro">Import audio from Files. Your music stays on this iPad and plays without Spotify.</p><button id="import-button" class="primary-button full-width">Import from Files</button><div id="local-library" class="music-list"></div></section>
@@ -47,9 +47,9 @@
         </aside>
       </main>
       <section id="settings-panel" class="settings-panel" aria-labelledby="settings-title" hidden>
-        <div class="section-heading"><h2 id="settings-title">Connection & settings</h2><button id="settings-close" class="quiet-button">Close</button></div>
+        <div class="section-heading"><h2 id="settings-title">Connection & settings</h2><button id="settings-close" class="quiet-button" aria-label="Close settings">Close</button></div>
         <p class="panel-intro">For this personal build, create a Spotify developer app and register the redirect URI shown below. Install Spotify on this iPad and sign in before connecting.</p>
-        <form id="spotify-settings"><label for="spotify-client-id">Spotify client ID</label><input id="spotify-client-id" autocomplete="off" spellcheck="false" required /><label for="spotify-redirect">Registered redirect URI</label><input id="spotify-redirect" value="nostalgify://spotify-login-callback" autocomplete="off" spellcheck="false" required /><p class="microcopy">Use the same callback in Spotify’s developer dashboard. This is a client ID, never a client secret. Install Spotify on this iPad, then connect.</p><button class="primary-button" type="submit">Save connection settings</button></form>
+        <form id="spotify-settings"><label for="spotify-client-id">Spotify client ID</label><input id="spotify-client-id" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="connection-help" required /><label for="spotify-redirect">Registered redirect URI</label><input id="spotify-redirect" value="nostalgify://spotify-login-callback" autocomplete="off" autocapitalize="off" spellcheck="false" aria-describedby="connection-help" required /><p id="connection-help" class="microcopy">Use the same callback in Spotify’s developer dashboard. This is a client ID, never a client secret. Install Spotify on this iPad, then connect.</p><button class="primary-button" type="submit">Save connection settings</button></form>
         <div class="settings-actions"><button id="reconnect-button" class="quiet-button">Refresh connection</button><button id="disconnect-button" class="quiet-button">Disconnect Spotify</button><button id="logout-button" class="quiet-button">Forget Spotify sign-in</button><button id="diagnostics-button" class="quiet-button">Export diagnostics</button><button id="web-diagnostics-button" class="quiet-button">Save interface diagnostics</button></div>
         <p id="diagnostics-status" class="microcopy" role="status"></p>
       </section>

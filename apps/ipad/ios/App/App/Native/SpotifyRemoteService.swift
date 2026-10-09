@@ -213,13 +213,17 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
             self.authorizing = false
             self.setFailure("spotify_authorization_timeout", "Spotify did not finish connecting. Check your Client ID, redirect and allowed Spotify account, then reconnect.")
         }
-        remote.authorizeAndPlayURI("") { [weak self, weak remote] installed in
-            guard let self, let remote, self.remote === remote, self.generation == attempt else { return }
-            if !installed {
-                self.authorizing = false
-                self.mayHaveActivePlayback = false
-                self.authorizationTimeout?.cancel()
-                self.setFailure("spotify_not_installed", "Install Spotify on this iPad and sign in, then connect again.")
+        remote.authorizeAndPlayURI("") { [weak self] installed in
+            // Cross the Objective-C callback boundary with value types only.
+            // A delayed availability result must not replace completed auth.
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == attempt, self.authorizing else { return }
+                if !installed {
+                    self.authorizing = false
+                    self.mayHaveActivePlayback = false
+                    self.authorizationTimeout?.cancel()
+                    self.setFailure("spotify_not_installed", "Install Spotify on this iPad and sign in, then connect again.")
+                }
             }
         }
         notify()

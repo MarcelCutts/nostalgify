@@ -77,6 +77,30 @@ CI should retain build logs, simulator logs, screenshots and test results on
 failure. Shared changes exercise both applications; a successful JavaScript
 build alone never closes the native acceptance gate.
 
+## October 2026 hardening tasks
+
+| Task | Automated acceptance | Device follow-up |
+| --- | --- | --- |
+| Adopt current tooling without losing compatibility | Explicit Xcode 27/iPadOS 27 and Xcode 26.6/iPadOS 26.5 lanes; committed Swift dependency resolution; unsigned Debug and Release builds | Install on the user's actual iPad and OS |
+| Recover from media service resets | Nine native regressions exercise engine/observer replacement, inactive-provider ownership, interruption intent, stale callbacks and explicit restart | Reset audio services from Developer settings during local playback and while Spotify is selected |
+| Exercise the installed app | XCUITest operates real Capacitor and AVPlayer with isolated imported WAV files; verifies transport, persistence, settings and failed Spotify handoff recovery | Real Files providers, audible output, successful Spotify authorization and background sessions |
+| Improve accessibility | Both browser engines test keyboard focus, range controls, reduced motion and 200% text; native tests run baseline accessibility audits, rotation and iPadOS 27 VoiceOver navigation | Manual VoiceOver, device text-size preferences and full visual assessment of selected skins |
+| Make regressions diagnosable | Correlated OSLog command intervals, concurrency-warning inventory, xcresult bundles and browser failure traces | Inspect Instruments during long background/route-change sessions |
+
+Keep Swift 5 language mode while collecting complete concurrency diagnostics in
+the Xcode 27 lane. Resolve concrete ownership problems at callback boundaries;
+do not suppress warnings broadly or combine this work with a wholesale Swift 6
+migration. Retain the established AVPlayer and MediaPlayer implementations for
+the iPadOS 17 deployment target. The newly announced playback/observability APIs
+need separate availability and behavior experiments before replacing them.
+
+Simulator fixtures compile only in Debug and use per-test storage. They exercise
+native imports and playback; Spotify's unconfigured error path does not verify
+real authorization. Pending Spotify authorization currently lives in memory:
+if iPadOS terminates Nostalgify during the app switch, the user must retry Connect
+Spotify. Ordinary background return and process-termination recovery are distinct
+device checks.
+
 ## Research informing these decisions
 
 - [npm workspaces](https://docs.npmjs.com/cli/v11/using-npm/workspaces/) provide

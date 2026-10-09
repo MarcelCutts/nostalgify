@@ -7,6 +7,8 @@ import OSLog
 @MainActor
 final class NativeDiagnostics {
     private let logger = Logger(subsystem: "dev.nostalgify.ipad", category: "Playback")
+    private let signposter = OSSignposter(subsystem: "dev.nostalgify.ipad", category: "Playback")
+    private var commandIntervals: [UUID: OSSignpostIntervalState] = [:]
     private var events: [[String: Any]] = []
     private let limit = 300
 
@@ -26,6 +28,21 @@ final class NativeDiagnostics {
         let safeID = entry["requestId"] as? String ?? "none"
         let milliseconds = entry["durationMs"] as? Double ?? 0
         logger.info("event=\(safeEvent, privacy: .public) code=\(safeCode, privacy: .public) request=\(safeID, privacy: .public) duration_ms=\(milliseconds, privacy: .public)")
+        signpostCommand(event: safeEvent, requestId: safeID, command: entry["command"] as? String)
+    }
+
+    /// Instruments intervals cover native queue wait and command execution.
+    /// Only a generated UUID and a fixed command name enter signpost metadata.
+    private func signpostCommand(event: String, requestId: String, command: String?) {
+        guard let id = UUID(uuidString: requestId) else { return }
+        if event == "command.started", let command {
+            guard commandIntervals[id] == nil, commandIntervals.count < 64 else { return }
+            commandIntervals[id] = signposter.beginInterval("Playback command", id: signposter.makeSignpostID(),
+                "request=\(requestId, privacy: .public) command=\(command, privacy: .public)")
+        } else if event == "command.completed" || event == "command.failed",
+                  let interval = commandIntervals.removeValue(forKey: id) {
+            signposter.endInterval("Playback command", interval)
+        }
     }
 
     private func label(_ value: String) -> String {

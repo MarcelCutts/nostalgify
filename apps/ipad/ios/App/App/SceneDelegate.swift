@@ -8,6 +8,32 @@ class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         guard let windowScene = scene as? UIWindowScene else { return }
 
         window = UIWindow(windowScene: windowScene)
+        #if DEBUG
+        if NativeUITestFixture.configuration != nil {
+            let loading = UIViewController()
+            loading.view.backgroundColor = .black
+            window?.rootViewController = loading
+            window?.makeKeyAndVisible()
+            Task { @MainActor [weak self] in
+                do {
+                    try await NativeUITestFixture.prepare()
+                    self?.installController(scene, session: session, connectionOptions: connectionOptions)
+                } catch {
+                    let label = UILabel()
+                    label.text = "UI test fixture failed"
+                    label.textColor = .white
+                    label.accessibilityIdentifier = "ui-test-fixture-failed"
+                    label.frame = loading.view.bounds
+                    loading.view.addSubview(label)
+                }
+            }
+            return
+        }
+        #endif
+        installController(scene, session: session, connectionOptions: connectionOptions)
+    }
+
+    private func installController(_ scene: UIScene, session: UISceneSession, connectionOptions: UIScene.ConnectionOptions) {
         let controller = NostalgifyViewController()
         window?.rootViewController = controller
         window?.makeKeyAndVisible()

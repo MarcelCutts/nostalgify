@@ -31,8 +31,30 @@ if (!/spotify\/ios-sdk(?:\.git)?/.test(project + packageFile)
     || !/(?:kind\s*=\s*exactVersion;\s*version\s*=\s*5\.0\.1|exact:\s*"5\.0\.1")/.test(project + packageFile)) {
   fail('Spotify iOS SDK must use its official repository and an exact 5.0.1 version');
 }
-if (!/TestableReference\s+skipped\s*=\s*"NO"/.test(scheme) || !scheme.includes('AppTests')) {
-  fail('The shared App scheme must run AppTests, not merely build the application');
+// These revisions were verified against the official annotated/lightweight tag
+// targets, not guessed from version strings. Both manifests have no dependencies.
+const expectedPins = {
+  'capacitor-swift-pm': ['https://github.com/ionic-team/capacitor-swift-pm.git', '8.5.3', '4c7f346d16196e21fbe23d4a7a6fc7af62af6742'],
+  'ios-sdk': ['https://github.com/spotify/ios-sdk.git', '5.0.1', '0b3e54771738ad5e64f22c8e5e19ca76d6becc6c'],
+};
+const resolvedText = read(`${base}/App.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved`);
+try {
+  const resolved = JSON.parse(resolvedText);
+  if (![2, 3].includes(resolved.version) || !Array.isArray(resolved.pins) || resolved.pins.length !== Object.keys(expectedPins).length) {
+    fail('Package.resolved must contain precisely the reviewed remote dependency graph');
+  }
+  for (const [identity, [location, version, revision]] of Object.entries(expectedPins)) {
+    const pin = resolved.pins?.find((value) => value.identity === identity);
+    if (pin?.kind !== 'remoteSourceControl' || pin.location !== location || pin.state?.version !== version || pin.state?.revision !== revision) {
+      fail(`Package.resolved has a missing or unreviewed ${identity} revision`);
+    }
+  }
+} catch { fail('Package.resolved is not valid JSON'); }
+for (const target of ['AppTests', 'AppUITests']) {
+  const testables = [...scheme.matchAll(/<TestableReference\s+skipped\s*=\s*"NO"[^>]*>([\s\S]*?)<\/TestableReference>/g)];
+  if (!testables.some((match) => match[1].includes(`BlueprintName="${target}"`))) {
+    fail(`The shared App scheme must run ${target}, not merely build the application`);
+  }
 }
 
 function verifySwiftSources(directory) {
@@ -52,6 +74,7 @@ function verifySwiftSources(directory) {
 }
 verifySwiftSources(`${base}/App`);
 if (!verifySwiftSources('apps/ipad/ios/Tests')) fail('No native XCTest source files found');
+if (!verifySwiftSources('apps/ipad/ios/UITests')) fail('No native XCUITest source files found');
 
 const controller = read(`${base}/App/NostalgifyViewController.swift`);
 if (!/registerPluginInstance\s*\(\s*NostalgifyNativePlugin\s*\(/.test(controller)) fail('Native Capacitor plugin is not explicitly registered');

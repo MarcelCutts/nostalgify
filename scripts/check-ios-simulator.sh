@@ -14,10 +14,37 @@ NOSTALGIFY_IOS_RESULTS=$(mktemp -d "$PWD/out/ios-ci/run.XXXXXX")
 NOSTALGIFY_SIMULATOR_ID=''
 NOSTALGIFY_PROJECT="$PWD/apps/ipad/ios/App/App.xcodeproj"
 NOSTALGIFY_DERIVED_DATA="$NOSTALGIFY_IOS_RESULTS/DerivedData"
+NOSTALGIFY_PACKAGE_LOCK="$NOSTALGIFY_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+NOSTALGIFY_STRICT_CONCURRENCY=${NOSTALGIFY_STRICT_CONCURRENCY:-complete}
+case "$NOSTALGIFY_STRICT_CONCURRENCY" in
+  minimal|targeted|complete) ;;
+  *) echo 'Invalid NOSTALGIFY_STRICT_CONCURRENCY setting.' >&2; exit 1 ;;
+esac
 echo "iOS validation results: $NOSTALGIFY_IOS_RESULTS"
 
 cleanup() {
+  # Preserve a deduplicated inventory even when a build or UI test fails. Swift
+  # 5 remains the language mode while first-party concurrency boundaries migrate.
+  python3 - "$NOSTALGIFY_IOS_RESULTS" <<'PY'
+import json, pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+diagnostics = {}
+for log in root.glob('*.log'):
+    for line in log.read_text(errors='replace').splitlines():
+        match = re.search(r'(apps/ipad/ios/[^:\n]+\.swift):\d+:\d+: warning: (.+)', line)
+        if match:
+            source, message = match.groups()
+            diagnostics[(source, message)] = {'source': source, 'message': message}
+(root / 'swift-warnings.json').write_text(json.dumps(list(diagnostics.values()), indent=2) + '\n')
+print(f'Captured {len(diagnostics)} distinct first-party Swift warning diagnostics.')
+PY
   if [ -n "$NOSTALGIFY_SIMULATOR_ID" ]; then
+    # UI tests attach their own app screenshot and hierarchy to tests.xcresult.
+    # Also retain the simulator screen if a failure prevented the launch check.
+    if [ ! -f "$NOSTALGIFY_IOS_RESULTS/launch.png" ]; then
+      xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/failure-screen.png" \
+        >/dev/null 2>&1 || true
+    fi
     xcrun simctl spawn "$NOSTALGIFY_SIMULATOR_ID" log show --last 5m --style compact \
       --predicate 'process == "App" OR process == "Nostalgify"' \
       > "$NOSTALGIFY_IOS_RESULTS/simulator.log" 2>&1 || true
@@ -32,15 +59,19 @@ xcodebuild -showsdks > "$NOSTALGIFY_IOS_RESULTS/sdks.log"
 node scripts/check-ios-project.cjs
 
 xcodebuild -resolvePackageDependencies -project "$NOSTALGIFY_PROJECT" -scheme App \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/packages.log"
+node scripts/check-ios-project.cjs
+cp "$NOSTALGIFY_PACKAGE_LOCK" "$NOSTALGIFY_IOS_RESULTS/Package.resolved"
 
 xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
   -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/build.xcresult" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=NO "SWIFT_STRICT_CONCURRENCY=$NOSTALGIFY_STRICT_CONCURRENCY" \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/build.log"
 
 # Also compile the device SDK and Release-only paths, including the Spotify
@@ -49,25 +80,60 @@ xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Relea
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
   -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/release.xcresult" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=NO "SWIFT_STRICT_CONCURRENCY=$NOSTALGIFY_STRICT_CONCURRENCY" \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/release.log"
 
+# Check the compiled executable, not just the source-level #if DEBUG directive.
+# A positive Debug marker guards against a vacuous exclusion check.
+python3 - "$NOSTALGIFY_DERIVED_DATA/Build/Products" "$NOSTALGIFY_IOS_RESULTS/release-fixture-check.json" <<'PY'
+import json, pathlib, plistlib, sys
+products = pathlib.Path(sys.argv[1])
+def executable(configuration):
+    for app in (products / configuration).glob('*.app'):
+        with (app / 'Info.plist').open('rb') as file:
+            info = plistlib.load(file)
+        if info.get('CFBundleIdentifier') == 'dev.nostalgify.ipad':
+            return (app / info['CFBundleExecutable']).read_bytes()
+    raise SystemExit(f'Built app executable missing for {configuration}.')
+debug = executable('Debug-iphonesimulator')
+release = executable('Release-iphoneos')
+markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed']
+debug_fixture = markers[1] in debug
+release_markers = [marker.decode() for marker in markers if marker in release]
+result = {'passed': debug_fixture and not release_markers, 'debugFixturePresent': debug_fixture, 'releaseFixtureMarkers': release_markers}
+pathlib.Path(sys.argv[2]).write_text(json.dumps(result, indent=2) + '\n')
+if not result['passed']:
+    raise SystemExit('Release fixture exclusion failed; inspect release-fixture-check.json.')
+print('Compiled Debug fixture confirmed; Release executable excludes UI test markers.')
+PY
+
 # Create and remove our own simulator, leaving a developer's existing devices
-# untouched. Choose an installed iOS runtime and a supported iPad device type.
+# untouched. CI selects an exact runtime; local use defaults to the selected
+# Xcode's SDK version. Never silently run a newer installed beta runtime.
+NOSTALGIFY_IOS_RUNTIME=${NOSTALGIFY_IOS_RUNTIME:-$(xcrun --sdk iphonesimulator --show-sdk-version)}
 xcrun simctl list --json > "$NOSTALGIFY_IOS_RESULTS/simulators.json"
-read -r NOSTALGIFY_DEVICE_TYPE NOSTALGIFY_RUNTIME < <(python3 - "$NOSTALGIFY_IOS_RESULTS/simulators.json" <<'PY'
+read -r NOSTALGIFY_DEVICE_TYPE NOSTALGIFY_RUNTIME < <(python3 - "$NOSTALGIFY_IOS_RESULTS/simulators.json" "$NOSTALGIFY_IOS_RUNTIME" <<'PY'
 import json, sys
 data = json.load(open(sys.argv[1]))
-runtimes = sorted((r for r in data['runtimes'] if r.get('isAvailable') and r['identifier'].startswith('com.apple.CoreSimulator.SimRuntime.iOS-')), key=lambda r: tuple(map(int, r['version'].split('.'))), reverse=True)
+def version(value):
+    parts = [int(p) for p in value.split('.')]
+    return tuple((parts + [0, 0, 0])[:3])
+runtimes = [r for r in data['runtimes'] if r.get('isAvailable') and r['identifier'].startswith('com.apple.CoreSimulator.SimRuntime.iOS-') and version(r['version']) == version(sys.argv[2])]
 for runtime in runtimes:
     for device in data['devices'].get(runtime['identifier'], []):
         if device.get('isAvailable') and device['name'].startswith('iPad') and device.get('deviceTypeIdentifier'):
             print(device['deviceTypeIdentifier'], runtime['identifier'])
             sys.exit(0)
-raise SystemExit('No installed iPad simulator is available. Install an iOS runtime in Xcode.')
+raise SystemExit(f'No installed iPad simulator for iOS {sys.argv[2]}. Install that exact runtime in Xcode.')
 PY
 )
+python3 - "$NOSTALGIFY_IOS_RESULTS/environment.json" "$NOSTALGIFY_IOS_RUNTIME" "$NOSTALGIFY_RUNTIME" "$NOSTALGIFY_STRICT_CONCURRENCY" <<'PY'
+import json, sys
+with open(sys.argv[1], 'w') as file:
+    json.dump({'requestedRuntime': sys.argv[2], 'selectedRuntime': sys.argv[3], 'strictConcurrency': sys.argv[4]}, file, indent=2)
+PY
 NOSTALGIFY_SIMULATOR_ID=$(xcrun simctl create "Nostalgify validation $$" "$NOSTALGIFY_DEVICE_TYPE" "$NOSTALGIFY_RUNTIME")
 xcrun simctl boot "$NOSTALGIFY_SIMULATOR_ID"
 xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
@@ -78,8 +144,9 @@ xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug 
   -parallel-testing-enabled NO \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
+  -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
   -resultBundlePath "$NOSTALGIFY_IOS_RESULTS/tests.xcresult" \
-  CODE_SIGNING_ALLOWED=NO \
+  CODE_SIGNING_ALLOWED=NO "SWIFT_STRICT_CONCURRENCY=$NOSTALGIFY_STRICT_CONCURRENCY" \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/tests.log"
 
 NOSTALGIFY_BUILT_APP=$(python3 - "$NOSTALGIFY_DERIVED_DATA/Build/Products/Debug-iphonesimulator" <<'PY'
@@ -113,4 +180,4 @@ if result.get('libraryCount') != 2 or result.get('provider') != 'local' or resul
     raise SystemExit('Native self-check produced an unexpected final library/playback state.')
 print('Native import, queue advancement, persistence, mounted UI, and Capacitor bridge self-check passed.')
 PY
-echo 'iOS build, native tests, local playback self-check, and launch passed. Physical Spotify/audio tests remain required.'
+echo 'iOS builds, native and UI tests, local playback self-check, and launch passed. Physical Spotify/audio tests remain required.'

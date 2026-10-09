@@ -4,7 +4,14 @@ import UIKit
 /// One coordinator per application, independent of the lifetime of a JS bridge.
 @MainActor
 final class NativePlayback {
-    static let shared = NativePlayback()
+    static let shared: NativePlayback = {
+        #if DEBUG
+        if let fixture = NativeUITestFixture.configuration {
+            return NativePlayback(defaults: fixture.defaults, localDirectory: fixture.libraryDirectory)
+        }
+        #endif
+        return NativePlayback()
+    }()
     let diagnostics = NativeDiagnostics()
     let local: LocalAudioService
     let spotify: SpotifyRemoteService
@@ -13,11 +20,13 @@ final class NativePlayback {
     private var listeners: [UUID: ([String: Any]) -> Void] = [:]
     private var commandTail: Task<Void, Error>?
     private var foreground = UIApplication.shared.applicationState == .active
+    private let defaults: UserDefaults
 
-    private init() {
-        provider = UserDefaults.standard.string(forKey: "nostalgify.provider") == "local" ? "local" : "spotify"
-        local = LocalAudioService(diagnostics: diagnostics)
-        spotify = SpotifyRemoteService(diagnostics: diagnostics)
+    private init(defaults: UserDefaults = .standard, localDirectory: URL? = nil) {
+        self.defaults = defaults
+        provider = defaults.string(forKey: "nostalgify.provider") == "local" ? "local" : "spotify"
+        local = LocalAudioService(diagnostics: diagnostics, directory: localDirectory)
+        spotify = SpotifyRemoteService(diagnostics: diagnostics, defaults: defaults)
         local.onStateChanged = { [weak self] in if self?.provider == "local" { self?.publish() } }
         spotify.onStateChanged = { [weak self] in if self?.provider == "spotify" { self?.publish() } }
         if provider == "local" { try? local.setActive(true) }
@@ -149,14 +158,14 @@ final class NativePlayback {
             try local.setActive(false)
         }
         provider = next
-        UserDefaults.standard.set(next, forKey: "nostalgify.provider")
+        defaults.set(next, forKey: "nostalgify.provider")
         diagnostics.record("provider.changed", code: next)
         if next == "spotify", foreground { spotify.resume() }
         publish()
     }
 
     func getPreferences() -> [String: Any] {
-        guard let data = UserDefaults.standard.data(forKey: "nostalgify.ui"),
+        guard let data = defaults.data(forKey: "nostalgify.ui"),
               let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [:] }
         return value
     }
@@ -179,6 +188,6 @@ final class NativePlayback {
         guard data.count <= 131_072 else {
             throw NativeFailure(code: "preferences_too_large", message: "There are too many saved settings.")
         }
-        UserDefaults.standard.set(data, forKey: "nostalgify.ui")
+        defaults.set(data, forKey: "nostalgify.ui")
     }
 }

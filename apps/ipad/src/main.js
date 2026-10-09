@@ -23,32 +23,60 @@ let playerWidth = 275;
 let playerHeight = 377;
 let lastTrack = null;
 let lastGeometry = "";
+let settingsOpener;
+const pendingActions = new WeakSet();
 
 function showError(error) {
   $("error-message").textContent = error?.message || "The player could not complete that action. Please try again.";
   $("error-message").hidden = false;
 }
-function clearError() { $("error-message").hidden = true; }
+function clearError() {
+  $("error-message").hidden = true;
+  for (const id of ["spotify-client-id", "spotify-redirect"]) {
+    $(id).removeAttribute("aria-invalid");
+    $(id).removeAttribute("aria-errormessage");
+  }
+}
 async function action(callback, button) {
-  if (button) button.disabled = true;
+  if (button && pendingActions.has(button)) return;
+  if (button) { pendingActions.add(button); button.setAttribute("aria-busy", "true"); }
   clearError();
   try { return await callback(); }
   catch (error) { showError(error); }
-  finally { if (button) button.disabled = false; renderState(host.getCachedState()); }
+  finally {
+    if (button) { pendingActions.delete(button); button.removeAttribute("aria-busy"); }
+    renderState(host.getCachedState());
+  }
 }
 const clock = seconds => `${Math.floor(Math.max(0, seconds) / 60)}:${String(Math.floor(Math.max(0, seconds) % 60)).padStart(2, "0")}`;
+const spokenTime = seconds => {
+  const value = Math.floor(Math.max(0, Number(seconds) || 0));
+  const minutes = Math.floor(value / 60);
+  return [minutes && `${minutes} ${minutes === 1 ? "minute" : "minutes"}`, `${value % 60} ${value % 60 === 1 ? "second" : "seconds"}`].filter(Boolean).join(" ");
+};
+function updateSliderDescriptions() {
+  $("seek").setAttribute("aria-valuetext", `${spokenTime($("seek").value)} of ${spokenTime($("seek").max)}`);
+  $("native-volume").setAttribute("aria-valuetext", `${Math.round(Number($("native-volume").value))} percent`);
+}
 function renderState(state) {
   const caps = state.capabilities;
   $("source-label").textContent = state.provider === "local" ? "LOCAL FILES" : "SPOTIFY";
-  $("track-title").textContent = state.track?.name || "Ready when you are.";
-  $("track-artist").textContent = state.track?.artist || (state.provider === "local" ? "Your imported music, on this iPad." : "Connect Spotify or bring your own music.");
+  $("source-label").setAttribute("aria-label", `Playback source: ${state.provider === "local" ? "Local files" : "Spotify"}`);
+  const title = state.track?.name || "Ready when you are.";
+  const artist = state.track?.artist || (state.provider === "local" ? "Your imported music, on this iPad." : "Connect Spotify or bring your own music.");
+  if ($("track-title").textContent !== title) {
+    $("track-title").textContent = title;
+    $("track-title").setAttribute("aria-label", state.track ? `Now playing: ${title}` : "No track selected");
+  }
+  if ($("track-artist").textContent !== artist) $("track-artist").textContent = artist;
   $("elapsed").textContent = clock(state.position);
   $("duration").textContent = clock(state.track?.duration || 0);
   $("seek").max = String(state.track?.duration || 0);
   if (document.activeElement !== $("seek")) $("seek").value = String(state.position);
   $("seek").disabled = !caps.canSeek || !state.track;
   $("native-volume").disabled = !caps.canSetVolume;
-  $("native-volume").value = String(state.volume);
+  if (document.activeElement !== $("native-volume")) $("native-volume").value = String(state.volume);
+  updateSliderDescriptions();
   $("volume-note").textContent = caps.canSetVolume ? "Volume applies to imported audio." : "Use the iPad volume buttons for Spotify.";
   $("previous-button").disabled = !caps.canSkipPrevious;
   $("next-button").disabled = !caps.canSkipNext;
@@ -61,7 +89,10 @@ function renderState(state) {
     $(`${key}-button`).setAttribute("aria-pressed", String(state[key]));
   }
   $("connect-button").textContent = state.provider === "spotify" && state.running ? "Reconnect Spotify" : "Connect Spotify";
-  $("player-status").textContent = demo ? "Development demo · controls are simulated; no audio plays." : state.message || (state.state === "playing" ? "Playing" : state.running ? "Ready to play" : "Connect Spotify or import music from Files");
+  const playbackStatus = ({ playing: "Playing", buffering: "Buffering", paused: "Paused" })[state.state] || (state.running ? "Ready to play" : "Connect Spotify or import music from Files");
+  const status = demo ? `Development demo · ${playbackStatus.toLowerCase()}; no audio plays.` : state.message || playbackStatus;
+  // Native progress events arrive frequently; unchanged live-region writes can interrupt VoiceOver.
+  if ($("player-status").textContent !== status) $("player-status").textContent = status;
   // The authentic controls use the same capability gates as the accessible controls.
   for (const [selector, enabled] of [["#volume", caps.canSetVolume], ["#position", caps.canSeek], ["#next", caps.canSkipNext], ["#previous", caps.canSkipPrevious], ["#shuffle", caps.canShuffle], ["#repeat", caps.canRepeat]]) {
     const element = document.querySelector(`#webamp ${selector}`);
@@ -132,12 +163,22 @@ function renderLists() {
   $("collection-count").textContent = `${count} ${count === 1 ? "item" : "items"}`;
 }
 function renderList(container, items, emptyText) {
+  const focused = container.contains(document.activeElement) ? document.activeElement : null;
+  const focusIndex = focused ? [...container.children].indexOf(focused.closest(".music-row")) : -1;
+  const focusURI = focused?.dataset.uri;
+  const focusAction = focused?.className;
+  let nextFocus;
   container.replaceChildren();
-  if (!items.length) { const empty = document.createElement("p"); empty.className = "empty-library"; empty.textContent = emptyText; container.append(empty); return; }
+  if (!items.length) {
+    const empty = document.createElement("p"); empty.className = "empty-library"; empty.textContent = emptyText; container.append(empty);
+    if (focused) $(container.id === "local-library" ? "import-button" : "spotify-link").focus({ preventScroll: true });
+    return;
+  }
   for (const item of items) {
     const row = document.createElement("div"); row.className = "music-row";
     const play = document.createElement("button"); play.className = "music-play";
     const icon = document.createElement("span"); icon.className = "music-icon"; icon.textContent = "♪";
+    icon.setAttribute("aria-hidden", "true");
     const text = document.createElement("span"); text.className = "music-text";
     const title = document.createElement("span"); title.className = "music-title"; title.textContent = item.title;
     const subtitle = document.createElement("span"); subtitle.className = "music-subtitle"; subtitle.textContent = item.artist || (item.provider === "local" ? "Imported audio" : `Spotify ${item.kind}`);
@@ -145,6 +186,8 @@ function renderList(container, items, emptyText) {
     play.setAttribute("aria-label", `Play ${item.title}`);
     play.addEventListener("click", () => action(() => host.command("playShelf", item.uri), play));
     const remove = document.createElement("button"); remove.className = "remove-item"; remove.textContent = "×"; remove.setAttribute("aria-label", `Remove ${item.title}`);
+    play.dataset.uri = remove.dataset.uri = item.uri;
+    if (item.uri === focusURI) nextFocus = focusAction === "remove-item" ? remove : play;
     remove.addEventListener("click", () => action(async () => {
       if (item.provider === "local") { await host.removeAudio(item.uri.slice(6)); await refreshLibrary(); }
       await mounted?.shelf.removeUri?.(item.uri);
@@ -152,21 +195,36 @@ function renderList(container, items, emptyText) {
     }, remove));
     row.append(play, remove); container.append(row);
   }
+  if (focused) (nextFocus || container.children[Math.min(focusIndex, items.length - 1)]?.querySelector("button"))?.focus({ preventScroll: true });
 }
 function showSettings(open) {
+  if (open && $("settings-panel").hidden) settingsOpener = document.activeElement;
   $("settings-panel").hidden = !open;
   $("settings-toggle").setAttribute("aria-expanded", String(open));
-  if (open) { $("settings-panel").scrollIntoView({ behavior: "smooth", block: "start" }); $("spotify-client-id").focus({ preventScroll: true }); }
+  if (open) {
+    const behavior = matchMedia("(prefers-reduced-motion: reduce)").matches ? "instant" : "smooth";
+    $("settings-panel").scrollIntoView({ behavior, block: "start" });
+    $("spotify-client-id").focus({ preventScroll: true });
+  } else (settingsOpener?.isConnected ? settingsOpener : $("settings-toggle")).focus();
 }
 $("settings-toggle").addEventListener("click", () => showSettings($("settings-panel").hidden));
-$("settings-close").addEventListener("click", () => { showSettings(false); $("settings-toggle").focus(); });
+$("settings-close").addEventListener("click", () => showSettings(false));
+$("settings-panel").addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); showSettings(false); }
+});
 $("spotify-settings").addEventListener("submit", event => {
   event.preventDefault();
   void action(async () => {
     const clientId = $("spotify-client-id").value.trim();
     const redirectURI = $("spotify-redirect").value.trim();
-    if (!/^[a-f0-9]{32}$/i.test(clientId)) throw new Error("Enter the 32-character client ID from your Spotify developer app.");
-    if (redirectURI !== "nostalgify://spotify-login-callback") throw new Error("Register and use nostalgify://spotify-login-callback for this build.");
+    const invalid = !/^[a-f0-9]{32}$/i.test(clientId) ? ["spotify-client-id", "Enter the 32-character client ID from your Spotify developer app."]
+      : redirectURI !== "nostalgify://spotify-login-callback" ? ["spotify-redirect", "Register and use nostalgify://spotify-login-callback for this build."] : null;
+    if (invalid) {
+      $(invalid[0]).setAttribute("aria-invalid", "true");
+      $(invalid[0]).setAttribute("aria-errormessage", "error-message");
+      $(invalid[0]).focus();
+      throw new Error(invalid[1]);
+    }
     await host.configureSpotify({ clientId, redirectURI });
     $("diagnostics-status").textContent = "Connection settings saved. You can now connect Spotify.";
   }, event.submitter);
@@ -207,6 +265,7 @@ for (const [id, command] of [["play-button", "playpause"], ["previous-button", "
 for (const key of ["shuffle", "repeat"]) $(`${key}-button`).addEventListener("click", () => action(() => host.command(key, !host.getCachedState()[key]), $(`${key}-button`)));
 $("seek").addEventListener("change", () => action(() => host.command("seek", Number($("seek").value))));
 $("native-volume").addEventListener("change", () => action(() => host.command("volume", Number($("native-volume").value))));
+for (const id of ["seek", "native-volume"]) $(id).addEventListener("input", updateSliderDescriptions);
 $("skin-file").addEventListener("change", () => action(async () => {
   const file = $("skin-file").files?.[0]; if (!file) return;
   const skin = await host.importSkin(file); await renderSkins(); $("skin-select").value = skin.id; $("skin-file").value = "";

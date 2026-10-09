@@ -4,6 +4,7 @@ name: CI
 # changes that only affect documentation or one platform.
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -29,38 +30,84 @@ jobs:
       - run: npm run build
       - run: npm run ipad:sync
       - run: npm run check
-      - name: Install browsers for iPad UI smoke tests
-        run: npx playwright install --with-deps chromium webkit
-      - name: Smoke test the iPad UI in Chromium
+  browser:
+    name: iPad browser (${{ matrix.engine }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        engine: [chromium, webkit]
+    # Browsers and OS libraries are installed together. Keep this tag matched to
+    # package.json; the digest prevents a mutable tag changing a CI environment.
+    container:
+      image: mcr.microsoft.com/playwright:v1.62.1-noble@sha256:dcc5531e97840b9b5e794f2814476b21571c5124a3fca2267d73041f56e7580e
+      options: --ipc=host
+    defaults:
+      run:
+        shell: bash
+    env:
+      ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify browser package matches the installed image
+        run: |
+          node - <<'JS'
+          const fs = require('node:fs');
+          const version = require('./package.json').devDependencies.playwright;
+          const workflow = fs.readFileSync('.github/workflows/ci.yml', 'utf8');
+          if (!workflow.includes(`image: mcr.microsoft.com/playwright:v${version}-noble@sha256:`)) {
+            throw new Error('Update the Playwright image tag and digest alongside the npm package.');
+          }
+          JS
+      - run: npm ci
+      - name: Smoke test the iPad UI
         run: npm run test:ipad:browser
         env:
-          IPAD_SMOKE_BROWSER: chromium
-          IPAD_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/out/ipad-browser-ci/chromium
-      - name: Smoke test the iPad UI in WebKit
-        run: npm run test:ipad:browser
-        env:
-          IPAD_SMOKE_BROWSER: webkit
-          IPAD_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/out/ipad-browser-ci/webkit
+          IPAD_SMOKE_BROWSER: ${{ matrix.engine }}
+          IPAD_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/out/ipad-browser-ci/${{ matrix.engine }}
       - name: Upload browser diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ipad-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ipad-browser-${{ matrix.engine }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
           retention-days: 7
           path: |
             out/ipad-browser-ci/**/*.png
             out/ipad-browser-ci/**/*.json
             out/ipad-browser-ci/**/*.log
+            out/ipad-browser-ci/**/*.zip
 
   ios:
-    name: iPad simulator
-    runs-on: macos-26
-    timeout-minutes: 35
+    name: iPad (Xcode ${{ matrix.xcode }}, iPadOS ${{ matrix.runtime }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: xcode-27
+            xcode: '27.0'
+            developer-dir: /Applications/Xcode_27.app/Contents/Developer
+            runtime: '27.0'
+            strict-concurrency: complete
+          - runner: macos-26
+            xcode: '26.6'
+            developer-dir: /Applications/Xcode_26.6.app/Contents/Developer
+            runtime: '26.5'
+            strict-concurrency: minimal
     env:
       # Explicit version from actions/runner-images; do not inherit a moving
       # macos-latest Xcode default or silently fall back to an older SDK.
-      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+      DEVELOPER_DIR: ${{ matrix.developer-dir }}
+      NOSTALGIFY_XCODE_VERSION: ${{ matrix.xcode }}
+      NOSTALGIFY_IOS_RUNTIME: ${{ matrix.runtime }}
+      NOSTALGIFY_STRICT_CONCURRENCY: ${{ matrix.strict-concurrency }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -70,8 +117,18 @@ jobs:
       - name: Verify Xcode and simulator SDK
         run: |
           test -d "$DEVELOPER_DIR"
-          xcodebuild -version
-          xcrun --sdk iphonesimulator --show-sdk-version
+          python3 - <<'PY'
+          import os, subprocess
+          def version(value):
+              return tuple((value.strip().split('.') + ['0', '0'])[:3])
+          xcode = subprocess.check_output(['xcodebuild', '-version'], text=True)
+          sdk = subprocess.check_output(['xcrun', '--sdk', 'iphonesimulator', '--show-sdk-version'], text=True)
+          print(xcode, 'Simulator SDK:', sdk)
+          if version(xcode.splitlines()[0].split()[1]) != version(os.environ['NOSTALGIFY_XCODE_VERSION']):
+              raise SystemExit('The selected Xcode version does not match this CI lane.')
+          if version(sdk) != version(os.environ['NOSTALGIFY_IOS_RUNTIME']):
+              raise SystemExit('The selected simulator SDK does not match this CI lane.')
+          PY
       - run: npm ci
       - run: npm run build
       - run: npm run ipad:sync
@@ -82,7 +139,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ios-simulator-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ios-xcode-${{ matrix.xcode }}-${{ github.run_id }}-${{ github.run_attempt }}
           if-no-files-found: ignore
           retention-days: 7
           path: |
@@ -90,18 +147,21 @@ jobs:
             out/ios-ci/**/*.json
             out/ios-ci/**/*.png
             out/ios-ci/**/*.xcresult/**
+            out/ios-ci/**/Package.resolved
 
   required:
     name: Required checks
     if: always()
-    needs: [test, ios]
+    needs: [test, browser, ios]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
       - name: Require web, desktop, and native validation
         env:
           WEB_RESULT: ${{ needs.test.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
           IOS_RESULT: ${{ needs.ios.result }}
         run: |
           test "$WEB_RESULT" = success
+          test "$BROWSER_RESULT" = success
           test "$IOS_RESULT" = success

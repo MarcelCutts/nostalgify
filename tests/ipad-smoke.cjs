@@ -20,8 +20,10 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
   const browser = await browserType.launch({ executablePath: system, headless: true, args: engine === "chromium" ? ["--no-sandbox", "--disable-crashpad-for-testing"] : [] });
   const errors = [];
   let page;
+  let context;
   try {
-    const context = await browser.newContext({ ...devices["iPad Pro 11"] });
+    context = await browser.newContext({ ...devices["iPad Pro 11"] });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
     page = await context.newPage();
     page.on("pageerror", error => errors.push(error.message));
     page.on("dialog", dialog => dialog.dismiss());
@@ -58,7 +60,20 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.locator("#native-volume").isDisabled(), true);
     await page.locator("#webamp #close").tap();
     assert.equal(await page.locator("#main-window").isVisible(), true, "desktop close must not strand the iPad interface");
-    await page.locator("#settings-toggle").tap();
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.locator("#settings-toggle").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await page.locator("#spotify-client-id").evaluate(input => input === document.activeElement), true, "opening settings focuses its first field");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#settings-panel").isVisible(), false);
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => button === document.activeElement), true, "Escape returns focus to the settings opener");
+    await page.keyboard.press("Enter");
+    await page.locator("#spotify-client-id").fill("invalid-client");
+    await page.locator("#spotify-settings button[type=submit]").tap();
+    await page.waitForFunction(() => document.getElementById("spotify-client-id").getAttribute("aria-invalid") === "true");
+    assert.equal(await page.locator("#spotify-client-id").evaluate(input => input === document.activeElement), true);
+    assert.equal(await page.locator("#spotify-client-id").getAttribute("aria-errormessage"), "error-message");
+    assert.equal(await page.locator("#error-message").isVisible(), true);
     await page.locator("#spotify-client-id").fill("0123456789abcdef0123456789abcdef");
     const pasteCanceled = await page.locator("#spotify-client-id").evaluate(input => {
       const clipboardData = new DataTransfer(); clipboardData.setData("text/plain", "0123456789abcdef0123456789abcdef");
@@ -67,7 +82,10 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(pasteCanceled, false, "pasting in Settings must not be captured by the playlist");
     await page.locator("#spotify-settings button[type=submit]").tap();
     await page.waitForFunction(() => document.getElementById("diagnostics-status").textContent.includes("saved"));
+    assert.equal(await page.locator("#spotify-client-id").getAttribute("aria-invalid"), null);
+    assert.equal(await page.locator("#error-message").isVisible(), false);
     await page.locator("#settings-close").tap();
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => button === document.activeElement), true);
     await page.locator("#connect-button").tap();
     await page.locator("#spotify-link").fill("https://open.spotify.com/track/0123456789abcdefghijkl");
     await page.locator("#link-form button").tap();
@@ -80,13 +98,37 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => document.getElementById("track-title").textContent === "Demo track");
     await page.locator("#play-button").tap();
     await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Play");
     await page.locator("#local-source").tap();
     await page.locator("#import-button").tap();
     await page.locator("#local-library .music-play").waitFor();
-    await page.locator("#local-library .music-play").tap();
+    await page.locator("#local-library .music-play").focus();
+    await page.keyboard.press("Enter");
     await page.waitForFunction(() => window.__ipad.host.getCachedState().provider === "local");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "playing");
+    assert.equal(await page.locator("#local-library .music-play").evaluate(button => button === document.activeElement), true, "starting a track preserves keyboard focus through list refresh");
     assert.equal(await page.locator("#native-volume").isDisabled(), false);
     assert.match(await page.locator("#track-title").textContent(), /Imported demo/);
+    assert.equal(await page.getByRole("heading", { name: "Now playing: Imported demo recording" }).count(), 1, "now-playing heading must have a distinct accessible name");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Pause");
+    assert.equal(await page.locator("#source-label").getAttribute("aria-label"), "Playback source: Local files");
+    assert.equal(await page.getByRole("status", { name: "Playback source: Local files" }).count(), 1);
+    await page.locator("#seek").focus();
+    const positionBefore = await page.evaluate(() => window.__ipad.host.getCachedState().position);
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(value => window.__ipad.host.getCachedState().position === value, positionBefore + 1);
+    assert.equal(await page.locator("#seek").getAttribute("aria-valuetext"), "1 second of 1 minute 0 seconds");
+    await page.locator("#native-volume").focus();
+    const volumeBefore = await page.evaluate(() => window.__ipad.host.getCachedState().volume);
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForFunction(value => window.__ipad.host.getCachedState().volume === value, volumeBefore - 1);
+    assert.equal(await page.locator("#native-volume").getAttribute("aria-valuetext"), `${volumeBefore - 1} percent`);
+    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), positionBefore + 1, "volume arrow keys must not trigger classic-player seek shortcuts");
+    await page.locator("#play-button").focus();
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Play");
+    assert.equal(await page.locator("#play-button").evaluate(button => button === document.activeElement), true);
     const mobileSize = await page.locator("#play-button").boundingBox();
     assert.ok(mobileSize.width >= 44 && mobileSize.height >= 44);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
@@ -110,13 +152,29 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.locator("#local-source").tap();
     await page.locator("#import-button").tap();
     await page.locator("#local-library .music-play").tap();
-    await page.locator("#local-library .remove-item").tap();
+    await page.locator("#local-library .remove-item").focus();
+    await page.keyboard.press("Enter");
     await page.waitForFunction(() => document.querySelectorAll("#local-library .music-play").length === 0);
+    assert.equal(await page.locator("#import-button").evaluate(button => button === document.activeElement), true, "removing the last track returns focus to Import");
     assert.deepEqual(errors, []);
     await page.screenshot({ path: join(artifacts, "ipad-ui.png"), fullPage: true });
     await page.setViewportSize({ width: 500, height: 900 });
     await page.waitForTimeout(100);
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "split view must not overflow horizontally");
+    await page.evaluate(() => { document.documentElement.style.fontSize = `${parseFloat(getComputedStyle(document.documentElement).fontSize) * 2}px`; });
+    await page.locator("#settings-toggle").tap();
+    for (const width of [500, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `200% text must fit a ${width}px window`);
+      const clippedControls = await page.evaluate(() => [...document.querySelectorAll(".shell button, .shell input, .shell select")]
+        .filter(element => !element.closest("#webamp") && element.getClientRects().length)
+        .filter(element => { const r = element.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth + 1 || r.width < 44 || r.height < 44; })
+        .map(element => element.id || element.className));
+      assert.deepEqual(clippedControls, [], `all visible controls must fit and retain 44px targets at 200% text/${width}px`);
+    }
+    await page.screenshot({ path: join(artifacts, "ipad-large-text.png"), fullPage: true });
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => getComputedStyle(button).transitionDuration), "0s", "reduced motion disables shell transitions");
     await page.goto("https://nostalgify-production.test/?mock=1");
     await page.waitForFunction(() => document.documentElement.dataset.playerReady === "true");
     assert.equal(await page.locator("#demo-banner").isVisible(), false, "production query parameters cannot enable simulated playback");
@@ -124,13 +182,14 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.evaluate(() => typeof window.__ipad), "undefined");
     const meta = JSON.parse(readFileSync(join(outdir, "metafile.json"), "utf8"));
     assert.equal(Object.keys(meta.inputs).some(input => /apps\/desktop\/|node_modules\/electron\//.test(input)), false);
-    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings paste and Spotify configuration", "saved link persistence after reload", "touch transport", "native file import contract", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion", "split-view no horizontal overflow", "no JS exceptions"] };
+    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings keyboard focus, Escape, paste and Spotify configuration", "saved link persistence after reload", "touch and keyboard transport", "native file import contract", "spoken playback position and volume", "range keyboard isolation from classic shortcuts", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion and focus recovery", "split-view and 200% text no horizontal overflow or clipped controls", "reduced motion", "no JS exceptions"] };
     writeFileSync(join(artifacts, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));
-    await context.close();
+    await context.tracing.stop();
   } catch(error) {
     await page?.screenshot({ path: join(artifacts, "failure.png"), fullPage: true, timeout: 5000 }).catch(() => {});
+    await context?.tracing.stop({ path: join(artifacts, "trace.zip") }).catch(() => {});
     writeFileSync(join(artifacts, "failure.log"), `${error.stack}\n${errors.join("\n")}`);
     throw error;
-  } finally { await browser.close(); }
+  } finally { await context?.close(); await browser.close(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

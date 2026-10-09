@@ -12,9 +12,12 @@ it for listening.
 
 ## Build and install with Xcode
 
-You need a Mac with Xcode 26 or newer, its iOS platform support, Node.js 22.12 or
-newer (Node 24 LTS recommended), an Apple account, and an iPad running iPadOS 17 or
-newer. The committed project targets iPad; test on your actual iPadOS version.
+Use Xcode 27 with its iOS platform support on a supported Apple silicon Mac
+(macOS Tahoe 26.6 or newer), Node.js 22.12 or newer (Node 24 LTS recommended),
+an Apple account, and an iPad running iPadOS 17 or newer. CI also retains an
+Xcode 26.6/iPadOS 26.5 compatibility lane. The deployment target is iPadOS 17;
+that does not establish validation of every supported OS version. Test on your
+actual iPadOS version.
 
 From the repository root:
 
@@ -91,6 +94,11 @@ lock-screen controls. Switching sources pauses the current source before the
 next starts. Removing a file deletes Nostalgify's imported copy, not the original
 in Files. Uninstalling the app deletes its imported library.
 
+If iPadOS restarts its audio services, Nostalgify rebuilds the local player and
+preserves the selected track, queue and playback position. Playback remains
+paused until you press Play. Recovery while Spotify is selected does not activate
+Nostalgify's local audio session.
+
 Use the skin import control for a classic Winamp 2 `.wsz` or `.zip` file from the
 [Winamp Skin Museum](https://skins.webamp.org/). Skin bytes and the selected skin
 are saved on the device. Do not unzip the skin. The equalizer is decorative; the
@@ -103,6 +111,10 @@ IDs connect a control action with native completion, duration and failure codes.
 The logs omit authorization tokens, callback URLs, filenames and track metadata.
 Xcode's console and macOS Console also show native events under the
 `dev.nostalgify.ipad` subsystem, including while JavaScript is suspended.
+In Instruments, the Points of Interest instrument can inspect **Playback command**
+intervals in the `Playback` category. Each interval correlates a request ID and
+safe command name with native completion or failure. It measures native command
+handling, not the time until audio becomes audible.
 
 When reporting a failure, include what you tapped, expected and observed
 behaviour, app/build and iPadOS versions, and whether Spotify or local playback
@@ -167,6 +179,8 @@ location. There is no need for a larger monorepo build system at this size.
 - [Apple: running your app on a device](https://developer.apple.com/documentation/xcode/running-your-app-in-simulator-or-on-a-device)
 - [Apple: TestFlight](https://developer.apple.com/testflight/)
 - [Apple: testing a release build](https://developer.apple.com/documentation/xcode/testing-a-release-build)
+- [Apple: Xcode support and requirements](https://developer.apple.com/support/xcode/)
+- [Apple: recovering from audio service resets](https://developer.apple.com/documentation/avfaudio/avaudiosession/mediaserviceswereresetnotification)
 
 Research and dependency verification: October 2026. The implementation pins
 Capacitor 8.5.3 and SpotifyiOS 5.0.1; consult the installed SDK and developer

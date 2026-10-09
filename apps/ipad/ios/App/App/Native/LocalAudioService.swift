@@ -2,12 +2,30 @@ import AVFoundation
 import MediaPlayer
 import UIKit
 
+/// Session actions are injectable so reset tests can distinguish configuration
+/// from activation without taking ownership of the simulator's audio session.
+struct LocalAudioSessionActions {
+    var configure: () throws -> Void
+    var setActive: (Bool) throws -> Void
+
+    static var live: Self {
+        Self(configure: {
+            try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [])
+        }, setActive: { active in
+            try AVAudioSession.sharedInstance().setActive(active, options: active ? [] : .notifyOthersOnDeactivation)
+        })
+    }
+}
+
 /// Application-owned playback survives WebView navigation, reloads, and suspension.
 @MainActor
 final class LocalAudioService {
     var onStateChanged: (() -> Void)?
     private(set) var library: [LocalAudioRecord] = []
-    private let player = AVPlayer()
+    private var player: AVPlayer
+    private let makePlayer: () -> AVPlayer
+    private let notificationCenter: NotificationCenter
+    private let session: LocalAudioSessionActions
     private let diagnostics: NativeDiagnostics
     private let directory: URL
     private var queue = LocalQueue()
@@ -17,15 +35,27 @@ final class LocalAudioService {
     private var repeating = false
     private var error: String?
     private var message = "Import audio from Files to start listening."
+    // AVPlayer may already be paused when iOS delivers an interruption. Keep
+    // the user's intent independently from AVPlayer's observed rate.
+    private var wantsPlayback = false
+    private var playbackRevision: UInt64 = 0
     private var resumeAfterInterruption = false
+    private var interruptionInProgress = false
     private var notificationTokens: [NSObjectProtocol] = []
     private var periodicToken: Any?
     private var statusObservation: NSKeyValueObservation?
     private var rateObservation: NSKeyValueObservation?
     private var remoteTargets: [(MPRemoteCommand, Any)] = []
 
-    init(diagnostics: NativeDiagnostics, directory storageDirectory: URL? = nil) {
+    init(diagnostics: NativeDiagnostics, directory storageDirectory: URL? = nil,
+         notificationCenter: NotificationCenter = .default,
+         session: LocalAudioSessionActions = .live,
+         makePlayer: @escaping () -> AVPlayer = { AVPlayer() }) {
         self.diagnostics = diagnostics
+        self.notificationCenter = notificationCenter
+        self.session = session
+        self.makePlayer = makePlayer
+        player = makePlayer()
         directory = storageDirectory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Audio", isDirectory: true)
         do {
@@ -40,13 +70,7 @@ final class LocalAudioService {
             message = "The local library could not be read. Your audio files have not been deleted."
             diagnostics.record("local.library_read_failed")
         }
-        player.automaticallyWaitsToMinimizeStalling = true
-        periodicToken = player.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self] _ in
-            Task { @MainActor in self?.changed() }
-        }
-        rateObservation = player.observe(\.timeControlStatus, options: [.new]) { [weak self] _, _ in
-            Task { @MainActor in self?.changed() }
-        }
+        installPlayerObservers()
         observe(AVPlayerItem.didPlayToEndTimeNotification) { [weak self] notification in
             guard let self, let item = notification.object as? AVPlayerItem, item === self.player.currentItem else { return }
             self.finished()
@@ -60,32 +84,96 @@ final class LocalAudioService {
             guard let self, self.active,
                   let raw = note.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt,
                   AVAudioSession.RouteChangeReason(rawValue: raw) == .oldDeviceUnavailable else { return }
-            self.player.pause()
-            self.resumeAfterInterruption = false
+            self.cancelPlaybackIntent()
             self.diagnostics.record("local.route_disconnected")
             self.changed()
         }
         observe(AVAudioSession.mediaServicesWereResetNotification) { [weak self] _ in
-            guard let self, self.active else { return }
-            self.player.pause()
-            if let record = self.current { self.load(record) }
-            self.failed("audio_services_reset", "Audio services restarted. Press Play to continue.")
+            self?.mediaServicesReset()
         }
     }
 
     deinit {
-        notificationTokens.forEach(NotificationCenter.default.removeObserver)
+        notificationTokens.forEach(notificationCenter.removeObserver)
         if let token = periodicToken { player.removeTimeObserver(token) }
-        remoteTargets.forEach { $0.0.removeTarget($0.1) }
+        remoteTargets.forEach { $0.0.removeTarget($0.1); $0.0.isEnabled = false }
         statusObservation?.invalidate()
         rateObservation?.invalidate()
+    }
+
+    private func installPlayerObservers() {
+        let observedPlayer = player
+        observedPlayer.automaticallyWaitsToMinimizeStalling = true
+        periodicToken = observedPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self, weak observedPlayer] _ in
+            Task { @MainActor in
+                guard let self, observedPlayer === self.player else { return }
+                self.changed()
+            }
+        }
+        rateObservation = observedPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] observedPlayer, _ in
+            Task { @MainActor in
+                guard let self, observedPlayer === self.player else { return }
+                self.changed()
+            }
+        }
+    }
+
+    private func cancelPlaybackIntent() {
+        playbackRevision &+= 1
+        wantsPlayback = false
+        resumeAfterInterruption = false
+        player.pause()
+    }
+
+    private func mediaServicesReset() {
+        let selected = current
+        let position = elapsed
+        let volume = player.volume
+        let wasStopped = stopped
+        cancelPlaybackIntent()
+        interruptionInProgress = false
+        // Tokens belong to the old player. Remove them before replacing it;
+        // queued callbacks also verify their player/item identity.
+        statusObservation?.invalidate()
+        statusObservation = nil
+        rateObservation?.invalidate()
+        rateObservation = nil
+        if let token = periodicToken { player.removeTimeObserver(token) }
+        periodicToken = nil
+        player.currentItem?.cancelPendingSeeks()
+        player.replaceCurrentItem(with: nil)
+        player = makePlayer()
+        player.volume = volume
+        installPlayerObservers()
+        if let selected {
+            load(selected)
+            player.seek(to: CMTime(seconds: position, preferredTimescale: 600))
+        }
+        stopped = wasStopped
+        // Configure without activation. An inactive local provider must not
+        // change the shared session while Spotify owns playback; Play configures
+        // the session when the user next chooses local playback.
+        if active {
+            do { try session.configure() }
+            catch { diagnostics.record("local.session_configure_failed") }
+        }
+        diagnostics.record("local.media_services_reset")
+        failed("audio_services_reset", "Audio services restarted. Press Play to continue.")
+    }
+
+    private var canSkipNext: Bool {
+        !queue.ids.isEmpty && (queue.index + 1 < queue.ids.count || repeating)
+    }
+
+    private var canSkipPrevious: Bool {
+        current != nil && (elapsed > 3 || queue.index > 0 || repeating)
     }
 
     private var current: LocalAudioRecord? { library.first { $0.id == queue.current } }
     private var elapsed: Double { PlaybackValue.position(player.currentTime().seconds, duration: current?.duration ?? 0) }
 
     private func observe(_ name: Notification.Name, handler: @escaping @MainActor (Notification) -> Void) {
-        notificationTokens.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { note in
+        notificationTokens.append(notificationCenter.addObserver(forName: name, object: nil, queue: .main) { note in
             Task { @MainActor in handler(note) }
         })
     }
@@ -93,13 +181,12 @@ final class LocalAudioService {
     func setActive(_ value: Bool) throws {
         if value == active { return }
         if !value {
-            player.pause()
-            resumeAfterInterruption = false
-            remoteTargets.forEach { $0.0.removeTarget($0.1) }
+            cancelPlaybackIntent()
+            remoteTargets.forEach { $0.0.removeTarget($0.1); $0.0.isEnabled = false }
             remoteTargets.removeAll()
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
             MPNowPlayingInfoCenter.default().playbackState = .stopped
-            do { try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation) }
+            do { try session.setActive(false) }
             catch { diagnostics.record("local.session_deactivate_failed") }
         }
         active = value
@@ -108,8 +195,7 @@ final class LocalAudioService {
     }
 
     func pauseBeforeProviderSwitch() {
-        player.pause()
-        resumeAfterInterruption = false
+        cancelPlaybackIntent()
         changed()
     }
 
@@ -122,7 +208,7 @@ final class LocalAudioService {
                 "track": record.map { $0.snapshot as Any } ?? NSNull(),
                 "error": error.map { $0 as Any } ?? NSNull(), "message": message,
                 "capabilities": ["canSeek": record != nil, "canSetVolume": true,
-                    "canSkipNext": library.count > 1, "canSkipPrevious": record != nil,
+                    "canSkipNext": canSkipNext, "canSkipPrevious": canSkipPrevious,
                     "canShuffle": true, "canRepeat": true]]
     }
 
@@ -189,7 +275,9 @@ final class LocalAudioService {
         try save(remaining)
         let selected = queue.current
         if selected == id {
-            player.pause()
+            cancelPlaybackIntent()
+            statusObservation?.invalidate()
+            statusObservation = nil
             player.replaceCurrentItem(with: nil)
             stopped = true
         }
@@ -214,20 +302,20 @@ final class LocalAudioService {
         guard active else { throw NativeFailure(code: "inactive_provider", message: "Select Local Files first.") }
         switch command {
         case "play", "playOrFallback": try play()
-        case "pause": player.pause(); resumeAfterInterruption = false
+        case "pause": cancelPlaybackIntent()
         case "playpause":
-            if player.rate > 0 { player.pause(); resumeAfterInterruption = false } else { try play() }
+            if wantsPlayback { cancelPlaybackIntent() } else { try play() }
         case "stop":
-            player.pause(); stopped = true; resumeAfterInterruption = false
+            cancelPlaybackIntent(); stopped = true
             await seek(0)
         case "seek":
             guard let record = current else { throw NativeFailure(code: "no_track", message: "Choose a local audio file first.") }
             let seconds = try PlaybackValue.number(arg)
             if player.currentItem == nil { load(record) }
-            await seek(seconds)
+            let completed = await seek(seconds)
             // An explicit scrub selects the next playback position even after
             // Stop or natural completion. Stop's internal seek keeps stopped.
-            stopped = false
+            if completed { stopped = false }
         case "volume": player.volume = Float(PlaybackValue.volume(try PlaybackValue.number(arg)) / 100)
         case "next": try skip(1)
         case "previous":
@@ -253,6 +341,7 @@ final class LocalAudioService {
     }
 
     private func load(_ record: LocalAudioRecord) {
+        cancelPlaybackIntent()
         statusObservation?.invalidate()
         let item = AVPlayerItem(url: directory.appendingPathComponent(record.filename))
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
@@ -273,30 +362,39 @@ final class LocalAudioService {
         if player.currentItem == nil, let record = current { load(record) }
         if player.currentItem?.status == .failed, let record = current { load(record) }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default)
+            try session.configure()
             try session.setActive(true)
         } catch {
+            cancelPlaybackIntent()
             throw NativeFailure(code: "audio_session_failed", message: "The audio output is unavailable. Try Play again.")
         }
         if stopped { player.seek(to: .zero) }
         stopped = false
         error = nil
         message = ""
+        wantsPlayback = true
+        // A fresh Play supersedes any old interruption's eventual ended event.
+        interruptionInProgress = false
         player.play()
     }
 
-    private func seek(_ seconds: Double) async {
-        guard player.currentItem != nil else { return }
+    @discardableResult
+    private func seek(_ seconds: Double) async -> Bool {
+        playbackRevision &+= 1
+        let revision = playbackRevision
+        let seekingPlayer = player
+        guard let seekingItem = player.currentItem else { return false }
         let time = CMTime(seconds: PlaybackValue.position(seconds, duration: current?.duration ?? 0), preferredTimescale: 600)
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { _ in continuation.resume() }
+        let completed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            seekingPlayer.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { continuation.resume(returning: $0) }
         }
+        // Reset, deletion, or a source change can supersede this asynchronous seek.
+        return completed && revision == playbackRevision && seekingPlayer === player && seekingItem === player.currentItem
     }
 
     private func skip(_ direction: Int) throws {
         guard !library.isEmpty else { throw NativeFailure(code: "empty_library", message: "Import audio from Files first.") }
-        let playing = player.rate > 0
+        let playing = wantsPlayback
         guard queue.advance(by: direction, wrapping: repeating), let record = current else {
             throw NativeFailure(code: "queue_boundary", message: direction > 0 ? "This is the last file." : "This is the first file.")
         }
@@ -305,12 +403,12 @@ final class LocalAudioService {
     }
 
     private func finished() {
-        guard active else { return }
+        guard active, wantsPlayback, !interruptionInProgress else { return }
         if queue.advance(by: 1, wrapping: repeating), let record = current {
             load(record)
             do { try play() } catch { failed("audio_session_failed", "Press Play to continue.") }
         } else {
-            player.pause()
+            cancelPlaybackIntent()
             stopped = true
         }
         diagnostics.record("local.track_finished")
@@ -321,21 +419,25 @@ final class LocalAudioService {
         guard active, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         if type == .began {
-            resumeAfterInterruption = player.rate > 0
+            interruptionInProgress = true
+            resumeAfterInterruption = wantsPlayback
             player.pause()
             diagnostics.record("local.interruption_began")
         } else {
             let options = AVAudioSession.InterruptionOptions(rawValue: note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0)
-            let resume = resumeAfterInterruption && options.contains(.shouldResume)
+            let wasInterrupted = interruptionInProgress
+            let resume = wasInterrupted && resumeAfterInterruption && options.contains(.shouldResume)
+            interruptionInProgress = false
             resumeAfterInterruption = false
             if resume { do { try play() } catch { failed("audio_session_failed", "Press Play to resume audio.") } }
+            else if wasInterrupted { cancelPlaybackIntent() }
             diagnostics.record("local.interruption_ended")
         }
         changed()
     }
 
     private func failed(_ code: String, _ text: String) {
-        player.pause()
+        cancelPlaybackIntent()
         error = code
         message = text
         diagnostics.record("local.playback_failed", code: code)
@@ -344,6 +446,7 @@ final class LocalAudioService {
 
     private func changed() {
         guard active else { return }
+        updateRemoteCommandAvailability()
         updateNowPlaying()
         onStateChanged?()
     }
@@ -358,6 +461,17 @@ final class LocalAudioService {
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyIsLiveStream: false]
         MPNowPlayingInfoCenter.default().playbackState = player.rate > 0 ? .playing : (stopped ? .stopped : .paused)
+    }
+
+    private func updateRemoteCommandAvailability() {
+        let center = MPRemoteCommandCenter.shared()
+        center.playCommand.isEnabled = !library.isEmpty
+        center.pauseCommand.isEnabled = wantsPlayback
+        center.togglePlayPauseCommand.isEnabled = !library.isEmpty
+        center.stopCommand.isEnabled = current != nil && !stopped
+        center.nextTrackCommand.isEnabled = canSkipNext
+        center.previousTrackCommand.isEnabled = canSkipPrevious
+        center.changePlaybackPositionCommand.isEnabled = current != nil
     }
 
     private func installRemoteCommands() {
