@@ -12,6 +12,7 @@ fi
 mkdir -p out/ios-ci
 NOSTALGIFY_IOS_RESULTS=$(mktemp -d "$PWD/out/ios-ci/run.XXXXXX")
 NOSTALGIFY_SIMULATOR_ID=''
+NOSTALGIFY_TEST_LOG_START=''
 NOSTALGIFY_PROJECT="$PWD/apps/ipad/ios/App/App.xcodeproj"
 NOSTALGIFY_DERIVED_DATA="$NOSTALGIFY_IOS_RESULTS/DerivedData"
 NOSTALGIFY_PACKAGE_LOCK="$NOSTALGIFY_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
@@ -52,8 +53,14 @@ PY
       xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/failure-screen.png" \
         >/dev/null 2>&1 || true
     fi
-    xcrun simctl spawn "$NOSTALGIFY_SIMULATOR_ID" log show --last 5m --style compact \
-      --predicate 'process == "App" OR process == "Nostalgify"' \
+    # The first cold launch may fail well before the last five minutes. Retain
+    # the whole test interval, bounded by this job's 45-minute deadline.
+    NOSTALGIFY_LOG_TIME_ARGUMENTS=(--last 45m)
+    if [ -n "$NOSTALGIFY_TEST_LOG_START" ]; then
+      NOSTALGIFY_LOG_TIME_ARGUMENTS=(--start "$NOSTALGIFY_TEST_LOG_START")
+    fi
+    xcrun simctl spawn "$NOSTALGIFY_SIMULATOR_ID" log show "${NOSTALGIFY_LOG_TIME_ARGUMENTS[@]}" --style compact \
+      --predicate 'process == "App" OR process == "Nostalgify" OR process == "AppUITests-Runner" OR process == "testmanagerd" OR process == "runningboardd" OR process == "SpringBoard" OR subsystem BEGINSWITH "com.apple.WebKit"' \
       > "$NOSTALGIFY_IOS_RESULTS/simulator.log" 2>&1 || true
     xcrun simctl shutdown "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
     xcrun simctl delete "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
@@ -159,6 +166,10 @@ xcrun simctl boot "$NOSTALGIFY_SIMULATOR_ID"
 xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/boot.log"
 
+# Use the local clock format expected by log show --start; keep its UTC offset
+# beside it so the interval can be matched to timestamped CI output.
+NOSTALGIFY_TEST_LOG_START=$(date '+%Y-%m-%d %H:%M:%S')
+date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/test-started-at.log"
 xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
   -destination "platform=iOS Simulator,id=$NOSTALGIFY_SIMULATOR_ID" \
   -parallel-testing-enabled NO \

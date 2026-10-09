@@ -11,6 +11,9 @@ final class AppUITests: XCTestCase {
 
     override func setUpWithError() throws {
         continueAfterFailure = false
+        // Real keyboard, accessibility and AVPlayer interactions took 116s on
+        // the compatibility runner. Keep a bounded allowance for VM variance.
+        executionTimeAllowance = 180
         fixtureID = UUID().uuidString
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -19,7 +22,8 @@ final class AppUITests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        if let app, testRun?.hasSucceeded == false {
+        // hasSucceeded remains false until teardown itself completes.
+        if let app, (testRun?.totalFailureCount ?? 0) > 0 {
             let screenshot = XCTAttachment(screenshot: app.screenshot())
             screenshot.name = "Failed app screen"
             screenshot.lifetime = .keepAlways
@@ -34,8 +38,26 @@ final class AppUITests: XCTestCase {
     }
 
     private func launch() {
+        let started = Date()
         app.launch()
-        XCTAssertTrue(button("settings-toggle", "Settings").waitForExistence(timeout: 30), "The real bundled UI must become ready.")
+        let ready = button("settings-toggle", "Settings").waitForExistence(timeout: 30)
+        if !ready {
+            let details = """
+            Launch began: \(ISO8601DateFormatter().string(from: started))
+            Elapsed seconds including app.launch(): \(Date().timeIntervalSince(started))
+            App state: \(app.state.rawValue)
+            App frame: \(app.frame)
+            Window count: \(app.windows.count)
+            WKWebView count: \(app.webViews.count)
+            Orientation: \(XCUIDevice.shared.orientation.rawValue)
+            Settings absent after the 30-second readiness deadline. See the failure screenshot/hierarchy and simulator startup log.
+            """
+            let attachment = XCTAttachment(string: details)
+            attachment.name = "Launch readiness failure"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        XCTAssertTrue(ready, "The real bundled UI must become ready.")
         XCTAssertFalse(app.staticTexts["UI test fixture failed"].exists)
         XCTAssertFalse(app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "DEVELOPMENT DEMO")).firstMatch.exists)
     }
@@ -64,17 +86,44 @@ final class AppUITests: XCTestCase {
         // WKWebView can report a DOM control as hittable behind the keyboard.
         // Dismiss the actual iPad keyboard before tapping a non-text control.
         let hideKeyboard = app.keyboards.buttons["Hide keyboard"].firstMatch
-        if hideKeyboard.exists {
+        if keyboardIsVisible {
+            XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5), file: file, line: line)
             hideKeyboard.tap()
-            waitUntil("The keyboard must close before tapping content") { !self.app.keyboards.firstMatch.exists }
+            waitUntil("The keyboard must close before tapping content") { !self.keyboardIsVisible }
         }
         reveal(element, file: file, line: line)
         element.tap()
     }
 
+    private var keyboardIsVisible: Bool {
+        let keyboard = app.keyboards.firstMatch
+        guard keyboard.exists else { return false }
+        // iPadOS 27 retains a zero-height keyboard and its offscreen preview
+        // buttons after dismissal. Existence alone does not mean it is open.
+        let visible = keyboard.frame.intersection(app.frame)
+        return !visible.isNull && visible.width > 1 && visible.height > 1
+    }
+
     private func waitUntil(_ message: String, timeout: TimeInterval = 10, _ condition: @escaping () -> Bool) {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed, message)
+    }
+
+    private func auditAccessibility() throws {
+        try app.performAccessibilityAudit(for: [.elementDetection, .sufficientElementDescription]) { issue in
+            var details = ["Type: \(issue.auditType)", issue.compactDescription, issue.detailedDescription]
+            if let element = issue.element {
+                details += ["Element type: \(element.elementType)", "Label: \(element.label)",
+                            "Frame: \(element.frame)", element.debugDescription]
+            } else {
+                details.append("The audit did not associate an accessibility element with this finding.")
+            }
+            let attachment = XCTAttachment(string: String(details.joined(separator: "\n").prefix(12_000)))
+            attachment.name = "Accessibility audit finding"
+            attachment.lifetime = .keepAlways
+            self.add(attachment)
+            return false // Preserve the failure; this handler only adds evidence.
+        }
     }
 
     // WebKit exposes HTML aria-pressed controls as native accessibility switches.
@@ -141,12 +190,21 @@ final class AppUITests: XCTestCase {
         }
     }
 
-    func testAccessibleControlsRemainUsableAfterRotation() throws {
+    func testFilesLibraryAccessibilityAudit() throws {
         openFiles()
         // iPadOS 17+ audit APIs: detect unlabeled/non-discoverable elements.
-        // No issue handler suppresses findings. This is a baseline audit, not a
+        // The issue handler preserves findings. This is a baseline audit, not a
         // claim of a complete VoiceOver, contrast or Dynamic Type assessment.
-        try app.performAccessibilityAudit(for: [.elementDetection, .sufficientElementDescription])
+        try auditAccessibility()
+    }
+
+    func testSettingsAccessibilityAudit() throws {
+        tap(button("settings-toggle", "Settings"))
+        tap(button("reconnect-button", "Refresh connection"))
+        try auditAccessibility()
+    }
+
+    func testAccessibleControlsRemainUsableAfterRotation() throws {
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             XCUIDevice.shared.orientation = orientation
             let settings = button("settings-toggle", "Settings")
@@ -164,9 +222,6 @@ final class AppUITests: XCTestCase {
             XCTAssertTrue(bounds.intersects(pause.frame))
             tap(pause)
         }
-        tap(button("settings-toggle", "Settings"))
-        tap(button("reconnect-button", "Refresh connection"))
-        try app.performAccessibilityAudit(for: [.elementDetection, .sufficientElementDescription])
     }
 
     func testVoiceOverCanDiscoverAndLeaveSettingsOnCurrentPlatform() throws {
