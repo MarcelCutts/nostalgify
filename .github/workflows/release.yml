@@ -1,26 +1,30 @@
-# Builds the Mac downloads when a version tag is pushed, and opens a draft release.
-#   npm version patch && git push --follow-tags
-name: Release
+# Builds only the desktop package and opens a draft release. iPad distribution
+# uses Xcode signing; this workflow does not archive or upload an iOS application.
+#   git tag desktop-v0.1.0 && git push origin desktop-v0.1.0
+name: Desktop release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["desktop-v*"]
 
 permissions:
   contents: write
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-26
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
 
       - run: npm ci
+
+      - run: npm test
 
       - name: Build Apple Silicon and Intel apps
         run: npm run package:release

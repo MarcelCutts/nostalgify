@@ -2,8 +2,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
 const { PassThrough, Readable } = require("node:stream");
-const { createElectronSoundCloudFetch } = require("../src/main/soundcloud/electron-fetch");
-const { createSoundCloudClient } = require("../src/main/soundcloud/client");
+const { createElectronSoundCloudFetch } = require("../apps/desktop/src/main/soundcloud/electron-fetch");
+const { createSoundCloudClient } = require("../apps/desktop/src/main/soundcloud/client");
 
 function harness(onEnd = () => {}) {
   const requests = [];

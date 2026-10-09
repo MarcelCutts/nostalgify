@@ -4,7 +4,7 @@
 const assert = require("node:assert/strict");
 const fs = require("node:fs/promises");
 const path = require("node:path");
-const { bounded, restoreSpotifyVolume } = require("../../src/main/spotify-selftest");
+const { bounded, restoreSpotifyVolume } = require("../../apps/desktop/src/main/spotify-selftest");
 
 function runLiveSoundCloudSelftest({ win, app, playback, readPrefs, getSpotifyState, spotifyCommand }) {
   const realSpotify = process.env.NOSTALGIFY_SELFTEST === "soundcloud-live-real";

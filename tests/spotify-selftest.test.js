@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 const path = require("node:path");
 
-const source = fs.readFileSync(path.join(__dirname, "../src/main/spotify-selftest.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "../apps/desktop/src/main/spotify-selftest.js"), "utf8");
 
 // Exercise failure/cleanup without launching Electron or controlling Spotify.
 function harness({ platform = "darwin", env = { NOSTALGIFY_SELFTEST: "real" }, jsError = false, disposeError = false } = {}) {

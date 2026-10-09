@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { cleanShelf } = require("../src/main/shelf");
+const { cleanShelf } = require("../apps/desktop/src/main/shelf");
 
 test("legacy Spotify shelves migrate without changing order or metadata", () => {
   const saved = [

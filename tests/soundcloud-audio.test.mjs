@@ -5,7 +5,7 @@ import { build } from "esbuild";
 // Load the browser module with its production bundler, injecting only browser
 // media and time primitives. No real network or audio device is required.
 const built = await build({
-  entryPoints: [new URL("../src/renderer/soundcloudAudio.js", import.meta.url).pathname],
+  entryPoints: [new URL("../apps/desktop/src/renderer-entry/soundcloudAudio.js", import.meta.url).pathname],
   bundle: true, platform: "node", format: "esm", write: false,
 });
 const { createSoundCloudAudio } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString("base64")}`);

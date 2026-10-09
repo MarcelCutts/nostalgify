@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
 
-const source = fs.readFileSync(path.join(__dirname, "../src/main/selftest.js"), "utf8");
+const source = fs.readFileSync(path.join(__dirname, "../apps/desktop/src/main/selftest.js"), "utf8");
 const fixtures = {
   soundcloud: ["../../tests/helpers/soundcloud-fixture", "runSoundCloudSelftest"],
   "soundcloud-live": ["../../tests/helpers/soundcloud-live", "runLiveSoundCloudSelftest"],

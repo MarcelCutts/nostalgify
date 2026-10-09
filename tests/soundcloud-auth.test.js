@@ -2,7 +2,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
 const crypto = require('node:crypto');
-const { createSoundCloudAuth } = require('../src/main/soundcloud/auth');
+const { createSoundCloudAuth } = require('../apps/desktop/src/main/soundcloud/auth');
 
 const CLIENT = 'test-client';
 const CLOCK = 1700000000000;

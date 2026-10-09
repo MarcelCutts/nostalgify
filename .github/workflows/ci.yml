@@ -1,15 +1,23 @@
 name: CI
 
+# No path filters: a required check must finish for every pull request, including
+# changes that only affect documentation or one platform.
 on:
   push:
   pull_request:
+  workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -19,3 +27,74 @@ jobs:
       - run: npm ci
       - run: npm test
       - run: npm run build
+      - run: npm run ipad:sync
+      - run: npm run check
+      - name: Install browser for iPad UI smoke tests
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:ipad:browser
+        env:
+          IPAD_SMOKE_ARTIFACT_DIR: ${{ github.workspace }}/out/ipad-browser-ci
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ipad-browser-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            out/ipad-browser-ci/*.png
+            out/ipad-browser-ci/*.json
+            out/ipad-browser-ci/*.log
+
+  ios:
+    name: iPad simulator
+    runs-on: macos-26
+    timeout-minutes: 35
+    env:
+      # Explicit version from actions/runner-images; do not inherit a moving
+      # macos-latest Xcode default or silently fall back to an older SDK.
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Verify Xcode and simulator SDK
+        run: |
+          test -d "$DEVELOPER_DIR"
+          xcodebuild -version
+          xcrun --sdk iphonesimulator --show-sdk-version
+      - run: npm ci
+      - run: npm run build
+      - run: npm run ipad:sync
+      - run: npm run check
+      - name: Compile, test, and launch the iPad application
+        run: bash scripts/check-ios-simulator.sh
+      - name: Upload native diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-simulator-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          retention-days: 7
+          path: |
+            out/ios-ci/**/*.log
+            out/ios-ci/**/*.json
+            out/ios-ci/**/*.png
+            out/ios-ci/**/*.xcresult/**
+
+  required:
+    name: Required checks
+    if: always()
+    needs: [test, ios]
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require web, desktop, and native validation
+        env:
+          WEB_RESULT: ${{ needs.test.result }}
+          IOS_RESULT: ${{ needs.ios.result }}
+        run: |
+          test "$WEB_RESULT" = success
+          test "$IOS_RESULT" = success

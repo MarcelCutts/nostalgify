@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { contextMenuTemplate } = require("../src/main/context-menu");
+const { contextMenuTemplate } = require("../apps/desktop/src/main/context-menu");
 
 const dependencies = { action() {}, skinMenu: [], zoomMenu: [] };
 test("native menu requests accept only known contexts and literal boolean state", () => {

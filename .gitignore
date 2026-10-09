@@ -14,3 +14,20 @@ skins/*
 
 # macOS
 .DS_Store
+
+# Native generated assets and local Xcode state
+apps/ipad/ios/App/App/public/
+apps/ipad/ios/App/App/capacitor.config.json
+apps/ipad/ios/App/App/config.xml
+**/DerivedData/
+**/xcuserdata/
+**/*.xcuserstate
+**/.build/
+*.xcresult/
+artifacts/
+
+# Local signing and development configuration
+.env
+.env.*
+!.env.example
+apps/ipad/ios/Local.xcconfig

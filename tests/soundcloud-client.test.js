@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createSoundCloudClient } = require("../src/main/soundcloud/client");
+const { createSoundCloudClient } = require("../apps/desktop/src/main/soundcloud/client");
 
 const TOKEN = "test-private-token";
 const TRACK = {

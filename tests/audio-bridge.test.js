@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createAudioBridge } = require("../src/main/audio-bridge");
+const { createAudioBridge } = require("../apps/desktop/src/main/audio-bridge");
 
 function harness(send) {
   let now = 0;

@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { createPlayback } = require("../src/main/playback");
+const { createPlayback } = require("../apps/desktop/src/main/playback");
 
 function deferred() {
   let resolve;
