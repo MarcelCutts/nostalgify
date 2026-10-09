@@ -204,6 +204,33 @@ before discarding the saved sign-in. A locked keychain needs unlocking separatel
 
 ## Recorded validation
 
+### Cloud review follow-up, 9 October 2026
+
+At `51670bcd76e09a486d3568fb262c5e4d43b366a2`, the complete PR stack passed
+**228 unit tests** and `npm run build` on Linux with Node 24.19.0. The individual
+updated branches also passed their suites/builds: #1 `f3c7130` (203 tests),
+#2 `a75b4f1` (214), and #3 `f9bf781` (217).
+
+Electron 44.7.0 ran under Xvfb with separate temporary profiles and
+`NOSTALGIFY_MOCK=1`. All three asserting modes exited successfully:
+
+- `soundcloud`: offline AAC/HLS, attribution, actual Stop/Play buttons, source
+  switching, saved shelf and renderer-reload recovery.
+- `menus`: native show/close events, action results, 1×/2×/3× sizing, the
+  right-click sequence with an omitted release, and reload cleanup. Inputs were
+  synthetic and menu items were activated programmatically; physical macOS
+  pointer/keyboard behavior and native placement remain separate checks.
+- `soundcloud-live`: real application credentials, API resolution and AAC/HLS
+  decoding, transport controls, natural playlist advancement, attribution,
+  persistence, reload recovery and switching to mock Spotify. This used
+  `NODE_USE_ENV_PROXY=1` through the cloud's configured proxy, not Electron's
+  normal macOS network route. No live quota was deliberately exhausted.
+
+This run did not exercise real Spotify, user OAuth/Keychain prompts or physical
+speaker output. It does not replace the macOS checks below.
+
+### Earlier macOS validation
+
 The macOS validation recorded on 9 October 2026 for commit `c69cd44` passed the
 unit suite and renderer build, offline AAC/HLS checks, live application-token
 refresh and SoundCloud decoding/controls/reload, and both real Spotify handoffs.
