@@ -88,7 +88,7 @@ but may not contain this fork's changes. Follow the instructions for that releas
 | Put music on your shelf | Drag a supported Spotify or SoundCloud link onto Nostalgify, or copy the link and press Cmd+V. The playlist window's **ADD** button also offers a clipboard action. |
 | Play something from your shelf | Double-click it in the playlist window |
 | Tidy the shelf | Drag entries to reorder them. Select one and use **REM** to remove it |
-| Open the current source | Press **Eject** or choose **Playback → Open Current Source**. For Spotify, choose a track in its app and Nostalgify returns to the front. For SoundCloud, this opens the current track's web page. |
+| Open the current source | Press **Eject** or choose **Playback → Open Current Source** to show Spotify or open the current SoundCloud track's web page. With Spotify, **Eject** also returns Nostalgify to the front after you choose a track. |
 | Play your Liked Songs | Double-click **Liked Songs (Spotify)**, or press **Play** when Spotify is selected and has nothing loaded. |
 
 ### The shelf

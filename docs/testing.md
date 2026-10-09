@@ -30,7 +30,7 @@ quit the app and unset `NOSTALGIFY_USER_DATA`, `NOSTALGIFY_SELFTEST` and
 
 `NOSTALGIFY_MOCK=1` replaces Spotify with a simulated player. It does **not** mock
 SoundCloud unless the exact development mode is `NOSTALGIFY_SELFTEST=soundcloud`.
-Any set value of `NOSTALGIFY_MOCK`, including `0`, enables the Spotify mock, so
+Any nonempty value of `NOSTALGIFY_MOCK`, including `0`, enables the Spotify mock, so
 unset the variable for real Spotify checks.
 
 ```sh
@@ -139,7 +139,7 @@ env -u NOSTALGIFY_MOCK NOSTALGIFY_SELFTEST=focus npm start
 `focus` asserts real shelf playback, metadata, an advancing clock and Spotify
 staying hidden while Nostalgify remains in front. `real` also asserts pause,
 seek, volume, resume and Eject's focus round trip. Both use bounded waits and
-exit nonzero on failure. They reject non-macOS runs and any set mock variable.
+exit nonzero on failure. They reject non-macOS runs and any nonempty value of `NOSTALGIFY_MOCK`.
 
 To check both handoffs with **real SoundCloud and real Spotify**, configure
 SoundCloud credentials and run:
