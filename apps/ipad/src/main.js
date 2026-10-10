@@ -205,18 +205,33 @@ const localShelfItem = item => ({ provider: "local", kind: "track", uri: item.ur
 async function refreshLibrary() {
   const previous = library;
   library = await host.listAudio();
-  if (mounted) {
-    // Add new library entries before persisting removals, so they cannot be
-    // mistaken for user exclusions while reconciling a changed native library.
-    await mounted.shelf.addItems(visibleLocalItems());
-    const retained = new Set(library.map(item => item.uri || `local:${item.id}`));
-    for (const item of previous) {
-      const uri = item.uri || `local:${item.id}`;
-      if (!retained.has(uri)) await mounted.shelf.removeUri(uri);
+  try {
+    if (mounted) {
+      // Add new library entries before persisting removals, so they cannot be
+      // mistaken for user exclusions while reconciling a changed native library.
+      const failures = [];
+      try { await mounted.shelf.addItems(visibleLocalItems()); }
+      catch (error) { failures.push(error); }
+      const retained = new Set(library.map(item => item.uri || `local:${item.id}`));
+      // Each operation updates the visible shelf before saving. Finish every
+      // removal even if persistence fails: the cached library is already new,
+      // so a later refresh cannot discover these vanished files again.
+      for (const item of previous) {
+        const uri = item.uri || `local:${item.id}`;
+        if (!retained.has(uri)) {
+          try { await mounted.shelf.removeUri(uri); }
+          catch (error) { failures.push(error); }
+        }
+      }
+      if (failures.length) throw failures[0];
     }
+  } finally {
+    // Native import can commit even when playlist preferences cannot be saved.
+    // Files and playback eligibility must reflect the library we just read
+    // while the save still rejects.
+    renderLists();
+    renderState(host.getCachedState());
   }
-  renderLists();
-  updatePlayAvailability(host.getCachedState());
 }
 function renderLists() {
   renderList($("spotify-shelf"), savedShelf, "Save a Spotify link to start your collection.");
@@ -358,9 +373,22 @@ for (const [id, command] of [["seek", "seek"], ["native-volume", "volume"]]) {
     });
   });
 }
+// Classic menus and Settings share these operations. Refresh only after the
+// store has committed or rolled back; picker failures must never affect that
+// operation's result or become an import failure that triggers a rollback.
+for (const method of ["importSkin", "selectSkin"]) {
+  const changeSkin = host[method];
+  host[method] = async (...args) => {
+    try { return await changeSkin(...args); }
+    finally {
+      try { await renderSkins(); }
+      catch { host.recordError("skin_load_failed"); }
+    }
+  };
+}
 $("skin-file").addEventListener("change", () => action(async () => {
   const file = $("skin-file").files?.[0]; if (!file) return;
-  const skin = await host.importSkin(file); await renderSkins(); $("skin-select").value = skin.id; $("skin-file").value = "";
+  await host.importSkin(file); $("skin-file").value = "";
 }));
 $("skin-select").addEventListener("change", () => action(async () => {
   try { await host.selectSkin($("skin-select").value); }
