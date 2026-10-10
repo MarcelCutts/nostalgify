@@ -17,6 +17,9 @@ $("browser-banner").hidden = native || demo;
 const host = attachSkinStore(createNativeHost(plugin, { debug: demo, onError: showError }));
 window.nostalgify = host;
 let mounted;
+let startupPending;
+let mountStarted = false;
+let playerReady = false;
 let library = [];
 let savedShelf = [];
 let localPlaylistExcluded = new Set();
@@ -309,13 +312,17 @@ $("import-button").addEventListener("click", () => action(() => host.importFiles
 $("link-form").addEventListener("submit", event => {
   event.preventDefault();
   void action(async () => {
-    const text = $("spotify-link").value.trim();
+    if (!playerReady) throw new Error("The player is still starting. Your link is kept here; save it once startup finishes.");
+    const input = $("spotify-link");
+    const entered = input.value;
+    const text = entered.trim();
     const links = await host.resolveLinks(text);
     if (!links.length) throw new Error("Paste a link from open.spotify.com for a track, album, artist, playlist or episode.");
-    if (mounted?.shelf.addItems) await mounted.shelf.addItems(links);
-    else await mounted?.shelf.addFromText(text);
-    $("spotify-link").value = "";
-  }, event.submitter);
+    try { await mounted.shelf.addItems(links); }
+    catch { throw new Error("Your link could not be saved. It is still here; try Save again."); }
+    // Editing another link while this save is pending must not discard it.
+    if (input.value === entered) input.value = "";
+  }, $("save-link"));
 });
 for (const [id, command] of [["play-button", "playpause"], ["previous-button", "previous"], ["next-button", "next"]]) $(id).addEventListener("click", () => action(() => host.command(command), $(id)));
 for (const key of ["shuffle", "repeat"]) $(`${key}-button`).addEventListener("click", () => action(() => host.command(key, !host.getCachedState()[key]), $(`${key}-button`)));
@@ -371,6 +378,7 @@ async function start() {
   savedShelf = Array.isArray(preferences.shelf) ? preferences.shelf : [];
   if (preferences.spotify) { $("spotify-client-id").value = preferences.spotify.clientId || ""; $("spotify-redirect").value = preferences.spotify.redirectURI || "nostalgify://spotify-login-callback"; }
   if (native || demo) await refreshLibrary();
+  mountStarted = true;
   mounted = await mountPlayer(host);
   installSkinAccessibility($("app"));
   mounted.webamp.onWillClose(cancel => cancel());
@@ -396,6 +404,30 @@ async function start() {
   // Let users browse only once those controls have their final initial identity.
   $("spotify-source").disabled = false;
   $("local-source").disabled = false;
+  playerReady = true;
+  $("save-link").disabled = false;
+  $("spotify-link").removeAttribute("aria-describedby");
+  $("startup-message").hidden = true;
+  $("retry-startup").hidden = true;
   if (demo) window.__ipad = { host, mounted, plugin };
 }
-void start().catch(error => { host.recordError("startup_failed"); showError(error); $("player-status").textContent = "The player could not start. Export diagnostics from Settings."; });
+function startPlayer() {
+  if (startupPending || playerReady || mountStarted) return;
+  $("retry-startup").disabled = true;
+  $("startup-message").textContent = "Starting player… Your link will stay here until you save it.";
+  startupPending = start().catch(error => {
+    host.recordError("startup_failed");
+    showError(error);
+    // Retry only before mounting: a failed mount may already have installed
+    // player listeners, so repeating it in the same page is not safe.
+    $("startup-message").textContent = mountStarted
+      ? "The player could not start. Reopen the app to try again. Your link has not been saved."
+      : "The player could not start. Retry startup, then save your link. Your text is kept here.";
+    $("retry-startup").hidden = mountStarted;
+  }).finally(() => {
+    startupPending = null;
+    $("retry-startup").disabled = false;
+  });
+}
+$("retry-startup").addEventListener("click", () => { clearError(); startPlayer(); });
+startPlayer();
