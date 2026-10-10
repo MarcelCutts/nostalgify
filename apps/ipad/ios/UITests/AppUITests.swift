@@ -8,6 +8,7 @@ import UIKit
 final class AppUITests: XCTestCase {
     private var app: XCUIApplication!
     private var fixtureID: String!
+    // XCTest creates a separate case instance for each test method.
     private var launchOrdinal = 0
     // The app owns one WKWebView. Start at its first native wrapper instead of
     // repeatedly searching every nested/auxiliary WebView accessibility node.
@@ -19,7 +20,6 @@ final class AppUITests: XCTestCase {
         // the compatibility runner. Keep a bounded allowance for VM variance.
         executionTimeAllowance = 180
         fixtureID = UUID().uuidString
-        launchOrdinal = 0
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
         XCUIDevice.shared.orientation = .portrait

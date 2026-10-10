@@ -27,6 +27,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Test native diagnostic watcher
+        run: python3 -B -m unittest discover -s tests -p 'test_ios_startup_watcher.py'
       - run: npm run build
       - run: npm run ipad:sync
       - run: npm run check

@@ -26,6 +26,8 @@ h1, h2 { font-size: 1.25rem; letter-spacing: -.5px; margin: 0; font-weight: 600;
 #webamp { user-select: none; }
 /* Keep sprite text in its real box: off-screen text-indent leaks huge frames to WKWebView accessibility. */
 #app #webamp .character { text-indent: 0; color: transparent; font-size: 0; line-height: 0; overflow: hidden; }
+/* The glyph wrapper otherwise inherits a text line taller than this 10px sprite readout. */
+#app #webamp .playlist-running-time-display { font-size: 0; line-height: 0; overflow: hidden; }
 #webamp [data-skin-artwork] { position: absolute; pointer-events: none; }
 #webamp [data-skin-artwork=title] { top: 0; left: 24px; right: 40px; height: 14px; }
 #webamp [data-skin-artwork=equalizer] { top: 14px; left: 0; width: 275px; height: 102px; }

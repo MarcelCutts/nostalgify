@@ -60,6 +60,22 @@ def webcontent_pid(log, app_pid):
     return next(iter(matches)) if len(matches) == 1 else None
 
 
+def current_probe_directory(simulator):
+    output, status = command(["xcrun", "simctl", "get_app_container", simulator,
+                              "dev.nostalgify.ipad", "data"])
+    if status != "completed":
+        return None, status
+    container = pathlib.Path(output.strip())
+    expected = f"/CoreSimulator/Devices/{simulator}/data/Containers/Data/Application/"
+    try:
+        uuid.UUID(container.name)
+    except ValueError:
+        return None, "unexpected-container-identity"
+    if not container.is_absolute() or expected not in str(container) or "\n" in str(container):
+        return None, "unexpected-container-identity"
+    return container / "Documents" / "UITestStartupDiagnostics", "resolved"
+
+
 def pending_probes(directory):
     for requested in sorted(directory.glob("*-requested.json")):
         try:
@@ -142,19 +158,45 @@ def main():
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     deadline = time.monotonic() + 40 * 60
-    result = {"diagnosticOnly": True, "status": "no-live-stalled-probe-matched"}
+    next_lookup = 0
+    discovery = {"containerLookups": 0, "containerChanges": 0,
+                 "probeDirectoryObserved": False, "lastLookupStatus": "not-attempted",
+                 "identityRejections": 0}
+    requested_files, candidate_launches = set(), set()
+    result = {"diagnosticOnly": True}
     captured = False
     while not stopping and time.monotonic() < deadline:
+        if time.monotonic() >= next_lookup:
+            # XCTest can reinstall the app into a new data container. Refresh
+            # only this bundle's location, caching it between bounded lookups.
+            current, status = current_probe_directory(simulator)
+            discovery["containerLookups"] += 1
+            discovery["lastLookupStatus"] = status
+            if current is not None and current != directory:
+                directory = current
+                discovery["containerChanges"] += 1
+            next_lookup = time.monotonic() + 15
+        discovery["probeDirectoryObserved"] |= directory.is_dir()
+        requested_files.update(path.name for path in directory.glob("*-requested.json"))
         for data, age in pending_probes(directory):
+            candidate_launches.add(data["launchID"])
             # Ignore probes from an already-terminated fixture without consuming
             # the single capture attempt for this test run.
             if app_identity(executable(data["appProcessID"]), simulator):
                 result = capture(data, age, simulator, output)
                 captured = True
                 break
+            discovery["identityRejections"] += 1
         if captured:
             break
         time.sleep(1)
+    if not captured:
+        result["status"] = ("no-startup-probes-observed" if not requested_files else
+                            "no-loading-stall-matched" if not candidate_launches else
+                            "no-live-app-identity-matched")
+    discovery["requestedProbesObserved"] = len(requested_files)
+    discovery["candidateLaunchesObserved"] = len(candidate_launches)
+    result["discovery"] = discovery
     (output / "startup-sample.json").write_text(json.dumps(result, indent=2) + "\n")
     # Keep the owned watcher alive until cleanup joins it, avoiding a stale PID
     # after an early capture. No further process queries or samples occur.

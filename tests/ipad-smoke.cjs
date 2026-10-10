@@ -12,6 +12,26 @@ const root = resolve(__dirname, "..");
 const outdir = mkdtempSync(join(tmpdir(), "nostalgify-ipad-smoke-"));
 const productionDir = join(outdir, "production");
 const artifacts = process.env.IPAD_SMOKE_ARTIFACT_DIR || outdir;
+async function assertPlaylistReadoutBounds(page) {
+  const overflow = await page.locator(".playlist-running-time-display").evaluate(element => {
+    const box = element.getBoundingClientRect(), footer = element.closest(".playlist-bottom").getBoundingClientRect();
+    const within = (inner, outer) => inner.left >= outer.left - 1 && inner.top >= outer.top - 1 && inner.right <= outer.right + 1 && inner.bottom <= outer.bottom + 1;
+    const range = document.createRange(); range.selectNodeContents(element);
+    return {
+      readoutOutsideFooter: !within(box, footer),
+      textOutsideReadout: !within(range.getBoundingClientRect(), box),
+      descendantsOutsideReadout: [...element.querySelectorAll("*")].filter(child => !within(child.getBoundingClientRect(), box)).map(child => child.tagName),
+    };
+  });
+  assert.deepEqual(overflow, { readoutOutsideFooter: false, textOutsideReadout: false, descendantsOutsideReadout: [] }, "duration artwork and text bounds must fit their readout and playlist footer on both axes");
+}
+async function assertClassicWindowNames(page) {
+  assert.equal(await page.getByRole("application", { name: "Classic Winamp player", exact: true }).count(), 1);
+  for (const name of ["Main player window", "Equalizer window", "Playlist window"]) {
+    const compactPlaylist = name === "Playlist window" && await page.locator("#playlist-window-shade").count() === 1;
+    assert.equal(await page.getByRole("group", { name, exact: true }).getAttribute("tabindex"), compactPlaylist ? null : "-1", "named windows retain their original focus behavior; compact playlist has no recovery target");
+  }
+}
 mkdirSync(artifacts, { recursive: true });
 execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--dev", "--outdir", outdir], { cwd: root, stdio: "inherit" });
 execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", productionDir], { cwd: root, stdio: "inherit" });
@@ -45,6 +65,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.getByRole("link", { name: "Nostalgify for iPad player" }).count(), 1);
     assert.equal(await page.getByRole("button", { name: "Save Spotify link" }).textContent(), "Save", "spoken command includes the visible button label");
     assert.equal(await page.locator("#main-window").isVisible(), true);
+    await assertClassicWindowNames(page);
     await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
     assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "bitmap marquee is one complete accessible message, without separate glyphs");
     assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1);
@@ -82,6 +103,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
     await page.keyboard.press("Enter");
     assert.equal(await page.locator("#equalizer-balance").isDisabled(), true, "compact EQ balance must also be honestly unavailable");
+    await assertClassicWindowNames(page);
     await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
     await page.keyboard.press("Space");
     await page.getByRole("img", { name: /^Equalizer artwork:/ }).waitFor();
@@ -200,11 +222,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.locator("#source-label").tap();
     assert.equal(await page.getByRole("img", { name: "Winamp playlist", exact: true }).count(), 1);
     assert.match(await page.locator(".playlist-running-time-display").ariaSnapshot(), /img "Selected and total playlist duration: 0:00\/0:00"/);
-    assert.ok(await page.locator(".playlist-running-time-display").evaluate(element => {
-      const range = document.createRange(); range.selectNodeContents(element);
-      const box = range.getBoundingClientRect(), player = document.querySelector("#playlist-window").getBoundingClientRect();
-      return box.left >= player.left - 1 && box.right <= player.right + 1;
-    }), "bitmap text ranges stay within the playlist instead of producing 17000px accessibility frames");
+    await assertPlaylistReadoutBounds(page);
     await page.locator("#local-library .music-play").focus();
     await page.keyboard.press("Enter");
     await page.waitForFunction(() => window.__ipad.host.getCachedState().provider === "local");
@@ -256,9 +274,18 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "skin reload preserves a single readable message");
     await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
     await page.waitForFunction(() => document.querySelector("#main-window .mini-time")?.getAttribute("aria-hidden") === "true");
+    await assertClassicWindowNames(page);
     assert.equal(await page.locator("#main-window .mini-time").ariaSnapshot(), "", "new compact-mode bitmap readouts must not expose individual characters");
     await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
     await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
+    await page.getByRole("button", { name: "Toggle compact playlist", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#playlist-window-shade").waitFor();
+    await assertClassicWindowNames(page);
+    await page.getByRole("button", { name: "Toggle compact playlist", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#playlist-window").waitFor();
+    await assertClassicWindowNames(page);
     assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1, "shade and skin updates do not duplicate the main title description");
     assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
     assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
@@ -291,6 +318,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
         .filter(element => { const r = element.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth + 1 || r.width < 44 || r.height < 44; })
         .map(element => element.id || element.className));
       assert.deepEqual(clippedControls, [], `all visible controls must fit and retain 44px targets at 200% text/${width}px`);
+      await assertPlaylistReadoutBounds(page);
     }
     await page.screenshot({ path: join(artifacts, "ipad-large-text.png"), fullPage: true });
     assert.equal(await page.locator("#settings-toggle").evaluate(button => getComputedStyle(button).transitionDuration), "0s", "reduced motion disables shell transitions");

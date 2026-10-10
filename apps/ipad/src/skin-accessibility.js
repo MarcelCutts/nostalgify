@@ -52,6 +52,19 @@ export function installSkinAccessibility(root) {
     describeReadout(image, label);
   };
   function update() {
+    root.querySelector('#webamp[role="application"]')?.setAttribute("aria-label", "Classic Winamp player");
+    const windows = [
+      [root.querySelector('#main-window > [tabindex="-1"]'), "Main player window"],
+      [root.querySelector('#equalizer-window > [tabindex="-1"]'), "Equalizer window"],
+      [root.querySelector("#playlist-window")?.parentElement || root.querySelector("#playlist-window-shade"), "Playlist window"],
+    ];
+    for (const [element, label] of windows) {
+      if (!element || (element.getAttribute("tabindex") !== "-1" && element.id !== "playlist-window-shade")) continue;
+      // Webamp programmatically focuses these containers when a sprite is
+      // replaced. Name that focus destination without changing its behavior.
+      element.setAttribute("role", "group");
+      element.setAttribute("aria-label", label);
+    }
     // Avoid exposing individual off-screen glyphs where the shell supplies full
     // current-track/status text and spoken playback time.
     for (const element of root.querySelectorAll(bitmapReadouts)) element.setAttribute("aria-hidden", "true");
