@@ -121,6 +121,14 @@ final class AppUITests: XCTestCase {
 
     private func text(_ label: String) -> XCUIElement { webView.staticTexts[label].firstMatch }
 
+    private func waitForPlaybackAction(_ label: String, _ message: String,
+                                       file: StaticString = #filePath, line: UInt = #line) {
+        // The label changes with native playback state. Query for that state
+        // without resolving a required element before its new label is present.
+        let expected = webView.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
+        XCTAssertTrue(expected.waitForExistence(timeout: 10), message, file: file, line: line)
+    }
+
     private func firstSnapshot(in root: XCUIElementSnapshot,
                                matching predicate: (XCUIElementSnapshot) -> Bool) -> XCUIElementSnapshot? {
         if predicate(root) { return root }
@@ -229,7 +237,7 @@ final class AppUITests: XCTestCase {
     private func playFixture() {
         openFiles()
         tap(button("", "Play UI Test One"))
-        waitUntil("The real AVPlayer must confirm playing") { self.button("play-button", "Pause").label == "Pause" }
+        waitForPlaybackAction("Pause", "The real AVPlayer must confirm playing")
         XCTAssertTrue(text("Now playing: UI Test One").waitForExistence(timeout: 10))
     }
 
@@ -239,7 +247,7 @@ final class AppUITests: XCTestCase {
         reveal(clientID)
         clientID.tap()
         clientID.typeText("invalid")
-        XCTAssertEqual(clientID.value as? String, "invalid", "The keyboard must enter the validation input.")
+        waitUntil("The keyboard must enter the validation input.") { clientID.value as? String == "invalid" }
         tap(button("", "Save connection settings"))
         let error = text("Enter the 32-character client ID from your Spotify developer app.")
         XCTAssertTrue(error.waitForExistence(timeout: 10))
@@ -250,7 +258,7 @@ final class AppUITests: XCTestCase {
         waitUntil("Settings must close") { !clientID.exists }
         playFixture()
         tap(button("play-button", "Pause"))
-        waitUntil("Pause must be confirmed") { self.button("play-button", "Play").label == "Play" }
+        waitForPlaybackAction("Play", "Pause must be confirmed")
     }
 
     func testNativeLocalTransportAndLibraryPersistAcrossColdLaunch() throws {
@@ -258,7 +266,7 @@ final class AppUITests: XCTestCase {
         tap(button("next-button", "Next track"))
         XCTAssertTrue(text("Now playing: UI Test Two").waitForExistence(timeout: 10), "Next must update the selected native track, not merely leave a library row visible.")
         tap(button("play-button", "Pause"))
-        waitUntil("Pause must change the available action") { self.button("play-button", "Play").label == "Play" }
+        waitForPlaybackAction("Play", "Pause must change the available action")
         tap(button("", "Remove UI Test One"))
         waitUntil("Removed audio must leave the library") { !self.button("", "Play UI Test One").exists }
         app.terminate()
@@ -267,7 +275,7 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(button("", "Play UI Test Two").waitForExistence(timeout: 10))
         XCTAssertFalse(button("", "Play UI Test One").exists, "Relaunch must read persisted deletion, not reseed fixtures.")
         tap(button("", "Play UI Test Two"))
-        waitUntil("Persisted audio must still play through AVPlayer") { self.button("play-button", "Pause").label == "Pause" }
+        waitForPlaybackAction("Pause", "Persisted audio must still play through AVPlayer")
     }
 
     func testFailedSpotifyHandoffCanRecoverToLocalPlayback() throws {
@@ -276,9 +284,13 @@ final class AppUITests: XCTestCase {
         let link = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
         reveal(link)
         link.tap()
-        link.typeText("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC")
-        XCTAssertEqual(link.value as? String, "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
-                       "The keyboard must enter the complete Spotify link before saving.")
+        let spotifyURL = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+        link.typeText(spotifyURL)
+        // WebKit's accessibility value can trail synthesized keyboard input.
+        // Wait for the exact value before saving; never retype or submit a prefix.
+        waitUntil("The keyboard must enter the complete Spotify link before saving.") {
+            link.value as? String == spotifyURL
+        }
         tap(button("", "Save Spotify link"))
         let saved = webView.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Play Spotify track")).firstMatch
         tap(saved)
@@ -345,7 +357,7 @@ final class AppUITests: XCTestCase {
             XCTAssertTrue(bounds.intersects(pauseFrame))
         }
         tap(button("play-button", "Pause"))
-        waitUntil("Pause must be confirmed after both rotations") { self.button("play-button", "Play").label == "Play" }
+        waitForPlaybackAction("Play", "Pause must be confirmed after both rotations")
     }
 
     func testVoiceOverCanDiscoverAndLeaveSettingsOnCurrentPlatform() throws {
