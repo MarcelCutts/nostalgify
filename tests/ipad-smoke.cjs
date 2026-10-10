@@ -47,6 +47,26 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     page = await context.newPage();
     page.on("pageerror", error => errors.push(error.message));
     page.on("dialog", dialog => dialog.dismiss());
+    await page.addInitScript(() => {
+      if (location.hostname !== "nostalgify.test" || sessionStorage.getItem("startup-storage-probed")) return;
+      // Hold real asynchronous skin storage initialization, without a timed sleep.
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      window.__releaseStartupStorage = () => { sessionStorage.setItem("startup-storage-probed", "true"); release(); };
+      const open = indexedDB.open.bind(indexedDB);
+      indexedDB.open = (...args) => {
+        const request = open(...args);
+        if (args[0] !== "nostalgify-ipad-skins") return request;
+        indexedDB.open = open;
+        Object.defineProperty(request, "onsuccess", { set(handler) {
+          request.addEventListener("success", event => {
+            window.__startupStoragePending = true;
+            void gate.then(() => handler.call(request, event));
+          }, { once: true });
+        } });
+        return request;
+      };
+    });
     // Fulfil requests from the build directory: no server or external traffic.
     await page.route("**/*", async route => {
       const url = new URL(route.request().url());
@@ -60,9 +80,31 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
       return route.fulfill({ contentType, body: readFileSync(file) });
     });
     await page.goto("https://nostalgify.test/?mock=1");
+    await page.waitForFunction(() => window.__startupStoragePending === true);
+    assert.equal(await page.locator("#settings-toggle").isEnabled(), true, "settings remain available while the player initializes");
+    assert.equal(await page.locator("#spotify-source").isDisabled(), true);
+    assert.equal(await page.locator("#local-source").isDisabled(), true, "Files cannot expose library rows that startup will still replace");
+    await page.locator("#local-source").evaluate(button => button.click());
+    assert.equal(await page.locator("#local-panel").isVisible(), false);
+    await page.evaluate(() => window.__releaseStartupStorage());
     await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    assert.equal(await page.locator("#spotify-source").isEnabled(), true);
+    assert.equal(await page.locator("#local-source").isEnabled(), true);
+    const stableText = await page.evaluate(async () => {
+      const ids = ["source-label", "elapsed", "duration", "volume-note", "play-button", "connect-button", "track-title", "track-artist", "player-status"];
+      const original = ids.map(id => document.getElementById(id).firstChild);
+      const changes = [];
+      const observer = new MutationObserver(records => changes.push(...records.filter(record => ids.includes(record.target.id)).map(record => record.target.id)));
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      for (let index = 0; index < 3; index++) await window.__ipad.host.getState();
+      await new Promise(requestAnimationFrame);
+      observer.disconnect();
+      return { changes, replaced: ids.filter((id, index) => original[index] !== document.getElementById(id).firstChild) };
+    });
+    assert.deepEqual(stableText, { changes: [], replaced: [] }, "unchanged native snapshots preserve the text nodes accessibility is reading");
     assert.equal(await page.locator("#demo-banner").isVisible(), true);
     assert.equal(await page.getByRole("link", { name: "Nostalgify for iPad player" }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "Ready when you are. No track selected", exact: true }).textContent(), "Ready when you are.", "the empty now-playing heading's accessible name includes its visible text");
     assert.equal(await page.getByRole("button", { name: "Save Spotify link" }).textContent(), "Save", "spoken command includes the visible button label");
     assert.equal(await page.locator("#main-window").isVisible(), true);
     await assertClassicWindowNames(page);

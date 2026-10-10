@@ -21,7 +21,7 @@
         <section id="player-area" class="player-area" aria-label="Music player" tabindex="-1">
           <div class="section-heading"><span class="eyebrow">YOUR MUSIC, A FAMILIAR FACE</span><span id="source-label" class="source-label" role="status" aria-live="off" aria-label="Playback source: Spotify">Spotify</span></div>
           <div id="player-viewport" class="player-viewport" role="group" aria-label="Classic skin controls"><div id="player-size"><div id="app"></div></div></div>
-          <div class="now-playing" aria-live="polite" aria-atomic="true"><p id="track-title" role="heading" aria-level="2" aria-label="No track selected">Ready when you are.</p><p id="track-artist">Connect Spotify or bring your own music.</p></div>
+          <div class="now-playing" aria-live="polite" aria-atomic="true"><p id="track-title" role="heading" aria-level="2" aria-label="Ready when you are. No track selected">Ready when you are.</p><p id="track-artist">Connect Spotify or bring your own music.</p></div>
           <div class="seek-row"><span id="elapsed" aria-hidden="true">0:00</span><input id="seek" type="range" min="0" max="100" value="0" step="1" aria-label="Playback position" aria-valuetext="0 seconds of 0 seconds" disabled /><span id="duration" aria-hidden="true">0:00</span></div>
           <div class="transport" role="group" aria-label="Playback controls">
             <button id="previous-button" class="transport-side" aria-label="Previous track" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h3v14H4zM20 5 9 12l11 7z" /></svg></button>
@@ -35,7 +35,7 @@
         </section>
         <aside class="collection" aria-label="Music collection">
           <div class="section-heading"><h1>Your collection</h1><span class="collection-count" id="collection-count">0 items</span></div>
-          <div class="source-tabs" role="group" aria-label="Browse music source"><button id="spotify-source" class="source-tab active" aria-controls="spotify-panel" aria-pressed="true">Spotify</button><button id="local-source" class="source-tab" aria-controls="local-panel" aria-pressed="false">Files</button></div>
+          <div class="source-tabs" role="group" aria-label="Browse music source"><button id="spotify-source" class="source-tab active" aria-controls="spotify-panel" aria-pressed="true" disabled>Spotify</button><button id="local-source" class="source-tab" aria-controls="local-panel" aria-pressed="false" disabled>Files</button></div>
           <section id="spotify-panel" aria-label="Spotify collection">
             <p class="panel-intro">Spotify plays the music. Nostalgify gives it a familiar home.</p>
             <button id="connect-button" class="primary-button full-width">Connect Spotify</button>

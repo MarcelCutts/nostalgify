@@ -50,6 +50,11 @@ async function action(callback, button) {
   }
 }
 const clock = seconds => `${Math.floor(Math.max(0, seconds) / 60)}:${String(Math.floor(Math.max(0, seconds) % 60)).padStart(2, "0")}`;
+const setText = (id, value) => {
+  const element = $(id);
+  // Polling unchanged state must not replace the text nodes VoiceOver is reading.
+  if (element.textContent !== value) element.textContent = value;
+};
 const spokenTime = seconds => {
   const value = Math.floor(Math.max(0, Number(seconds) || 0));
   const minutes = Math.floor(value / 60);
@@ -61,39 +66,38 @@ function updateSliderDescriptions() {
 }
 function renderState(state) {
   const caps = state.capabilities;
-  $("source-label").textContent = state.provider === "local" ? "LOCAL FILES" : "SPOTIFY";
+  setText("source-label", state.provider === "local" ? "LOCAL FILES" : "SPOTIFY");
   $("source-label").setAttribute("aria-label", `Playback source: ${state.provider === "local" ? "Local files" : "Spotify"}`);
   const title = state.track?.name || "Ready when you are.";
   const artist = state.track?.artist || (state.provider === "local" ? "Your imported music, on this iPad." : "Connect Spotify or bring your own music.");
-  if ($("track-title").textContent !== title) {
-    $("track-title").textContent = title;
-    $("track-title").setAttribute("aria-label", state.track ? `Now playing: ${title}` : "No track selected");
-  }
-  if ($("track-artist").textContent !== artist) $("track-artist").textContent = artist;
-  $("elapsed").textContent = clock(state.position);
-  $("duration").textContent = clock(state.track?.duration || 0);
+  setText("track-title", title);
+  const titleLabel = state.track ? `Now playing: ${title}` : `${title} No track selected`;
+  if ($("track-title").getAttribute("aria-label") !== titleLabel) $("track-title").setAttribute("aria-label", titleLabel);
+  setText("track-artist", artist);
+  setText("elapsed", clock(state.position));
+  setText("duration", clock(state.track?.duration || 0));
   $("seek").max = String(state.track?.duration || 0);
   if (document.activeElement !== $("seek")) $("seek").value = String(state.position);
   $("seek").disabled = !caps.canSeek || !state.track;
   $("native-volume").disabled = !caps.canSetVolume;
   if (document.activeElement !== $("native-volume")) $("native-volume").value = String(state.volume);
   updateSliderDescriptions();
-  $("volume-note").textContent = caps.canSetVolume ? "Volume applies to imported audio." : "Use the iPad volume buttons for Spotify.";
+  setText("volume-note", caps.canSetVolume ? "Volume applies to imported audio." : "Use the iPad volume buttons for Spotify.");
   $("previous-button").disabled = !caps.canSkipPrevious;
   $("next-button").disabled = !caps.canSkipNext;
   $("play-button").disabled = !state.running || (!state.track && state.provider === "local");
   const playing = ["playing", "buffering"].includes(state.state);
-  $("play-button").textContent = playing ? "Ⅱ" : "▶︎";
+  setText("play-button", playing ? "Ⅱ" : "▶︎");
   $("play-button").setAttribute("aria-label", playing ? "Pause" : "Play");
   for (const key of ["shuffle", "repeat"]) {
     $(`${key}-button`).disabled = !caps[key === "shuffle" ? "canShuffle" : "canRepeat"];
     $(`${key}-button`).setAttribute("aria-pressed", String(state[key]));
   }
-  $("connect-button").textContent = state.provider === "spotify" && state.running ? "Reconnect Spotify" : "Connect Spotify";
+  setText("connect-button", state.provider === "spotify" && state.running ? "Reconnect Spotify" : "Connect Spotify");
   const playbackStatus = ({ playing: "Playing", buffering: "Buffering", paused: "Paused" })[state.state] || (state.running ? "Ready to play" : "Connect Spotify or import music from Files");
   const status = demo ? `Development demo · ${playbackStatus.toLowerCase()}; no audio plays.` : state.message || playbackStatus;
   // Native progress events arrive frequently; unchanged live-region writes can interrupt VoiceOver.
-  if ($("player-status").textContent !== status) $("player-status").textContent = status;
+  setText("player-status", status);
   // The authentic controls use the same capability gates as the accessible controls.
   for (const [selector, enabled] of [["#volume", caps.canSetVolume], ["#position", caps.canSeek], ["#next", caps.canSkipNext], ["#previous", caps.canSkipPrevious], ["#shuffle", caps.canShuffle], ["#repeat", caps.canRepeat]]) {
     const element = document.querySelector(`#webamp ${selector}`);
@@ -323,6 +327,10 @@ async function start() {
   await renderSkins();
   renderLists(); renderState(host.getCachedState()); resizePlayer();
   document.documentElement.dataset.playerReady = "true";
+  // Initial library rows are rebuilt after the player and saved skin load.
+  // Let users browse only once those controls have their final initial identity.
+  $("spotify-source").disabled = false;
+  $("local-source").disabled = false;
   if (demo) window.__ipad = { host, mounted, plugin };
 }
 void start().catch(error => { host.recordError("startup_failed"); showError(error); $("player-status").textContent = "The player could not start. Export diagnostics from Settings."; });

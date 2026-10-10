@@ -52,7 +52,15 @@ final class AppUITests: XCTestCase {
         // GPU helpers before the page could load. This is a bounded readiness
         // allowance after app.launch(), within the unchanged 180-second case.
         let readinessWaitLimit: TimeInterval = 60
-        let ready = button("settings-toggle", "Settings").waitForExistence(timeout: readinessWaitLimit)
+        let settings = button("settings-toggle", "Settings")
+        let files = webView.switches["Files"].firstMatch
+        // Source browsing becomes enabled after startup's final library render.
+        // A visible header alone can precede that render and expose stale rows.
+        // Both conditions use one predicate and readiness deadline.
+        let readiness = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            settings.exists && files.exists && files.isEnabled
+        }, object: nil)
+        let ready = XCTWaiter.wait(for: [readiness], timeout: readinessWaitLimit) == .completed
         let checkedUptime = ProcessInfo.processInfo.systemUptime
         let timing = LaunchTiming(fixtureID: fixtureID, launchOrdinal: launchOrdinal,
             startedAtUTC: ISO8601DateFormatter().string(from: started),
@@ -79,7 +87,7 @@ final class AppUITests: XCTestCase {
             Window count: \(app.windows.count)
             WKWebView count: \(app.webViews.count)
             Orientation: \(XCUIDevice.shared.orientation.rawValue)
-            Settings absent after the 60-second readiness wait. See the failure screenshot/hierarchy and simulator startup log.
+            The interface did not finish initializing: Settings and enabled Files browsing were not ready within the single 60-second wait. See the failure screenshot/hierarchy and simulator startup log.
             """
             let attachment = XCTAttachment(string: details)
             attachment.name = "Launch readiness failure"
@@ -237,6 +245,19 @@ final class AppUITests: XCTestCase {
 
     func testFilesLibraryAccessibilityAudit() throws {
         openFiles()
+        waitUntil("The Files audit must inspect the selected source and its imported library") {
+            self.webView.switches["Files"].firstMatch.value as? String == "1" &&
+                self.button("import-button", "Import from Files").exists &&
+                self.button("", "Play UI Test One").exists &&
+                self.button("", "Play UI Test Two").exists
+        }
+        // Retain the actual pre-audit screen, including passing runs. When an
+        // audit cannot resolve its issue element, this still preserves the
+        // contemporaneous semantic names, roles and bounds for comparison.
+        let hierarchy = XCTAttachment(string: app.debugDescription)
+        hierarchy.name = "Files library before accessibility audit"
+        hierarchy.lifetime = .keepAlways
+        add(hierarchy)
         // iPadOS 17+ audit APIs: detect unlabeled/non-discoverable elements.
         // The issue handler preserves findings. This is a baseline audit, not a
         // claim of a complete VoiceOver, contrast or Dynamic Type assessment.
