@@ -5,6 +5,19 @@ import XCTest
 
 final class AudioRecoveryTests: XCTestCase {
     @MainActor
+    func testRestoredLibraryCanPlayWithoutSelectingARowOrPromptingForImport() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        XCTAssertNil(trackID(service), "Restoring files need not load an audio item before Play.")
+        XCTAssertEqual(service.snapshot()["message"] as? String, "")
+        try await service.command("playpause", arg: nil)
+        XCTAssertEqual(trackID(service), fixture.records.first?.id)
+        XCTAssertEqual(fixture.players[0].playCalls, 1)
+    }
+
+    @MainActor
     func testBackgroundPostedResetIsHandledOnMainActorBeforePostingCompletes() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }
@@ -151,6 +164,44 @@ final class AudioRecoveryTests: XCTestCase {
     }
 
     @MainActor
+    func testFirstToggleDuringInterruptionPlaysWithoutWaitingForEndedNotification() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        try await fixture.postInterruption(.began)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().pauseCommand.isEnabled)
+        try await service.command("playpause", arg: nil)
+        XCTAssertEqual(fixture.players[0].playCalls, 2, "The first toggle after the observed pause must play.")
+        try await fixture.postInterruption(.ended, shouldResume: false)
+        XCTAssertTrue(MPRemoteCommandCenter.shared().pauseCommand.isEnabled,
+                      "An old ended notification must not undo explicit Play.")
+        try await service.command("playpause", arg: nil)
+        XCTAssertEqual(fixture.players[0].playCalls, 2, "A second toggle is an explicit pause.")
+    }
+
+    @MainActor
+    func testDuplicateInterruptionBeganPreservesResumeButExplicitPauseCancelsIt() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        try await fixture.postInterruption(.began)
+        try await fixture.postInterruption(.began)
+        try await fixture.postInterruption(.ended, shouldResume: true)
+        XCTAssertEqual(fixture.players[0].playCalls, 2)
+        try await fixture.postInterruption(.began)
+        try await service.command("pause", arg: nil)
+        try await fixture.postInterruption(.began)
+        try await fixture.postInterruption(.ended, shouldResume: true)
+        XCTAssertEqual(fixture.players[0].playCalls, 2)
+        try await service.command("play", arg: nil)
+        XCTAssertEqual(fixture.players[0].playCalls, 3)
+    }
+
+    @MainActor
     func testResetDuringInterruptionCancelsPendingAutomaticResume() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }
@@ -243,10 +294,222 @@ final class AudioRecoveryTests: XCTestCase {
         try await eventually { original.pendingSeek != nil }
         fixture.postReset()
         try await eventually { fixture.players.count == 2 }
-        original.completeSeek()
         try await seek.value
+        XCTAssertGreaterThan(fixture.items[0].cancelSeekCalls, 0)
+        original.completeSeek()
+        await settleNotifications()
         XCTAssertEqual(service.snapshot()["state"] as? String, "stopped")
         XCTAssertEqual(fixture.players[1].playCalls, 0)
+    }
+
+    @MainActor
+    func testSeekWaitsForItemReadinessBeforeStarting() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let player = fixture.players[0]
+        let item = try XCTUnwrap(fixture.items.first)
+        item.setStatus(.unknown)
+        player.holdSeeks = true
+        let seek = Task { @MainActor in try await service.command("seek", arg: 4) }
+        defer { seek.cancel() }
+        await settleNotifications()
+        XCTAssertNil(player.pendingSeek, "Do not send seeks to an item that is still loading.")
+        item.setStatus(.readyToPlay)
+        try await eventually { player.pendingSeek != nil }
+        player.completeSeek()
+        try await seek.value
+        XCTAssertEqual(service.snapshot()["position"] as? Double, 4)
+    }
+
+    @MainActor
+    func testFailedItemSeekFailsPromptlyAndFollowingPlayReloadsIt() async throws {
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        fixture.items[0].setStatus(.failed)
+        await settleNotifications()
+        XCTAssertTrue(fixture.players[0].currentItem === fixture.items[0], "Keep the failed item selected until the command explicitly reloads it.")
+        XCTAssertEqual(fixture.players[0].currentItem?.status, .failed)
+        do {
+            try await service.command("seek", arg: 4)
+            XCTFail("A failed item cannot seek.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "local_seek_failed") }
+        XCTAssertNil(fixture.players[0].pendingSeek)
+        XCTAssertEqual(fixture.items.count, 1, "Seeking a selected failed item must not silently reload it.")
+        try await service.command("play", arg: nil)
+        XCTAssertEqual(fixture.items.count, 2)
+        XCTAssertTrue(fixture.players[0].currentItem === fixture.items.last)
+        XCTAssertEqual(fixture.players[0].currentItem?.status, .readyToPlay)
+        XCTAssertEqual(fixture.players[0].playCalls, 2)
+    }
+
+    @MainActor
+    func testUnreadyItemTimesOutWithoutIssuingSeekAndLaterPlayWorks() async throws {
+        let fixture = try AudioRecoveryFixture(seekTimeout: .milliseconds(50))
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        fixture.items[0].setStatus(.unknown)
+        do {
+            try await service.command("seek", arg: 4)
+            XCTFail("An item that never becomes ready must time out.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "local_seek_timeout") }
+        XCTAssertNil(fixture.players[0].pendingSeek)
+        XCTAssertEqual(fixture.items[0].cancelSeekCalls, 1)
+        fixture.items[0].setStatus(.readyToPlay)
+        try await service.command("play", arg: nil)
+        XCTAssertEqual(fixture.players[0].playCalls, 2)
+    }
+
+    @MainActor
+    func testSeekTimeoutReleasesFollowingCommandsAndIgnoresLateCompletion() async throws {
+        try await checkSeekRecovery(cancelTask: false)
+    }
+
+    @MainActor
+    func testSeekTaskCancellationReleasesFollowingCommandsAndIgnoresLateCompletion() async throws {
+        try await checkSeekRecovery(cancelTask: true)
+    }
+
+    @MainActor
+    private func checkSeekRecovery(cancelTask: Bool) async throws {
+        let fixture = try AudioRecoveryFixture(seekTimeout: cancelTask ? .seconds(5) : .milliseconds(80))
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        try await service.command("stop", arg: nil)
+        let player = fixture.players[0]
+        player.holdSeeks = true
+        let seek = Task { @MainActor in try await service.command("seek", arg: 4) }
+        defer { seek.cancel() }
+        try await eventually { player.pendingSeek != nil }
+        var followingCommandsFinished = false
+        // Model the coordinator's serialized dependency: these commands cannot
+        // execute until the native seek actually settles, irrespective of JS.
+        let following = Task { @MainActor in
+            _ = try? await seek.value
+            try await service.command("volume", arg: 27)
+            try await service.command("play", arg: nil)
+            try await service.command("pause", arg: nil)
+            followingCommandsFinished = true
+        }
+        defer { following.cancel() }
+        if cancelTask { seek.cancel() }
+        try await eventually { followingCommandsFinished }
+        try await following.value
+        do {
+            try await seek.value
+            XCTFail("The held seek must fail or be cancelled.")
+        } catch is CancellationError {
+            XCTAssertTrue(cancelTask)
+        } catch let failure as NativeFailure {
+            XCTAssertFalse(cancelTask)
+            XCTAssertEqual(failure.code, "local_seek_timeout")
+        }
+        XCTAssertEqual(fixture.items[0].cancelSeekCalls, 1)
+        XCTAssertEqual(player.playCalls, 2)
+        XCTAssertEqual(player.volume, 0.27, accuracy: 0.001)
+        // The probe deliberately retains the old callback after cancellation.
+        // A replaced/late completion must not resume twice or resurrect intent.
+        player.completeSeek()
+        await settleNotifications()
+        XCTAssertEqual(player.playCalls, 2)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().pauseCommand.isEnabled)
+        try service.setActive(false)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().playCommand.isEnabled)
+    }
+
+    @MainActor
+    func testUnsuccessfulSeekCompletionDoesNotPreventNextCommand() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let player = fixture.players[0]
+        player.holdSeeks = true
+        let seek = Task { @MainActor in try await service.command("seek", arg: 4) }
+        defer { seek.cancel() }
+        try await eventually { player.pendingSeek != nil }
+        player.completeSeek(success: false)
+        do {
+            try await seek.value
+            XCTFail("An unsuccessful seek must report failure.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "local_seek_failed") }
+        try await service.command("pause", arg: nil)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().pauseCommand.isEnabled)
+    }
+
+    @MainActor
+    func testImportStorageFailureKeepsEarlierFilesAndPlaybackFailure() async throws {
+        var writes = 0
+        var storage = LocalAudioStorageActions.live
+        storage.write = { data, destination in
+            writes += 1
+            if writes == 2 { throw CocoaError(.fileWriteOutOfSpace) }
+            try data.write(to: destination, options: .atomic)
+        }
+        let fixture = try AudioRecoveryFixture(storage: storage)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        fixture.postReset()
+        let previousMessage = service.snapshot()["message"] as? String
+        let sources = fixture.records.prefix(2).map { fixture.directory.appendingPathComponent($0.filename) }
+        do {
+            _ = try await service.importFiles(sources)
+            XCTFail("A library write failure must preserve its storage error.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "library_write_failed") }
+        XCTAssertEqual(writes, 2)
+        XCTAssertEqual(service.library.count, fixture.records.count + 1)
+        let persisted = try JSONDecoder().decode([LocalAudioRecord].self, from: Data(contentsOf: fixture.directory.appendingPathComponent("library.json")))
+        XCTAssertEqual(persisted, service.library)
+        XCTAssertEqual(service.snapshot()["error"] as? String, "audio_services_reset")
+        XCTAssertEqual(service.snapshot()["message"] as? String, previousMessage)
+        let audioFiles = try FileManager.default.contentsOfDirectory(atPath: fixture.directory.path).filter { $0.hasSuffix(".wav") }
+        XCTAssertEqual(audioFiles.count, service.library.count, "The failed new copy must be removed; committed files must remain.")
+    }
+
+    @MainActor
+    func testImportCopyStorageFailureIsNotReportedAsUnsupportedAudio() async throws {
+        var storage = LocalAudioStorageActions.live
+        storage.copy = { _, _ in throw CocoaError(.fileWriteOutOfSpace) }
+        let fixture = try AudioRecoveryFixture(storage: storage)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        do {
+            _ = try await service.importFiles([fixture.directory.appendingPathComponent(fixture.records[0].filename)])
+            XCTFail("An out-of-space copy must preserve its storage error.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "library_write_failed") }
+        XCTAssertEqual(service.library, fixture.records)
+    }
+
+    @MainActor
+    func testPartialImportNoticeDoesNotReplacePlaybackMessage() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let source = fixture.directory.appendingPathComponent(fixture.records[0].filename)
+        let unavailable = fixture.directory.appendingPathComponent("not-downloaded.wav")
+        let result = try await service.importFiles([source, unavailable])
+        XCTAssertEqual(result.items.count, 1)
+        XCTAssertEqual(result.skipped, 1)
+        XCTAssertTrue(service.snapshot()["error"] is NSNull)
+        XCTAssertEqual(service.snapshot()["message"] as? String, "")
+        fixture.postReset()
+        let previousMessage = service.snapshot()["message"] as? String
+        _ = try await service.importFiles([source, unavailable])
+        XCTAssertEqual(service.snapshot()["error"] as? String, "audio_services_reset")
+        XCTAssertEqual(service.snapshot()["message"] as? String, previousMessage)
     }
 
     @MainActor
@@ -279,10 +542,11 @@ private final class AudioRecoveryFixture {
     let records: [LocalAudioRecord]
     var service: LocalAudioService?
     var players: [RecoveryProbePlayer] = []
+    var items: [RecoveryProbeItem] = []
     var configurations = 0
     var activations: [Bool] = []
 
-    init() throws {
+    init(storage: LocalAudioStorageActions = .live, seekTimeout: Duration = .seconds(5), ownsPlayerItems: Bool = false) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var generated: [LocalAudioRecord] = []
@@ -297,8 +561,13 @@ private final class AudioRecoveryFixture {
         let session = LocalAudioSessionActions(configure: { [weak self] in self?.configurations += 1 },
             setActive: { [weak self] in self?.activations.append($0) })
         service = LocalAudioService(diagnostics: diagnostics, directory: directory,
-                                    notificationCenter: center, session: session, makePlayer: { [weak self] in
-            let player = RecoveryProbePlayer()
+                                    notificationCenter: center, session: session, storage: storage,
+                                    seekTimeout: seekTimeout, makeItem: { [weak self] url in
+            let item = RecoveryProbeItem(url: url)
+            self?.items.append(item)
+            return item
+        }, makePlayer: { [weak self] in
+            let player = RecoveryProbePlayer(ownsItems: ownsPlayerItems)
             self?.players.append(player)
             return player
         })
@@ -343,9 +612,24 @@ private final class AudioRecoveryFixture {
     }
 }
 
+private final class RecoveryProbeItem: AVPlayerItem, @unchecked Sendable {
+    private var simulatedStatus: AVPlayerItem.Status = .readyToPlay
+    var cancelSeekCalls = 0
+    override var status: AVPlayerItem.Status { simulatedStatus }
+    override func cancelPendingSeeks() { cancelSeekCalls += 1 }
+
+    func setStatus(_ value: AVPlayerItem.Status) {
+        willChangeValue(forKey: "status")
+        simulatedStatus = value
+        didChangeValue(forKey: "status")
+    }
+}
+
 /// Real AVPlayer item/KVO lifecycle with deterministic transport and periodic
 /// callbacks. It never emits audio or depends on simulator route availability.
 private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
+    private let ownsItems: Bool
+    private var ownedItem: AVPlayerItem?
     var playCalls = 0
     var periodicAdditions = 0
     var periodicRemovals = 0
@@ -355,6 +639,20 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     private var pendingPosition: CMTime = .zero
     var pendingSeek: (@Sendable (Bool) -> Void)?
     private let periodicID = NSObject()
+
+    init(ownsItems: Bool = false) {
+        self.ownsItems = ownsItems
+        super.init()
+    }
+
+    // Real AVPlayer may drop an item when the probe changes its status to
+    // failed. Opt into stable ownership when testing a still-selected failure;
+    // other recovery tests continue using AVPlayer's real item lifecycle.
+    override var currentItem: AVPlayerItem? { ownsItems ? ownedItem : super.currentItem }
+    override func replaceCurrentItem(with item: AVPlayerItem?) {
+        if ownsItems { ownedItem = item }
+        else { super.replaceCurrentItem(with: item) }
+    }
 
     override func play() { playCalls += 1 }
     override func currentTime() -> CMTime { position }
@@ -377,10 +675,10 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
         else { position = time; completionHandler(true) }
     }
 
-    func completeSeek() {
+    func completeSeek(success: Bool = true) {
         let completion = pendingSeek
         pendingSeek = nil
-        position = pendingPosition
-        completion?(true)
+        if success { position = pendingPosition }
+        completion?(success)
     }
 }
