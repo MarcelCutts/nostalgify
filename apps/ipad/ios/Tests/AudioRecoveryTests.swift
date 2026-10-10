@@ -541,20 +541,25 @@ final class AudioRecoveryTests: XCTestCase {
 
     @MainActor
     func testFailedItemSeekFailsPromptlyAndFollowingPlayReloadsIt() async throws {
-        let fixture = try AudioRecoveryFixture()
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
         defer { fixture.cleanup() }
         let service = fixture.service!
         try service.setActive(true)
         try await service.command("play", arg: nil)
         fixture.items[0].setStatus(.failed)
         await settleNotifications()
+        XCTAssertTrue(fixture.players[0].currentItem === fixture.items[0], "Keep the failed item selected until the command explicitly reloads it.")
+        XCTAssertEqual(fixture.players[0].currentItem?.status, .failed)
         do {
             try await service.command("seek", arg: 4)
             XCTFail("A failed item cannot seek.")
         } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "local_seek_failed") }
         XCTAssertNil(fixture.players[0].pendingSeek)
+        XCTAssertEqual(fixture.items.count, 1, "Seeking a selected failed item must not silently reload it.")
         try await service.command("play", arg: nil)
         XCTAssertEqual(fixture.items.count, 2)
+        XCTAssertTrue(fixture.players[0].currentItem === fixture.items.last)
+        XCTAssertEqual(fixture.players[0].currentItem?.status, .readyToPlay)
         XCTAssertEqual(fixture.players[0].playCalls, 2)
     }
 
@@ -757,7 +762,7 @@ private final class AudioRecoveryFixture {
     var activations: [Bool] = []
     var holdSimpleSeeksOnNewPlayers = false
 
-    init(storage: LocalAudioStorageActions = .live, seekTimeout: Duration = .seconds(5)) throws {
+    init(storage: LocalAudioStorageActions = .live, seekTimeout: Duration = .seconds(5), ownsPlayerItems: Bool = false) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         var generated: [LocalAudioRecord] = []
@@ -778,7 +783,7 @@ private final class AudioRecoveryFixture {
             self?.items.append(item)
             return item
         }, makePlayer: { [weak self] in
-            let player = RecoveryProbePlayer()
+            let player = RecoveryProbePlayer(ownsItems: ownsPlayerItems)
             player.holdSimpleSeeks = self?.holdSimpleSeeksOnNewPlayers ?? false
             self?.players.append(player)
             return player
@@ -840,6 +845,8 @@ private final class RecoveryProbeItem: AVPlayerItem, @unchecked Sendable {
 /// Real AVPlayer item/KVO lifecycle with deterministic transport and periodic
 /// callbacks. It never emits audio or depends on simulator route availability.
 private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
+    private let ownsItems: Bool
+    private var ownedItem: AVPlayerItem?
     var playCalls = 0
     var periodicAdditions = 0
     var periodicRemovals = 0
@@ -853,6 +860,20 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     private let periodicID = NSObject()
     private var simulatedRate: Float?
     private var simulatedTimeControlStatus: AVPlayer.TimeControlStatus?
+
+    init(ownsItems: Bool = false) {
+        self.ownsItems = ownsItems
+        super.init()
+    }
+
+    // Real AVPlayer may drop an item when the probe changes its status to
+    // failed. Opt into stable ownership when testing a still-selected failure;
+    // other recovery tests continue using AVPlayer's real item lifecycle.
+    override var currentItem: AVPlayerItem? { ownsItems ? ownedItem : super.currentItem }
+    override func replaceCurrentItem(with item: AVPlayerItem?) {
+        if ownsItems { ownedItem = item }
+        else { super.replaceCurrentItem(with: item) }
+    }
 
     override var rate: Float {
         get { simulatedRate ?? super.rate }
