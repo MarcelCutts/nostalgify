@@ -4,22 +4,27 @@
 // Production shell with a disposable native bridge fixture. This verifies the
 // accessible control at cold launch; native audio behavior lives in XCTest.
 const assert = require('node:assert/strict');
-const { readFileSync, existsSync } = require('node:fs');
+const { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } = require('node:fs');
+const { tmpdir } = require('node:os');
 const { resolve } = require('node:path');
 const { chromium, webkit, devices } = require('playwright');
 
 const root = resolve(__dirname, '..');
 const directory = resolve(root, 'apps/ipad/dist');
-const engine = process.env.BROWSER || 'chromium';
-assert.ok(['chromium', 'webkit'].includes(engine), 'BROWSER must be chromium or webkit');
+const engine = process.env.IPAD_SMOKE_BROWSER || process.env.BROWSER || 'chromium';
+assert.ok(['chromium', 'webkit'].includes(engine), 'IPAD_SMOKE_BROWSER must be chromium or webkit');
 assert.ok(existsSync(resolve(directory, 'index.html')), 'Run npm run build:ipad first');
+const artifacts = resolve(process.env.IPAD_SMOKE_ARTIFACT_DIR || mkdtempSync(resolve(tmpdir(), 'nostalgify-local-recovery-')), `local-recovery-${engine}`);
+mkdirSync(artifacts, { recursive: true });
 
 (async () => {
   const browser = await ({ chromium, webkit })[engine].launch({ headless: true });
+  let context, page;
+  const errors = [];
   try {
-    const context = await browser.newContext({ ...devices['iPad Pro 11'] });
-    const errors = [];
-    const page = await context.newPage();
+    context = await browser.newContext({ ...devices['iPad Pro 11'] });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    page = await context.newPage();
     page.on('pageerror', error => errors.push(error.message));
     await page.addInitScript(() => {
       const key = 'local-recovery-fixture';
@@ -120,9 +125,17 @@ assert.ok(existsSync(resolve(directory, 'index.html')), 'Run npm run build:ipad 
     const failures = await page.evaluate(async () => (await window.nostalgify.getDiagnostics()).web.filter(event => event.event === 'failure').map(event => event.code));
     assert.deepEqual(failures.slice(-2), ['library_write_failed', 'native_error'], 'Both the import and refresh failures remain in diagnostics');
     assert.deepEqual(errors, [], 'No browser exceptions');
-    console.log(JSON.stringify({ pass: true, engine, tests: ['empty library eligibility', 'eligibility after import', 'restored library accessible Play without a row tap', 'partial storage failure refresh and actionable operation warning', 'refresh failure preserves original warning and both diagnostics'], actualAudio: false }));
-    await context.close();
+    const report = { pass: true, engine, artifacts, tests: ['empty library eligibility', 'eligibility after import', 'restored library accessible Play without a row tap', 'partial storage failure refresh and actionable operation warning', 'refresh failure preserves original warning and both diagnostics'], actualAudio: false };
+    writeFileSync(resolve(artifacts, 'report.json'), JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(report));
+    await context.tracing.stop();
+  } catch (error) {
+    await page?.screenshot({ path: resolve(artifacts, 'failure.png'), fullPage: true, timeout: 5000 }).catch(() => {});
+    await context?.tracing.stop({ path: resolve(artifacts, 'trace.zip') }).catch(() => {});
+    writeFileSync(resolve(artifacts, 'failure.log'), `${error.stack}\n${errors.join('\n')}`);
+    throw error;
   } finally {
+    await context?.close();
     await browser.close();
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });
