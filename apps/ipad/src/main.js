@@ -67,6 +67,9 @@ function updateSliderDescriptions() {
   $("seek").setAttribute("aria-valuetext", `${spokenTime($("seek").value)} of ${spokenTime($("seek").max)}`);
   $("native-volume").setAttribute("aria-valuetext", `${Math.round(Number($("native-volume").value))} percent`);
 }
+function updatePlayAvailability(state) {
+  $("play-button").disabled = !state.running || (state.provider === "local" && !state.track && !library.length);
+}
 function renderState(state) {
   const caps = state.capabilities;
   setText("source-label", state.provider === "local" ? "LOCAL FILES" : "SPOTIFY");
@@ -88,7 +91,7 @@ function renderState(state) {
   setText("volume-note", caps.canSetVolume ? "Volume applies to imported audio." : "Use the iPad volume buttons for Spotify.");
   $("previous-button").disabled = !caps.canSkipPrevious;
   $("next-button").disabled = !caps.canSkipNext;
-  $("play-button").disabled = !state.running || (!state.track && state.provider === "local");
+  updatePlayAvailability(state);
   const playing = ["playing", "buffering"].includes(state.state);
   setText("play-button", playing ? "Ⅱ" : "▶︎");
   $("play-button").setAttribute("aria-label", playing ? "Pause" : "Play");
@@ -158,7 +161,16 @@ window.addEventListener("resize", resizePlayer);
 
 const nativeImport = host.importFiles;
 host.importFiles = async () => {
-  const { items: imported, skipped } = await nativeImport();
+  let result;
+  try { result = await nativeImport(); }
+  catch (error) {
+    // A later storage failure can follow files already committed to the library.
+    // Refresh those successes, preserving the actionable original failure.
+    try { await refreshLibrary(); } catch {}
+    showError(error);
+    throw error;
+  }
+  const { items: imported, skipped } = result;
   await refreshLibrary();
   if (imported.length) await mounted?.shelf.addItems?.(imported.map(localShelfItem));
   if (skipped) showError(new Error(`Imported ${imported.length} ${imported.length === 1 ? "file" : "files"}. ${skipped} ${skipped === 1 ? "file could" : "files could"} not be imported. Choose unprotected audio downloaded in Files and try again.`));
