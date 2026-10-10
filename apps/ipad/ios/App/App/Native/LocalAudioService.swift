@@ -173,10 +173,15 @@ final class LocalAudioService {
             self.failed("local_playback_failed", "This audio file could not be played.")
         }
         observe(AVPlayerItem.timeJumpedNotification) { [weak self] notification in
-            guard let self, let item = notification.object as? AVPlayerItem, item === self.player.currentItem else { return }
-            // Plain seeks used during recovery can settle after their caller
-            // publishes. Reanchor metadata when that actual time jump arrives.
-            self.changed()
+            guard let item = notification.object as? AVPlayerItem else { return }
+            // AVFoundation can deliver this notification while updating its
+            // clock. Read player state only after notification delivery returns.
+            Task { @MainActor [weak self, weak item] in
+                guard let self, let item, item === self.player.currentItem else { return }
+                // Plain recovery seeks can settle after their caller publishes.
+                // Ignore an old item's jump if playback changed in the meantime.
+                self.changed()
+            }
         }
         observe(AVAudioSession.interruptionNotification) { [weak self] note in self?.interrupted(note) }
         observe(AVAudioSession.routeChangeNotification) { [weak self] note in

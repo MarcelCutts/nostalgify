@@ -100,6 +100,72 @@ final class AudioRecoveryTests: XCTestCase {
     }
 
     @MainActor
+    func testTimeJumpDefersPlayerReadsAndPublicationUntilNotificationReturns() async throws {
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        await settleNotifications()
+        let player = fixture.players[0]
+        let item = try XCTUnwrap(player.currentItem)
+        let center = MPNowPlayingInfoCenter.default()
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 0)
+        player.simulatePosition(4)
+        var publications = 0
+        service.onStateChanged = { publications += 1 }
+        let itemReads = player.currentItemReads
+        let clockReads = player.currentTimeReads
+
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: item)
+
+        XCTAssertEqual(player.currentItemReads, itemReads, "Notification delivery must not synchronously query AVPlayer.")
+        XCTAssertEqual(player.currentTimeReads, clockReads, "Reading the clock during its own notification can deadlock AVFoundation.")
+        XCTAssertEqual(publications, 0, "Listeners must run after notification delivery returns.")
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 0)
+        try await eventually { publications == 1 }
+        XCTAssertGreaterThan(player.currentTimeReads, clockReads)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
+                       "The deferred callback must still publish the measured time jump.")
+    }
+
+    @MainActor
+    func testQueuedTimeJumpRejectsItemReplacedBeforePublication() async throws {
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        await settleNotifications()
+        let player = fixture.players[0]
+        let oldItem = try XCTUnwrap(player.currentItem)
+        let replacementItem = RecoveryProbeItem(url: fixture.directory.appendingPathComponent(fixture.records[1].filename))
+        var publications = 0
+        service.onStateChanged = { publications += 1 }
+
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: oldItem)
+        // Replace only the probe's owned item before the queued callback runs.
+        // Service removal also pauses twice, queuing unrelated rate publications.
+        // Keep both items alive so this exercises identity rather than lifetime.
+        player.replaceCurrentItem(with: replacementItem)
+        XCTAssertTrue(player.currentItem === replacementItem)
+        let center = MPNowPlayingInfoCenter.default()
+        let anchor = try XCTUnwrap(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double)
+        let publicationsAfterReplacement = publications
+        let itemReadsAfterReplacement = player.currentItemReads
+        let clockReadsAfterReplacement = player.currentTimeReads
+        player.simulatePosition(5)
+
+        try await eventually { player.currentItemReads > itemReadsAfterReplacement }
+
+        XCTAssertTrue(player.currentItem === replacementItem)
+        XCTAssertFalse(player.currentItem === oldItem)
+        XCTAssertEqual(publications, publicationsAfterReplacement, "A queued old-item jump must not publish replacement state.")
+        XCTAssertEqual(player.currentTimeReads, clockReadsAfterReplacement, "Reject the stale item before reading the replacement player's clock.")
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, anchor)
+    }
+
+    @MainActor
     func testLateResetPositionRestorationReanchorsNowPlayingWithoutResuming() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }
@@ -118,6 +184,7 @@ final class AudioRecoveryTests: XCTestCase {
         restored.completeSimpleSeek()
         XCTAssertEqual(service.snapshot()["position"] as? Double, 4)
         fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: currentItem)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double) == 4 }
         XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
                        "Late asynchronous restoration must replace the initial zero-position anchor.")
         XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 0)
@@ -847,6 +914,8 @@ private final class RecoveryProbeItem: AVPlayerItem, @unchecked Sendable {
 private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     private let ownsItems: Bool
     private var ownedItem: AVPlayerItem?
+    private(set) var currentItemReads = 0
+    private(set) var currentTimeReads = 0
     var playCalls = 0
     var periodicAdditions = 0
     var periodicRemovals = 0
@@ -869,7 +938,10 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     // Real AVPlayer may drop an item when the probe changes its status to
     // failed. Opt into stable ownership when testing a still-selected failure;
     // other recovery tests continue using AVPlayer's real item lifecycle.
-    override var currentItem: AVPlayerItem? { ownsItems ? ownedItem : super.currentItem }
+    override var currentItem: AVPlayerItem? {
+        currentItemReads += 1
+        return ownsItems ? ownedItem : super.currentItem
+    }
     override func replaceCurrentItem(with item: AVPlayerItem?) {
         if ownsItems { ownedItem = item }
         else { super.replaceCurrentItem(with: item) }
@@ -902,7 +974,10 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     func simulatePosition(_ seconds: Double) {
         position = CMTime(seconds: seconds, preferredTimescale: 600)
     }
-    override func currentTime() -> CMTime { position }
+    override func currentTime() -> CMTime {
+        currentTimeReads += 1
+        return position
+    }
     override func seek(to time: CMTime) {
         if holdSimpleSeeks { pendingSimplePosition = time }
         else { position = time }
