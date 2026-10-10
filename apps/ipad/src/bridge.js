@@ -45,7 +45,10 @@ export function createNativeHost(plugin, {
   let disposed = false;
   let pendingState;
   let prefs = {};
-  let preferencesLoaded = false;
+  // A browser preview has no native preference store. A native read failure
+  // must remain unavailable, rather than looking like an empty saved shelf.
+  let preferencesLoaded = !plugin;
+  let pendingPreferences;
   let prefsQueue = Promise.resolve();
   let commands = Promise.resolve();
   const subscribers = new Set();
@@ -98,10 +101,18 @@ export function createNativeHost(plugin, {
     }).finally(() => { pendingState = null; });
     return pendingState;
   }
-  async function readPreferences() {
-    const result = await invoke("getPreferences");
-    prefs = result?.value && typeof result.value === "object" ? result.value : {};
-    preferencesLoaded = true;
+  function readPreferences() {
+    if (preferencesLoaded) return Promise.resolve();
+    if (!pendingPreferences) {
+      pendingPreferences = invoke("getPreferences").then(result => {
+        if (!result?.value || typeof result.value !== "object" || Array.isArray(result.value)) {
+          throw new Error("Saved settings could not be read. Please try again.");
+        }
+        prefs = result.value;
+        preferencesLoaded = true;
+      }).finally(() => { pendingPreferences = null; });
+    }
+    return pendingPreferences;
   }
   const preferencesReady = readPreferences().catch(() => {});
   function savePreferences(update) {
@@ -135,7 +146,12 @@ export function createNativeHost(plugin, {
     getCachedState: () => state,
     onStateChanged(callback) { subscribers.add(callback); return () => subscribers.delete(callback); },
     command(command, arg) { const next = commands.catch(() => {}).then(() => execute(command, arg)); commands = next; return next; },
-    async getPreferences() { await preferencesReady; await prefsQueue.catch(() => {}); return { ...prefs }; },
+    async getPreferences() {
+      await preferencesReady;
+      await prefsQueue.catch(() => {});
+      await readPreferences();
+      return { ...prefs };
+    },
     savePreferences,
     async loadShelf() { return (await host.getPreferences()).shelf || []; },
     saveShelf: shelf => savePreferences({ shelf }),
