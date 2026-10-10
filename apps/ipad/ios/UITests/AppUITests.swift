@@ -52,15 +52,15 @@ final class AppUITests: XCTestCase {
         // GPU helpers before the page could load. This is a bounded readiness
         // allowance after app.launch(), within the unchanged 180-second case.
         let readinessWaitLimit: TimeInterval = 60
-        let settings = button("settings-toggle", "Settings")
-        let files = webView.switches["Files"].firstMatch
         // Source browsing becomes enabled after startup's final library render.
-        // A visible header alone can precede that render and expose stale rows.
-        // Both conditions use one predicate and readiness deadline.
-        let readiness = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-            settings.exists && files.exists && files.isEnabled
-        }, object: nil)
-        let ready = XCTWaiter.wait(for: [readiness], timeout: readinessWaitLimit) == .completed
+        // Evaluate the enabled attribute within XCTest's native element query,
+        // preserving one readiness wait rather than polling separate properties.
+        let files = webView.switches.matching(
+            NSPredicate(format: "label == %@ AND enabled == YES", "Files")).firstMatch
+        let filesReady = files.waitForExistence(timeout: readinessWaitLimit)
+        // Check the real header immediately; there is no second readiness wait.
+        let settingsReady = filesReady && button("settings-toggle", "Settings").exists
+        let ready = filesReady && settingsReady
         let checkedUptime = ProcessInfo.processInfo.systemUptime
         let timing = LaunchTiming(fixtureID: fixtureID, launchOrdinal: launchOrdinal,
             startedAtUTC: ISO8601DateFormatter().string(from: started),
@@ -87,7 +87,9 @@ final class AppUITests: XCTestCase {
             Window count: \(app.windows.count)
             WKWebView count: \(app.webViews.count)
             Orientation: \(XCUIDevice.shared.orientation.rawValue)
-            The interface did not finish initializing: Settings and enabled Files browsing were not ready within the single 60-second wait. See the failure screenshot/hierarchy and simulator startup log.
+            Enabled Files found during the single 60-second wait: \(filesReady)
+            Settings present immediately afterward: \(filesReady ? String(settingsReady) : "not checked because Files was not ready")
+            The interface did not finish initializing. See the failure screenshot/hierarchy and simulator startup log.
             """
             let attachment = XCTAttachment(string: details)
             attachment.name = "Launch readiness failure"

@@ -25,6 +25,27 @@ case "$NOSTALGIFY_STRICT_CONCURRENCY" in
 esac
 echo "iOS validation results: $NOSTALGIFY_IOS_RESULTS"
 
+timed_simulator_command() {
+  local NOSTALGIFY_TIMING_LABEL=$1
+  shift
+  local NOSTALGIFY_TIMING_STARTED=$SECONDS
+  local NOSTALGIFY_TIMING_STATUS
+  # Keep timing evidence separate from command stdout, including when the caller
+  # captures a container path. Record starts too, so an unfinished command is visible.
+  printf '%s\t%s\tstarted\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$NOSTALGIFY_TIMING_LABEL" \
+    >> "$NOSTALGIFY_IOS_RESULTS/simulator-command-timings.log" || true
+  if "$@"; then
+    NOSTALGIFY_TIMING_STATUS=0
+  else
+    NOSTALGIFY_TIMING_STATUS=$?
+  fi
+  printf '%s\t%s\tfinished\telapsedSeconds=%s\texitCode=%s\n' \
+    "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$NOSTALGIFY_TIMING_LABEL" \
+    "$((SECONDS - NOSTALGIFY_TIMING_STARTED))" "$NOSTALGIFY_TIMING_STATUS" \
+    >> "$NOSTALGIFY_IOS_RESULTS/simulator-command-timings.log" || true
+  return "$NOSTALGIFY_TIMING_STATUS"
+}
+
 cleanup() {
   local NOSTALGIFY_VALIDATION_STATUS=$?
   # Diagnostic collection must neither hide the original failure nor replace a
@@ -222,8 +243,8 @@ with open(sys.argv[1], 'w') as file:
     json.dump({'requestedRuntime': sys.argv[2], 'selectedRuntime': sys.argv[3], 'strictConcurrency': sys.argv[4]}, file, indent=2)
 PY
 NOSTALGIFY_SIMULATOR_ID=$(xcrun simctl create "Nostalgify validation $$" "$NOSTALGIFY_DEVICE_TYPE" "$NOSTALGIFY_RUNTIME")
-xcrun simctl boot "$NOSTALGIFY_SIMULATOR_ID"
-xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
+timed_simulator_command boot xcrun simctl boot "$NOSTALGIFY_SIMULATOR_ID"
+timed_simulator_command boot-status xcrun simctl bootstatus "$NOSTALGIFY_SIMULATOR_ID" -b \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/boot.log"
 
 # Validate the first application launch outside XCTest before querying its
@@ -242,10 +263,10 @@ for app in pathlib.Path(sys.argv[1]).glob('*.app'):
 raise SystemExit('Built Nostalgify iPad app was not found.')
 PY
 )
-xcrun simctl install "$NOSTALGIFY_SIMULATOR_ID" "$NOSTALGIFY_BUILT_APP"
-xcrun simctl launch --terminate-running-process "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad --native-local-selfcheck \
+timed_simulator_command install xcrun simctl install "$NOSTALGIFY_SIMULATOR_ID" "$NOSTALGIFY_BUILT_APP"
+timed_simulator_command preflight-launch xcrun simctl launch --terminate-running-process "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad --native-local-selfcheck \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/launch.log"
-NOSTALGIFY_APP_DATA=$(xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data)
+NOSTALGIFY_APP_DATA=$(timed_simulator_command preflight-container-lookup xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data)
 for NOSTALGIFY_ATTEMPT in $(seq 1 60); do
   if [ -f "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" ]; then break; fi
   sleep 1

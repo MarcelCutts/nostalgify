@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import sys
 import tempfile
 import types
 import unittest
@@ -36,6 +37,60 @@ class StartupWatcherTests(unittest.TestCase):
         requested.write_text(json.dumps(data))
         os.utime(requested, (WALL_TIME - age, WALL_TIME - age))
         return data
+
+    def test_timeout_preserves_bounded_partial_output_and_reaps_child(self):
+        # Exercise a real timeout after both streams have emitted diagnostics.
+        # The previous handler discarded these bytes and left empty artifacts.
+        child = """
+import os, sys, time
+os.write(1, b'x' * 70_000 + b'\\xffsampling\\n')
+print('report processing', file=sys.stderr, flush=True)
+print(os.getpid(), flush=True)
+time.sleep(10)
+"""
+        output, status = watcher.command([sys.executable, "-u", "-c", child], timeout=1)
+        self.assertEqual(status, "timed-out")
+        self.assertEqual(len(output), watcher.TIMEOUT_OUTPUT_LIMIT)
+        self.assertIn("\ufffdsampling\nreport processing\n", output)
+        pid = int(output.splitlines()[-1])
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    def test_quiet_timeout_preserves_status_without_inventing_output(self):
+        output, status = watcher.command(
+            [sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1)
+        self.assertEqual((output, status), ("", "timed-out"))
+
+    def test_command_completion_and_failure_keep_output_and_status(self):
+        for code, status in [(0, "completed"), (17, "command-failed")]:
+            with self.subTest(code=code):
+                output, actual = watcher.command([
+                    sys.executable, "-c", f"import sys; print('report phase'); sys.exit({code})"])
+                self.assertEqual((output, actual), ("report phase\n", status))
+
+    def test_sample_records_partial_report_and_separate_command_budget(self):
+        executable = f"/Library/Developer/CoreSimulator/Devices/{SIMULATOR}/data/Containers/Bundle/Application/AA/App.app/App"
+        calls = []
+
+        def run(arguments, timeout=5):
+            calls.append((arguments, timeout))
+            if arguments[0] == "/bin/ps":
+                return executable, "completed"
+            if arguments[0] == "xcrun":
+                return "", "timed-out"
+            self.assertEqual(arguments[:4], ["/usr/bin/sample", "17731", "1", "-file"])
+            pathlib.Path(arguments[4]).write_text("partial stack report\n")
+            return "report processing\n", "timed-out"
+
+        with patch.object(watcher, "command", side_effect=run), \
+                patch.object(watcher.time, "monotonic", side_effect=[10, 30]):
+            result = watcher.sample_process(17731, "app", SIMULATOR, self.root)
+            watcher.current_probe_directory(SIMULATOR)
+        self.assertEqual(result["status"], "timed-out")
+        self.assertEqual(result["elapsedSeconds"], 20)
+        self.assertEqual(result["reportBytes"], len(b"partial stack report\n"))
+        self.assertEqual([timeout for _, timeout in calls], [2, 20, 5])
+        self.assertEqual((self.root / "startup-sample-app-command.log").read_text(), "report processing\n")
 
     def test_discovers_replaced_data_container_after_xctest_installation(self):
         containers = self.root / f"CoreSimulator/Devices/{SIMULATOR}/data/Containers/Data/Application"

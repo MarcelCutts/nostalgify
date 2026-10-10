@@ -12,6 +12,8 @@ import uuid
 
 
 stopping = False
+SAMPLE_COMMAND_TIMEOUT = 20
+TIMEOUT_OUTPUT_LIMIT = 65_536
 
 
 def stop(_signal, _frame):
@@ -24,8 +26,13 @@ def command(arguments, timeout=5):
         result = subprocess.run(arguments, text=True, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT, timeout=timeout)
         return result.stdout, "completed" if result.returncode == 0 else "command-failed"
-    except subprocess.TimeoutExpired:
-        return "", "timed-out"
+    except subprocess.TimeoutExpired as error:
+        # Preserve progress from capture/report processing even when the command
+        # times out. Python retains bytes here despite text=True above.
+        output = error.output or b""
+        if isinstance(output, bytes):
+            output = output[-TIMEOUT_OUTPUT_LIMIT:].decode("utf-8", errors="replace")
+        return output[-TIMEOUT_OUTPUT_LIMIT:], "timed-out"
     except OSError:
         return "", "unavailable"
 
@@ -120,9 +127,18 @@ def sample_process(pid, kind, simulator, output):
     if stopping:
         result["status"] = "watcher-stopped"
         return result
+    report = output / f"startup-sample-{kind}.log"
+    started = time.monotonic()
+    # One second of capture is separate from report/symbol processing. Keep a
+    # bounded reporting allowance without extending lookup or UI-test deadlines.
     diagnostic, result["status"] = command([
-        "/usr/bin/sample", str(pid), "1", "-file", str(output / f"startup-sample-{kind}.log")
-    ])
+        "/usr/bin/sample", str(pid), "1", "-file", str(report)
+    ], timeout=SAMPLE_COMMAND_TIMEOUT)
+    result["elapsedSeconds"] = round(time.monotonic() - started, 3)
+    try:
+        result["reportBytes"] = report.stat().st_size
+    except OSError:
+        result["reportBytes"] = 0
     (output / f"startup-sample-{kind}-command.log").write_text(diagnostic)
     return result
 
@@ -133,7 +149,7 @@ def capture(data, age, simulator, output):
               "fixtureID": data["fixtureID"], "launchID": data["launchID"],
               "trigger": data["trigger"],
               "probeAgeSeconds": round(age, 2), "sampleDurationSeconds": 1,
-              "commandTimeoutSeconds": 5, "samples": []}
+              "commandTimeoutSeconds": SAMPLE_COMMAND_TIMEOUT, "samples": []}
     result["samples"].append(sample_process(app_pid, "app", simulator, output))
     if stopping or not result["samples"][0]["identityVerified"]:
         result["webContentMapping"] = "app-unavailable-or-watcher-stopped"
