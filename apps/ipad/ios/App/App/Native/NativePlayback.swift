@@ -29,7 +29,10 @@ final class NativePlayback {
         spotify = SpotifyRemoteService(diagnostics: diagnostics, defaults: defaults)
         local.onStateChanged = { [weak self] in if self?.provider == "local" { self?.publish() } }
         spotify.onStateChanged = { [weak self] in if self?.provider == "spotify" { self?.publish() } }
-        if provider == "local" { try? local.setActive(true) }
+        if provider == "local" {
+            spotify.cancelPendingAuthorization()
+            try? local.setActive(true)
+        }
         diagnostics.record("app.started")
     }
 
@@ -147,6 +150,7 @@ final class NativePlayback {
         guard ["spotify", "local"].contains(next) else {
             throw NativeFailure(code: "invalid_provider", message: "Choose Spotify or Local Files.")
         }
+        if next == "local" { spotify.cancelPendingAuthorization() }
         guard next != provider else { return }
         if provider == "spotify" {
             // Never start a second source while the old source might still be playing.
