@@ -909,13 +909,22 @@ private final class RecoveryProbeItem: AVPlayerItem, @unchecked Sendable {
     }
 }
 
+private final class RecoveryReadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
 /// Real AVPlayer item/KVO lifecycle with deterministic transport and periodic
 /// callbacks. It never emits audio or depends on simulator route availability.
 private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     private let ownsItems: Bool
     private var ownedItem: AVPlayerItem?
-    private(set) var currentItemReads = 0
-    private(set) var currentTimeReads = 0
+    private nonisolated let itemReads = RecoveryReadCounter()
+    private nonisolated let timeReads = RecoveryReadCounter()
+    var currentItemReads: Int { itemReads.value }
+    var currentTimeReads: Int { timeReads.value }
     var playCalls = 0
     var periodicAdditions = 0
     var periodicRemovals = 0
@@ -939,7 +948,7 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     // failed. Opt into stable ownership when testing a still-selected failure;
     // other recovery tests continue using AVPlayer's real item lifecycle.
     override var currentItem: AVPlayerItem? {
-        currentItemReads += 1
+        itemReads.increment()
         return ownsItems ? ownedItem : super.currentItem
     }
     override func replaceCurrentItem(with item: AVPlayerItem?) {
@@ -975,7 +984,7 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
         position = CMTime(seconds: seconds, preferredTimescale: 600)
     }
     override func currentTime() -> CMTime {
-        currentTimeReads += 1
+        timeReads.increment()
         return position
     }
     override func seek(to time: CMTime) {
