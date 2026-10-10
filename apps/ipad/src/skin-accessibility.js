@@ -1,6 +1,11 @@
 // Webamp's sprite controls are divs. Keep their original handlers and artwork,
 // while exposing actual actions and complete readouts to iPad accessibility APIs.
 export function installSkinAccessibility(root) {
+  const setAttribute = (element, name, value) => {
+    if (!element || element.getAttribute(name) === value) return;
+    if (value === null) element.removeAttribute(name);
+    else element.setAttribute(name, value);
+  };
   const bitmapReadouts = "#kbps, #khz, #time, .mini-time";
   const decorativeEQ = ".band, #on, #auto, #presets-context, #presets, #plus12db, #zerodb, #minus12db";
   const menus = {
@@ -30,16 +35,16 @@ export function installSkinAccessibility(root) {
   };
   let contextOpener;
   const setControl = (element, label, role = "button") => {
-    element.setAttribute("role", role);
-    element.setAttribute("aria-label", label);
-    element.tabIndex = role === "menuitem" ? -1 : 0;
-    element.dataset.skinControl = "true";
+    setAttribute(element, "role", role);
+    setAttribute(element, "aria-label", label);
+    setAttribute(element, "tabindex", role === "menuitem" ? "-1" : "0");
+    setAttribute(element, "data-skin-control", "true");
   };
   const describeReadout = (element, label) => {
-    element.removeAttribute("aria-hidden");
-    element.setAttribute("role", "img");
-    element.setAttribute("aria-label", label);
-    for (const child of element.children) child.setAttribute("aria-hidden", "true");
+    setAttribute(element, "aria-hidden", null);
+    setAttribute(element, "role", "img");
+    setAttribute(element, "aria-label", label);
+    for (const child of element.children) setAttribute(child, "aria-hidden", "true");
   };
   const describeArtwork = (parent, kind, label) => {
     if (!parent) return;
@@ -52,7 +57,7 @@ export function installSkinAccessibility(root) {
     describeReadout(image, label);
   };
   function update() {
-    root.querySelector('#webamp[role="application"]')?.setAttribute("aria-label", "Classic Winamp player");
+    setAttribute(root.querySelector('#webamp[role="application"]'), "aria-label", "Classic Winamp player");
     const windows = [
       [root.querySelector('#main-window > [tabindex="-1"]'), "Main player window"],
       [root.querySelector('#equalizer-window > [tabindex="-1"]'), "Equalizer window"],
@@ -62,12 +67,12 @@ export function installSkinAccessibility(root) {
       if (!element || (element.getAttribute("tabindex") !== "-1" && element.id !== "playlist-window-shade")) continue;
       // Webamp programmatically focuses these containers when a sprite is
       // replaced. Name that focus destination without changing its behavior.
-      element.setAttribute("role", "group");
-      element.setAttribute("aria-label", label);
+      setAttribute(element, "role", "group");
+      setAttribute(element, "aria-label", label);
     }
     // Avoid exposing individual off-screen glyphs where the shell supplies full
     // current-track/status text and spoken playback time.
-    for (const element of root.querySelectorAll(bitmapReadouts)) element.setAttribute("aria-hidden", "true");
+    for (const element of root.querySelectorAll(bitmapReadouts)) setAttribute(element, "aria-hidden", "true");
     for (const element of root.querySelectorAll("#marquee")) {
       const text = element.textContent;
       // Webamp repeats long messages around this separator for animation. Only
@@ -81,13 +86,13 @@ export function installSkinAccessibility(root) {
     const equalizerBody = root.querySelector(".equalizer-top")?.parentElement;
     describeArtwork(equalizerBody, "equalizer", "Equalizer artwork: On, Auto, Presets, preamp and frequency bands. These decorative controls do not affect playback.");
     // EQ artwork has no audio effect; preserve its description and window actions.
-    for (const element of root.querySelector("#equalizer-window")?.querySelectorAll(decorativeEQ) || []) element.setAttribute("aria-hidden", "true");
+    for (const element of root.querySelector("#equalizer-window")?.querySelectorAll(decorativeEQ) || []) setAttribute(element, "aria-hidden", "true");
     for (const [selector, label] of Object.entries(buttons)) for (const element of root.querySelectorAll(selector)) setControl(element, label);
-    for (const element of root.querySelectorAll("#equalizer-button, #playlist-button, #shuffle, #repeat")) element.setAttribute("aria-pressed", String(element.classList.contains("selected")));
+    for (const element of root.querySelectorAll("#equalizer-button, #playlist-button, #shuffle, #repeat")) setAttribute(element, "aria-pressed", String(element.classList.contains("selected")));
     for (const element of root.querySelectorAll("#balance, #equalizer-balance")) {
-      element.disabled = true;
-      element.tabIndex = -1;
-      element.setAttribute("aria-label", "Balance (unavailable)");
+      if (!element.disabled) element.disabled = true;
+      setAttribute(element, "tabindex", "-1");
+      setAttribute(element, "aria-label", "Balance (unavailable)");
     }
     for (const [id, label] of Object.entries(menus)) {
       const element = root.querySelector(`#${id}`);
@@ -96,9 +101,8 @@ export function installSkinAccessibility(root) {
       // The sprite popup replaces the launcher; exposing it as a menu when open
       // avoids putting interactive menu items inside an accessibility button.
       setControl(element, label, open ? "menu" : "button");
-      if (open) element.removeAttribute("aria-haspopup");
-      else element.setAttribute("aria-haspopup", "menu");
-      element.setAttribute("aria-expanded", String(open));
+      setAttribute(element, "aria-haspopup", open ? null : "menu");
+      setAttribute(element, "aria-expanded", String(open));
       for (const item of element.querySelectorAll("li > div")) {
         const key = [...item.classList].find(value => options[value]);
         if (key) setControl(item.querySelector(".handle") || item, options[key], "menuitem");
@@ -109,8 +113,8 @@ export function installSkinAccessibility(root) {
     for (const element of root.querySelectorAll("#playlist-shade-track-title, #playlist-shade-time")) describeReadout(element, `${element.id.endsWith("time") ? "Track duration" : "Playlist track"}: ${element.textContent.trim() || "No track"}`);
     const popup = document.querySelector("#webamp-context-menu .context-menu");
     if (popup && contextOpener?.isConnected && contextOpener.closest(".playlist-menu")?.querySelector("ul")) {
-      popup.setAttribute("role", "menu");
-      popup.setAttribute("aria-label", contextOpener.getAttribute("aria-label"));
+      setAttribute(popup, "role", "menu");
+      setAttribute(popup, "aria-label", contextOpener.getAttribute("aria-label"));
       for (const item of popup.querySelectorAll("li:not(.hr):not(.parent)")) setControl(item, item.textContent.trim(), "menuitem");
     }
   }

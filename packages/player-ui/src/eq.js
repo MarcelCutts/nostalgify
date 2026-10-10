@@ -7,6 +7,9 @@ const DESCRIPTION = {
   soundcloud: "Decorative equalizer. EQ does not affect SoundCloud playback in Nostalgify.",
   local: "Decorative equalizer. EQ does not affect local file playback.",
 };
+const setAttribute = (element, name, value) => {
+  if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+};
 
 export function createEqPolicy(webamp, initialSkins) {
   const store = webamp.store;
@@ -37,20 +40,20 @@ export function createEqPolicy(webamp, initialSkins) {
     const panel = document.getElementById("equalizer-window");
     if (!panel) return;
     const description = DESCRIPTION[provider];
-    panel.title = description;
-    panel.setAttribute("role", "group");
-    panel.setAttribute("aria-label", "Equalizer (decorative)");
-    panel.setAttribute("aria-description", description);
+    if (panel.title !== description) panel.title = description;
+    setAttribute(panel, "role", "group");
+    setAttribute(panel, "aria-label", "Equalizer (decorative)");
+    setAttribute(panel, "aria-description", description);
     for (const control of panel.querySelectorAll(CONTROLS)) {
-      control.setAttribute("aria-disabled", "true");
-      control.setAttribute("aria-description", description);
-      control.title = description;
+      setAttribute(control, "aria-disabled", "true");
+      setAttribute(control, "aria-description", description);
+      if (control.title !== description) control.title = description;
       const targets = [control, ...control.querySelectorAll(FOCUSABLE)];
       for (const target of targets) {
-        target.setAttribute("aria-disabled", "true");
-        target.setAttribute("aria-description", description);
-        target.tabIndex = -1;
-        if ("disabled" in target) target.disabled = true;
+        setAttribute(target, "aria-disabled", "true");
+        setAttribute(target, "aria-description", description);
+        if (target.getAttribute("tabindex") !== "-1") target.tabIndex = -1;
+        if ("disabled" in target && !target.disabled) target.disabled = true;
       }
     }
   }

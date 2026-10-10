@@ -102,6 +102,34 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
       return { changes, replaced: ids.filter((id, index) => original[index] !== document.getElementById(id).firstChild) };
     });
     assert.deepEqual(stableText, { changes: [], replaced: [] }, "unchanged native snapshots preserve the text nodes accessibility is reading");
+    const stableSkinSemantics = await page.evaluate(async () => {
+      const frame = () => new Promise(requestAnimationFrame);
+      await frame(); await frame();
+      const writes = [], clockChanges = [];
+      const observer = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.attributeName === "class") {
+            if (record.target.closest("#time")) clockChanges.push(record.target.id);
+            continue;
+          }
+          // Capability writes in the outer shell are separate from the EQ and
+          // skin semantic policies under test here.
+          if (record.attributeName === "aria-disabled" && !record.target.closest("#equalizer-window")) continue;
+          writes.push(`${record.target.id || record.target.className}:${record.attributeName}`);
+        }
+      });
+      observer.observe(document.getElementById("webamp"), { subtree: true, attributes: true, attributeFilter: ["class", "role", "aria-label", "aria-description", "aria-hidden", "aria-disabled", "aria-pressed", "aria-haspopup", "aria-expanded", "tabindex", "title", "disabled", "data-skin-control"] });
+      const elapsed = window.__webamp.store.getState().media.timeElapsed;
+      for (const value of [1, 2, 3, elapsed]) {
+        window.__webamp.store.dispatch({ type: "STEP_MARQUEE" });
+        window.__webamp.store.dispatch({ type: "UPDATE_TIME_ELAPSED", elapsed: value });
+        await frame(); await frame();
+      }
+      observer.disconnect();
+      return { writes, clockChanges: clockChanges.length };
+    });
+    assert.ok(stableSkinSemantics.clockChanges > 0, "the semantic regression exercises real clock sprite updates");
+    assert.deepEqual(stableSkinSemantics.writes, [], "clock and marquee updates do not rewrite unchanged accessibility attributes");
     assert.equal(await page.locator("#demo-banner").isVisible(), true);
     assert.equal(await page.getByRole("link", { name: "Nostalgify for iPad player" }).count(), 1);
     assert.equal(await page.getByRole("heading", { name: "Ready when you are. No track selected", exact: true }).textContent(), "Ready when you are.", "the empty now-playing heading's accessible name includes its visible text");
@@ -277,6 +305,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Pause");
     assert.equal(await page.locator("#source-label").getAttribute("aria-label"), "Playback source: Local files");
     assert.equal(await page.getByRole("status", { name: "Playback source: Local files" }).count(), 1);
+    assert.match(await page.locator("#equalizer-window").getAttribute("aria-description"), /local file playback/, "a real provider change still updates the EQ description");
     await page.getByRole("button", { name: "Main classic player: Pause", exact: true }).focus();
     await page.keyboard.press("Space");
     await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");

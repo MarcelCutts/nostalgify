@@ -125,7 +125,8 @@ final class AppUITests: XCTestCase {
         XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
         for _ in 0..<8 {
             let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
-            let center = CGPoint(x: element.frame.midX, y: element.frame.midY)
+            let frame = element.frame
+            let center = CGPoint(x: frame.midX, y: frame.midY)
             if element.isHittable && visible.contains(center) { return }
             if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
         }
@@ -182,7 +183,13 @@ final class AppUITests: XCTestCase {
     }
 
     // WebKit exposes HTML aria-pressed controls as native accessibility switches.
-    private func openFiles() { tap(webView.switches["Files"].firstMatch) }
+    private func openFiles() {
+        tap(webView.switches["Files"].firstMatch)
+        let selectedFiles = webView.switches.matching(
+            NSPredicate(format: "label == %@ AND value == %@", "Files", "1")).firstMatch
+        XCTAssertTrue(selectedFiles.waitForExistence(timeout: 10),
+                      "The single Files tap must select the Files collection.")
+    }
 
     private func playFixture() {
         openFiles()
