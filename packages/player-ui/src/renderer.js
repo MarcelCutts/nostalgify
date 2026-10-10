@@ -459,12 +459,16 @@ export async function mountPlayer(host, { target = document.getElementById("app"
     else clearMessage();
   }
 
+  let lastSubscribedState = null;
   let polling = false;
   async function poll() {
     if (polling) return;
     polling = true;
     try {
-      apply(await host.getState());
+      const state = await host.getState();
+      // Native reads fan out and return the same normalized object. Other
+      // hosts may only return a value, even when they expose subscriptions.
+      if (state !== lastSubscribedState) apply(state);
     } catch (e) {
       console.error(e);
     } finally {
@@ -485,8 +489,11 @@ export async function mountPlayer(host, { target = document.getElementById("app"
   else await webamp.renderWhenReady(target);
   manageLayout(webamp, host);
   if (host.platform !== "ios") addResizeGrips(host);
+  host.onStateChanged?.((state) => {
+    lastSubscribedState = state;
+    apply(state);
+  });
   poll();
   setInterval(poll, POLL_MS);
-  host.onStateChanged?.(apply);
   return { webamp, shelf, refresh: poll };
 }

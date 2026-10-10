@@ -532,7 +532,9 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         if let state {
             track = ["id": state.track.uri, "name": state.track.name,
                      "artist": state.track.artist.name, "album": state.track.album.name,
-                     "duration": duration, "artworkUrl": artworkDataURL] as [String: Any]
+                     // Artwork stays native; the player does not display it or
+                     // enable Webamp's MediaSession artwork consumer.
+                     "duration": duration, "artworkUrl": ""] as [String: Any]
         }
         return [
             "provider": "spotify", "configured": remote != nil, "connected": connected,

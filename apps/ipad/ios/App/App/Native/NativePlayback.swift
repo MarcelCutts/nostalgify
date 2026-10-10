@@ -22,10 +22,11 @@ final class NativePlayback {
     private var foreground = UIApplication.shared.applicationState == .active
     private let defaults: UserDefaults
 
-    private init(defaults: UserDefaults = .standard, localDirectory: URL? = nil) {
+    init(defaults: UserDefaults = .standard, localDirectory: URL? = nil,
+         localService: LocalAudioService? = nil) {
         self.defaults = defaults
         provider = defaults.string(forKey: "nostalgify.provider") == "local" ? "local" : "spotify"
-        local = LocalAudioService(diagnostics: diagnostics, directory: localDirectory)
+        local = localService ?? LocalAudioService(diagnostics: diagnostics, directory: localDirectory)
         spotify = SpotifyRemoteService(diagnostics: diagnostics, defaults: defaults)
         local.onStateChanged = { [weak self] in if self?.provider == "local" { self?.publish() } }
         spotify.onStateChanged = { [weak self] in if self?.provider == "spotify" { self?.publish() } }
@@ -45,13 +46,16 @@ final class NativePlayback {
 
     func subscribe(id: UUID, listener: @escaping ([String: Any]) -> Void) {
         listeners[id] = listener
-        listener(snapshot())
+        if foreground { listener(snapshot()) }
     }
 
     func unsubscribe(id: UUID) { listeners.removeValue(forKey: id) }
 
     func publish() {
         sequence += 1
+        // Native playback and command replies remain current while the WebView
+        // is inactive. Foregrounding publishes one fresh snapshot to listeners.
+        guard foreground, !listeners.isEmpty else { return }
         let value = snapshot()
         Array(listeners.values).forEach { $0(value) }
     }
