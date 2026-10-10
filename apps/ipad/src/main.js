@@ -26,6 +26,8 @@ let lastTrack = null;
 let lastGeometry = "";
 let settingsOpener;
 const pendingActions = new WeakSet();
+const sliderEdits = new Map(["seek", "native-volume"].map(id => [id, { pointerId: null, pending: 0 }]));
+const sliderIsEditing = id => sliderEdits.get(id).pointerId !== null || sliderEdits.get(id).pending > 0;
 
 function showError(error) {
   $("error-message").textContent = error?.message || "The player could not complete that action. Please try again.";
@@ -77,10 +79,10 @@ function renderState(state) {
   setText("elapsed", clock(state.position));
   setText("duration", clock(state.track?.duration || 0));
   $("seek").max = String(state.track?.duration || 0);
-  if (document.activeElement !== $("seek")) $("seek").value = String(state.position);
+  if (!sliderIsEditing("seek")) $("seek").value = String(state.position);
   $("seek").disabled = !caps.canSeek || !state.track;
   $("native-volume").disabled = !caps.canSetVolume;
-  if (document.activeElement !== $("native-volume")) $("native-volume").value = String(state.volume);
+  if (!sliderIsEditing("native-volume")) $("native-volume").value = String(state.volume);
   updateSliderDescriptions();
   setText("volume-note", caps.canSetVolume ? "Volume applies to imported audio." : "Use the iPad volume buttons for Spotify.");
   $("previous-button").disabled = !caps.canSkipPrevious;
@@ -129,9 +131,10 @@ window.addEventListener("resize", resizePlayer);
 
 const nativeImport = host.importFiles;
 host.importFiles = async () => {
-  const imported = await nativeImport();
+  const { items: imported, skipped } = await nativeImport();
   await refreshLibrary();
   if (imported.length) await mounted?.shelf.addItems?.(imported.map(localShelfItem));
+  if (skipped) showError(new Error(`Imported ${imported.length} ${imported.length === 1 ? "file" : "files"}. ${skipped} ${skipped === 1 ? "file could" : "files could"} not be imported. Choose unprotected audio downloaded in Files and try again.`));
   return imported;
 };
 const nativeSaveShelf = host.saveShelf;
@@ -270,9 +273,25 @@ $("link-form").addEventListener("submit", event => {
 });
 for (const [id, command] of [["play-button", "playpause"], ["previous-button", "previous"], ["next-button", "next"]]) $(id).addEventListener("click", () => action(() => host.command(command), $(id)));
 for (const key of ["shuffle", "repeat"]) $(`${key}-button`).addEventListener("click", () => action(() => host.command(key, !host.getCachedState()[key]), $(`${key}-button`)));
-$("seek").addEventListener("change", () => action(() => host.command("seek", Number($("seek").value))));
-$("native-volume").addEventListener("change", () => action(() => host.command("volume", Number($("native-volume").value))));
-for (const id of ["seek", "native-volume"]) $(id).addEventListener("input", updateSliderDescriptions);
+for (const [id, command] of [["seek", "seek"], ["native-volume", "volume"]]) {
+  const control = $(id), editing = sliderEdits.get(id);
+  control.addEventListener("input", updateSliderDescriptions);
+  control.addEventListener("pointerdown", event => { editing.pointerId = event.pointerId; });
+  for (const eventName of ["pointerup", "pointercancel"]) window.addEventListener(eventName, event => {
+    if (editing.pointerId !== event.pointerId) return;
+    editing.pointerId = null;
+    // Let the range's change event register its pending command before syncing.
+    requestAnimationFrame(() => renderState(host.getCachedState()));
+  });
+  control.addEventListener("change", () => {
+    const value = Number(control.value);
+    editing.pending++;
+    void action(async () => {
+      try { await host.command(command, value); }
+      finally { editing.pending--; }
+    });
+  });
+}
 $("skin-file").addEventListener("change", () => action(async () => {
   const file = $("skin-file").files?.[0]; if (!file) return;
   const skin = await host.importSkin(file); await renderSkins(); $("skin-select").value = skin.id; $("skin-file").value = "";

@@ -172,9 +172,9 @@ disables TLS certificate verification.
 
 ## Implementation
 
-`src/main/playback.js` coordinates the selected source and invalidates stale
-work. `src/main/soundcloud/` contains authentication, the API client and the media
-proxy. `src/renderer/soundcloudAudio.js` owns the Audio/HLS engine. Playback
+`apps/desktop/src/main/playback.js` coordinates the selected source and invalidates stale
+work. `apps/desktop/src/main/soundcloud/` contains authentication, the API client and the media
+proxy. `apps/desktop/src/renderer-entry/soundcloudAudio.js` owns the Audio/HLS engine. Playback
 controls share the same IPC commands whether issued by Webamp or native menus.
 
 A **source** is Spotify or SoundCloud; code uses the corresponding `provider`

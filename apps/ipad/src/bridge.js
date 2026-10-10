@@ -147,7 +147,14 @@ export function createNativeHost(plugin, {
     async connectSpotify() { await invoke("connectSpotify", undefined, 60000); return refresh(); },
     async disconnectSpotify() { await invoke("disconnectSpotify"); return refresh(); },
     async listAudio() { return (await invoke("listAudio"))?.items || []; },
-    async importFiles() { return (await invoke("importAudio", undefined, null))?.items || []; },
+    async importFiles() {
+      const result = await invoke("importAudio", undefined, null);
+      return {
+        items: Array.isArray(result?.items) ? result.items : [],
+        skipped: Number.isSafeInteger(result?.skipped) && result.skipped > 0 ? result.skipped : 0,
+        cancelled: result?.cancelled === true,
+      };
+    },
     async removeAudio(id) { await invoke("removeAudio", { id }); return refresh(); },
     getDiagnostics: async () => ({ version: 1, web: diagnostics.slice(), native: await invoke("getDiagnostics") }),
     exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.slice() }, null),

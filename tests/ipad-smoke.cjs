@@ -237,6 +237,13 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
     assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Play");
     await page.locator("#local-source").tap();
+    await page.evaluate(() => {
+      const plugin = window.__ipad.plugin, importAudio = plugin.importAudio;
+      plugin.importAudio = async (...args) => {
+        plugin.importAudio = importAudio;
+        return { ...await importAudio(...args), skipped: 1 };
+      };
+    });
     await page.getByRole("button", { name: "Add music to playlist" }).focus();
     await page.keyboard.press("Enter");
     await page.getByRole("menuitem", { name: "Add URL from clipboard" }).waitFor();
@@ -244,6 +251,9 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.getByRole("menuitem", { name: "Add file from Files" }).evaluate(element => element === document.activeElement), true);
     await page.keyboard.press("Enter");
     await page.locator("#local-library .music-play").waitFor();
+    await page.waitForFunction(() => document.getElementById("error-message").textContent.includes("1 file could not be imported"));
+    assert.equal(await page.locator("#error-message").isVisible(), true, "partial import failures are announced even while Spotify remains selected");
+    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().provider), "spotify", "importing files must not interrupt the active source");
     await page.keyboard.press("Escape");
     await page.waitForFunction(() => document.getElementById("playlist-add-menu").getAttribute("role") === "button");
     await page.locator("#import-button").tap();
@@ -271,11 +281,13 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.locator("#playlist-misc-menu").evaluate(element => element === document.activeElement), true, "a deferred menu callback must preserve newer user focus");
     await page.keyboard.press("Enter");
     await page.getByRole("menuitem", { name: "Sort list", exact: true }).waitFor();
+    await page.waitForFunction(() => document.activeElement?.getAttribute("aria-label") === "Sort list");
     const menuPosition = await page.evaluate(() => window.__ipad.host.getCachedState().position);
     await page.keyboard.press("ArrowRight");
     assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), menuPosition, "playlist menu navigation must not trigger global transport shortcuts");
     await page.keyboard.press("Enter");
     await page.getByRole("menuitem", { name: "Sort list by title", exact: true }).waitFor();
+    await page.waitForFunction(() => document.activeElement?.matches('#webamp-context-menu [role="menuitem"]') && document.activeElement.textContent.trim() === "Sort list by title");
     const previousOrder = await page.evaluate(() => [...window.__webamp.store.getState().playlist.trackOrder]);
     await page.keyboard.press("ArrowDown");
     await page.keyboard.press("Enter");
@@ -317,12 +329,51 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     await page.keyboard.press("ArrowRight");
     await page.waitForFunction(value => window.__ipad.host.getCachedState().position === value, positionBefore + 1);
     assert.equal(await page.locator("#seek").getAttribute("aria-valuetext"), "1 second of 1 minute 0 seconds");
+    await page.evaluate(() => window.__ipad.plugin.command({ command: "seek", arg: 10 }));
+    assert.equal(await page.locator("#seek").inputValue(), "10", "a focused seek slider must follow native position updates after editing ends");
+    assert.equal(await page.locator("#seek").getAttribute("aria-valuetext"), "10 seconds of 1 minute 0 seconds");
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().position === 11);
+    await page.evaluate(() => {
+      const plugin = window.__ipad.plugin, command = plugin.command;
+      plugin.command = async options => {
+        if (options.command !== "seek") return command(options);
+        plugin.command = command;
+        return new Promise(resolve => { window.__completeSeek = async () => resolve(await command(options)); });
+      };
+    });
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(() => typeof window.__completeSeek === "function");
+    await page.evaluate(() => window.__ipad.plugin.command({ command: "seek", arg: 20 }));
+    assert.equal(await page.locator("#seek").inputValue(), "12", "native updates must not overwrite a seek awaiting confirmation");
+    await page.evaluate(() => window.__completeSeek());
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().position === 12);
+    await page.evaluate(() => {
+      const plugin = window.__ipad.plugin, command = plugin.command;
+      plugin.command = async options => {
+        plugin.command = command;
+        if (options.command === "seek") throw Object.assign(new Error("Seek rejected"), { code: "spotify_restricted" });
+        return command(options);
+      };
+    });
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(() => document.getElementById("error-message").textContent.includes("does not currently allow"));
+    assert.equal(await page.locator("#seek").inputValue(), "12", "a rejected seek must restore the confirmed native value while focus remains");
+    const seekBox = await page.locator("#seek").boundingBox();
+    await page.mouse.move(seekBox.x + seekBox.width / 2, seekBox.y + seekBox.height / 2);
+    await page.mouse.down();
+    const draggingPosition = await page.locator("#seek").inputValue();
+    await page.evaluate(() => window.__ipad.plugin.command({ command: "seek", arg: 45 }));
+    assert.equal(await page.locator("#seek").inputValue(), draggingPosition, "native progress must not move the thumb during a pointer drag");
+    await page.mouse.up();
+    await page.evaluate(() => window.__ipad.host.command("seek", 11));
+    await page.waitForFunction(() => document.getElementById("seek").value === "11");
     await page.locator("#native-volume").focus();
     const volumeBefore = await page.evaluate(() => window.__ipad.host.getCachedState().volume);
     await page.keyboard.press("ArrowLeft");
     await page.waitForFunction(value => window.__ipad.host.getCachedState().volume === value, volumeBefore - 1);
     assert.equal(await page.locator("#native-volume").getAttribute("aria-valuetext"), `${volumeBefore - 1} percent`);
-    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), positionBefore + 1, "volume arrow keys must not trigger classic-player seek shortcuts");
+    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), 11, "volume arrow keys must not trigger classic-player seek shortcuts");
     await page.locator("#play-button").focus();
     await page.keyboard.press("Space");
     await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
@@ -330,6 +381,8 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.locator("#play-button").evaluate(button => button === document.activeElement), true);
     const mobileSize = await page.locator("#play-button").boundingBox();
     assert.ok(mobileSize.width >= 44 && mobileSize.height >= 44);
+    const skinSelectSize = await page.locator("#skin-select").boundingBox();
+    assert.ok(skinSelectSize.width >= 44 && skinSelectSize.height >= 44, "the native skin picker must retain a 44px touch target at normal text size");
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
     assert.equal(overflow, false);
     // A deterministic ZIP containing PLEDIT.TXT exercises real Webamp parsing and IndexedDB bytes.
@@ -400,7 +453,8 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.evaluate(() => typeof window.__ipad), "undefined");
     const meta = JSON.parse(readFileSync(join(outdir, "metafile.json"), "utf8"));
     assert.equal(Object.keys(meta.inputs).some(input => /apps\/desktop\/|node_modules\/electron\//.test(input)), false);
-    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings keyboard focus, Escape, paste and Spotify configuration", "saved link persistence after reload", "touch and keyboard transport", "classic playlist keyboard menus, import, selection and ordering", "submenu focus recovery and menu ownership", "playlist readouts without bitmap glyph noise", "native file import contract", "spoken playback position and volume", "range keyboard isolation from classic shortcuts", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion and focus recovery", "split-view and 200% text no horizontal overflow or clipped controls", "reduced motion", "no JS exceptions"] };
+    assert.deepEqual(errors, [], "split-view, large-text, and production startup must not introduce JavaScript exceptions");
+    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings keyboard focus, Escape, paste and Spotify configuration", "saved link persistence after reload", "touch and keyboard transport", "classic playlist keyboard menus, import, selection and ordering", "submenu focus recovery and menu ownership", "playlist readouts without bitmap glyph noise", "native file import contract and partial failure reporting", "spoken playback position and volume", "focused slider updates, drag and pending command protection, and rejected seek recovery", "range keyboard isolation from classic shortcuts", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion and focus recovery", "split-view and 200% text no horizontal overflow or clipped controls", "reduced motion", "no JS exceptions"] };
     writeFileSync(join(artifacts, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));
     await context.tracing.stop();
