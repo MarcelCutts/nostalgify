@@ -159,7 +159,6 @@ final class NativePlayback {
         if provider == "spotify" {
             // Never start a second source while the old source might still be playing.
             try await spotify.pauseBeforeProviderSwitch()
-            spotify.suspend()
             try local.setActive(true)
         } else {
             local.pauseBeforeProviderSwitch()

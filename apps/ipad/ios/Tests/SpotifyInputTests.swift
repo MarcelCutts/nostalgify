@@ -213,12 +213,99 @@ final class SpotifyAuthorizationIntentTests: XCTestCase {
 
 final class SpotifyRecoveryTests: XCTestCase {
     @MainActor
-    func testConfirmedPauseSurvivesSuspensionAndFailedTransportRecovery() async throws {
+    func testRetiredPlayerDelegateCannotChangeReplacementConnection() async throws {
+        for replaceRemote in [false, true] {
+            let f = try SpotifyRecoveryFixture()
+            defer { f.cleanup() }
+            f.establish(paused: true, position: 10_000)
+            let old = f.remote
+            // A queued SDK callback can retain the delegate after its weak API
+            // property is cleared. Keep that exact receiver alive through reconnect.
+            let retiredDelegate = try XCTUnwrap(old.api.delegate)
+            if replaceRemote {
+                old.disconnectStaysConnected = true
+                try f.service.connect()
+                XCTAssertFalse(f.remote === old)
+            } else {
+                f.service.suspend()
+                f.service.resume()
+                XCTAssertTrue(f.remote === old)
+            }
+            f.establish(paused: false, position: 80_000, trackURI: "spotify:track:current")
+            retiredDelegate.playerStateDidChange(SpotifyTestState(paused: true, position: 10_000))
+            let snapshot = f.service.snapshot()
+            XCTAssertEqual(snapshot["state"] as? String, "playing")
+            XCTAssertEqual((snapshot["track"] as? [String: Any])?["id"] as? String, "spotify:track:current")
+            XCTAssertGreaterThan(snapshot["position"] as? Double ?? 0, 79)
+            f.service.disconnect()
+            await assertPauseUnconfirmed(f.service)
+        }
+    }
+
+    @MainActor
+    func testExternalPlaybackAfterBackgroundRequiresFreshPause() async throws {
+        for history in ["observed", "handoff", "logout", "configuration"] {
+            let f = try SpotifyRecoveryFixture()
+            defer { f.cleanup() }
+            f.establish(paused: true)
+            if history != "observed" { try await f.service.pauseBeforeProviderSwitch() }
+            if history == "logout" { try f.service.logout() }
+            if history == "configuration" {
+                try f.service.configure(clientId: String(repeating: "b", count: 32), redirectURI: SpotifyInput.redirectURI)
+            }
+            f.service.suspend() // An ordinary app lifecycle event, even after a handoff.
+            // Spotify resumes externally while no App Remote state can be observed.
+            f.remote.api.state = SpotifyTestState(paused: false, position: 31_000)
+            f.service.resume()
+            XCTAssertFalse(f.remote.isConnected)
+            await assertPauseUnconfirmed(f.service)
+            XCTAssertFalse(f.remote.api.state.isPaused)
+        }
+    }
+
+    @MainActor
+    func testBackgroundWithoutSpotifyUseDoesNotBlockFiles() async throws {
+        let f = try SpotifyRecoveryFixture(token: nil)
+        defer { f.cleanup() }
+        f.service.suspend()
+        f.service.resume()
+        try await f.service.pauseBeforeProviderSwitch()
+        let domain = "SpotifyUnusedTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: domain))
+        defer { defaults.removePersistentDomain(forName: domain) }
+        let unconfigured = SpotifyRemoteService(diagnostics: NativeDiagnostics(), defaults: defaults)
+        unconfigured.suspend()
+        unconfigured.resume()
+        try await unconfigured.pauseBeforeProviderSwitch()
+    }
+
+    @MainActor
+    func testBackgroundAfterPauseReplyCannotCompletePendingHandoff() async throws {
+        let f = try SpotifyRecoveryFixture()
+        defer { f.cleanup() }
+        f.establish(paused: false)
+        f.remote.api.delayState = true
+        let read = expectation(description: "Pause confirmation requested")
+        f.remote.api.onStateRead = { read.fulfill() }
+        let pause = Task { @MainActor in try await f.service.pauseBeforeProviderSwitch() }
+        await fulfillment(of: [read], timeout: 1)
+        f.remote.api.completeState(SpotifyTestState(paused: true, position: 30_000))
+        // The reply has resumed the continuation, but the actor has not yet
+        // returned to the handoff. A lifecycle event must invalidate that reply.
+        f.service.suspend()
+        do { try await pause.value; XCTFail("A lifecycle gap must invalidate an in-flight handoff") }
+        catch let error as NativeFailure { XCTAssertEqual(error.code, "spotify_pause_unconfirmed") }
+        f.service.resume()
+        await assertPauseUnconfirmed(f.service)
+    }
+
+    @MainActor
+    func testConfirmedProviderHandoffSurvivesFailedTransportRecovery() async throws {
         let f = try SpotifyRecoveryFixture()
         defer { f.cleanup() }
         f.establish(paused: false)
         try await f.service.pauseBeforeProviderSwitch()
-        f.service.suspend()
+        XCTAssertFalse(f.remote.isConnected, "A successful handoff retires the transport with its confirmed pause")
         f.service.resume()
         f.service.appRemote(f.remote, didFailConnectionAttemptWithError: nil)
         // This is the same gate NativePlayback uses before enabling Files.
@@ -235,7 +322,7 @@ final class SpotifyRecoveryTests: XCTestCase {
         f.remote.api.onStateRead = { read.fulfill() }
         let pause = Task { @MainActor in try await f.service.pauseBeforeProviderSwitch() }
         await fulfillment(of: [read], timeout: 1)
-        f.service.playerStateDidChange(SpotifyTestState(paused: false, position: 31_000))
+        try XCTUnwrap(f.remote.api.delegate).playerStateDidChange(SpotifyTestState(paused: false, position: 31_000))
         f.remote.api.completeState(SpotifyTestState(paused: true, position: 30_000))
         do { try await pause.value; XCTFail("A stale paused response must not approve starting Files") }
         catch let error as NativeFailure { XCTAssertEqual(error.code, "spotify_pause_unconfirmed") }
@@ -378,7 +465,7 @@ final class SpotifyRecoveryTests: XCTestCase {
         XCTAssertEqual((f.service.snapshot()["track"] as? [String: Any])?["id"] as? String, "spotify:track:fixture")
         XCTAssertEqual(f.service.snapshot()["state"] as? String, "playing")
         XCTAssertEqual(f.service.snapshot()["error"] as? String, "spotify_command_failed")
-        f.service.playerStateDidChange(SpotifyTestState(paused: false, position: 45_000))
+        try XCTUnwrap(f.remote.api.delegate).playerStateDidChange(SpotifyTestState(paused: false, position: 45_000))
         XCTAssertTrue(f.service.snapshot()["error"] is NSNull)
         XCTAssertEqual(f.service.snapshot()["message"] as? String, "")
     }
@@ -429,7 +516,7 @@ final class SpotifyRecoveryTests: XCTestCase {
         f.remote.api.onStateRead = { read.fulfill() }
         let seek = Task { @MainActor in try await f.service.command("seek", arg: 120) }
         await fulfillment(of: [read], timeout: 1)
-        f.service.playerStateDidChange(SpotifyTestState(paused: true, position: 121_000))
+        try XCTUnwrap(f.remote.api.delegate).playerStateDidChange(SpotifyTestState(paused: true, position: 121_000))
         f.remote.api.completeState(SpotifyTestState(paused: true, position: 120_000))
         try await seek.value
         XCTAssertEqual(f.service.snapshot()["position"] as? Double, 121)
@@ -517,9 +604,9 @@ private final class SpotifyRecoveryFixture {
     }
 
     func relaunch() { service = SpotifyRemoteService(diagnostics: NativeDiagnostics(), defaults: defaults, dependencies: dependencies) }
-    func establish(paused: Bool, position: Int = 30_000) {
+    func establish(paused: Bool, position: Int = 30_000, trackURI: String = "spotify:track:fixture") {
         remote.connectedValue = true
-        remote.api.state = SpotifyTestState(paused: paused, position: position)
+        remote.api.state = SpotifyTestState(paused: paused, position: position, trackURI: trackURI)
         service.appRemoteDidEstablishConnection(remote)
     }
     func cleanup() { service.disconnect(); service = nil; defaults.removePersistentDomain(forName: domain) }
@@ -588,7 +675,7 @@ private final class SpotifyTestPlayerAPI: NSObject, SPTAppRemotePlayerAPI {
 }
 
 private final class SpotifyTestState: NSObject, SPTAppRemotePlayerState {
-    let track: SPTAppRemoteTrack = SpotifyTestTrack()
+    let track: SPTAppRemoteTrack
     let playbackPosition: Int
     let playbackSpeed: Float = 1
     let isPaused: Bool
@@ -596,12 +683,16 @@ private final class SpotifyTestState: NSObject, SPTAppRemotePlayerState {
     let playbackOptions: SPTAppRemotePlaybackOptions = SpotifyTestOptions()
     let contextTitle = "Fixture"
     let contextURI = URL(string: "spotify:playlist:fixture")!
-    init(paused: Bool, position: Int) { isPaused = paused; playbackPosition = position }
+    init(paused: Bool, position: Int, trackURI: String = "spotify:track:fixture") {
+        isPaused = paused
+        playbackPosition = position
+        track = SpotifyTestTrack(uri: trackURI)
+    }
 }
 
 private final class SpotifyTestTrack: NSObject, SPTAppRemoteTrack {
     let name = "Test track"
-    let uri = "spotify:track:fixture"
+    let uri: String
     let duration: UInt = 180_000
     let artist: SPTAppRemoteArtist = SpotifyTestArtist()
     let album: SPTAppRemoteAlbum = SpotifyTestAlbum()
@@ -610,6 +701,7 @@ private final class SpotifyTestTrack: NSObject, SPTAppRemoteTrack {
     let isPodcast = false
     let isAdvertisement = false
     let imageIdentifier = "fixture"
+    init(uri: String) { self.uri = uri }
 }
 private final class SpotifyTestArtist: NSObject, SPTAppRemoteArtist { let name = "Artist"; let uri = "spotify:artist:fixture" }
 private final class SpotifyTestAlbum: NSObject, SPTAppRemoteAlbum { let name = "Album"; let uri = "spotify:album:fixture" }
