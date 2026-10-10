@@ -239,7 +239,7 @@ final class AppUITests: XCTestCase {
         reveal(clientID)
         clientID.tap()
         clientID.typeText("invalid")
-        XCTAssertEqual(clientID.value as? String, "invalid", "The keyboard must enter the validation input.")
+        waitUntil("The keyboard must enter the validation input.") { clientID.value as? String == "invalid" }
         tap(button("", "Save connection settings"))
         let error = text("Enter the 32-character client ID from your Spotify developer app.")
         XCTAssertTrue(error.waitForExistence(timeout: 10))
@@ -276,9 +276,13 @@ final class AppUITests: XCTestCase {
         let link = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
         reveal(link)
         link.tap()
-        link.typeText("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC")
-        XCTAssertEqual(link.value as? String, "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
-                       "The keyboard must enter the complete Spotify link before saving.")
+        let spotifyURL = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
+        link.typeText(spotifyURL)
+        // WebKit's accessibility value can trail synthesized keyboard input.
+        // Wait for the exact value before saving; never retype or submit a prefix.
+        waitUntil("The keyboard must enter the complete Spotify link before saving.") {
+            link.value as? String == spotifyURL
+        }
         tap(button("", "Save Spotify link"))
         let saved = webView.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Play Spotify track")).firstMatch
         tap(saved)
