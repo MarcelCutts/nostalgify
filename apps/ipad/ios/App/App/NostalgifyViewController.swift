@@ -1,13 +1,33 @@
 import Capacitor
+import WebKit
 #if DEBUG
 import Foundation
 import OSLog
-import WebKit
 #endif
 
 final class NostalgifyViewController: CAPBridgeViewController {
+    private var bootstrapCookiesEnabled = false
+    private var bootstrapHttpEnabled = false
+
+    override func webViewConfiguration(for instanceConfiguration: InstanceConfiguration) -> WKWebViewConfiguration {
+        bootstrapCookiesEnabled = instanceConfiguration.getPluginConfig("CapacitorCookies").getBoolean("enabled", false)
+        bootstrapHttpEnabled = instanceConfiguration.getPluginConfig("CapacitorHttp").getBoolean("enabled", false)
+        return super.webViewConfiguration(for: instanceConfiguration)
+    }
+
+    override func webView(with frame: CGRect, configuration: WKWebViewConfiguration) -> WKWebView {
+        // Capacitor replaces the content controller after webViewConfiguration.
+        // This hook sees its final controller, before the SDK exports its bridge.
+        configuration.userContentController.addUserScript(NativeBridgeBootstrap.installationScript(
+            cookiesEnabled: bootstrapCookiesEnabled, httpEnabled: bootstrapHttpEnabled))
+        return super.webView(with: frame, configuration: configuration)
+    }
+
     override func capacitorDidLoad() {
         bridge?.registerPluginInstance(NostalgifyNativePlugin())
+        // Run after the SDK/plugin exports, before page content. A separate
+        // script also restores prompt if an earlier bootstrap script throws.
+        webView?.configuration.userContentController.addUserScript(NativeBridgeBootstrap.cleanupScript)
         #if DEBUG
         scheduleUITestStartupProbe()
         #endif
@@ -107,4 +127,53 @@ final class NostalgifyViewController: CAPBridgeViewController {
         var playerReady: Bool?
     }
     #endif
+}
+
+/// Capacitor 8.5.3 synchronously prompts for these two native configuration
+/// values at document start, even when both plugins are disabled. Answer them
+/// from the same configuration without entering WebKit's synchronous prompt IPC.
+@MainActor
+enum NativeBridgeBootstrap {
+    static func installationScript(cookiesEnabled: Bool, httpEnabled: Bool) -> WKUserScript {
+        let source = """
+        (() => {
+          'use strict';
+          const originalDescriptor = Object.getOwnPropertyDescriptor(window, 'prompt');
+          // An immutable own property cannot safely be replaced.
+          if (originalDescriptor && !originalDescriptor.configurable &&
+              (!('value' in originalDescriptor) || !originalDescriptor.writable)) return;
+          const originalPrompt = window.prompt;
+          function bootstrapPrompt(message) {
+            if (arguments.length === 1 && typeof message === 'string') {
+              if (message === '{"type":"CapacitorCookies.isEnabled"}') return '\(cookiesEnabled)';
+              if (message === '{"type":"CapacitorHttp"}') return '\(httpEnabled)';
+            }
+            return Reflect.apply(originalPrompt, this, arguments);
+          }
+          Object.defineProperty(window, '__nostalgifyRestoreBootstrapPrompt', {
+            configurable: true,
+            value: () => {
+              if (Object.getOwnPropertyDescriptor(window, 'prompt')?.value === bootstrapPrompt) {
+                if (originalDescriptor) Object.defineProperty(window, 'prompt', originalDescriptor);
+                else delete window.prompt;
+              }
+              delete window.__nostalgifyRestoreBootstrapPrompt;
+            }
+          });
+          // Defining an own data property avoids invoking accessor setters.
+          Object.defineProperty(window, 'prompt', {
+            value: bootstrapPrompt,
+            writable: originalDescriptor && 'value' in originalDescriptor ? originalDescriptor.writable : true,
+            enumerable: originalDescriptor ? originalDescriptor.enumerable : true,
+            configurable: originalDescriptor ? originalDescriptor.configurable : true
+          });
+        })();
+        """
+        return WKUserScript(source: source, injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
+
+    static var cleanupScript: WKUserScript {
+        WKUserScript(source: "window.__nostalgifyRestoreBootstrapPrompt?.();",
+                     injectionTime: .atDocumentStart, forMainFrameOnly: true)
+    }
 }
