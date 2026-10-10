@@ -45,6 +45,7 @@ export async function mountPlayer(host, { target = document.getElementById("app"
   };
 
   const { skins, initial } = await host.initSkins();
+  let availableSkins = skins;
   for (const skin of skins) knownSkins.add(skin.url);
   if (initial) knownSkins.add(initial);
   const ui = (await host.loadUiPrefs()) || {};
@@ -194,6 +195,7 @@ export async function mountPlayer(host, { target = document.getElementById("app"
     webamp.setSkinFromUrl(url);
   });
   host.onSkinsChanged((list) => {
+    availableSkins = list;
     for (const skin of list) knownSkins.add(skin.url);
     eq.updateSkins(list);
     store.dispatch({ type: "SET_AVAILABLE_SKINS", skins: list });
@@ -257,6 +259,9 @@ export async function mountPlayer(host, { target = document.getElementById("app"
     if (!entry) return false;
     const label = ownText(entry);
     const parent = ownText(entry.parentElement?.closest("li.parent"));
+    // Webamp renders Load, separator, Base, then the available skins in order.
+    // Use position rather than names: imported skins may share display labels.
+    const savedSkin = parent === "Skins" ? availableSkins[[...entry.parentElement.children].indexOf(entry) - 3] : null;
     if (parent === "Play" && label === "File..." && host.importFiles) {
       void runUI(() => host.importFiles());
     } else if (parent === "Playback" && playbackMenu[label]) {
@@ -267,6 +272,8 @@ export async function mountPlayer(host, { target = document.getElementById("app"
       void runUI(async () => { await host.selectSkin(null); eq.applyForSkin(null); });
     } else if (parent === "Skins" && entry === entry.parentElement.firstElementChild && label === "Load Skin..." && host.importSkin) {
       chooseSkinFile();
+    } else if (savedSkin?.id && host.selectSkin) {
+      void runUI(() => host.selectSkin(savedSkin.id));
     } else if ((!parent || parent === "Options") && ["Shuffle", "Repeat"].includes(label) && !canUse(label.toLowerCase())) {
       // These options are also exposed in the standalone Options popup.
     } else return false;
