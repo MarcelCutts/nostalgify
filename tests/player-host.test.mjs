@@ -111,7 +111,12 @@ test("shelf add acknowledgement waits for persistence and retries a failed dupli
   const host = { saveShelf(items) { return new Promise((resolve, reject) => saves.push({ items, resolve, reject })); } };
   const shelf = createShelf({ store: {
     getState: () => ({ playlist: { trackOrder } }),
-    dispatch(action) { if (action.type === "ADD_TRACK_FROM_URL") trackOrder.push(action.id); },
+    dispatch(action) {
+      if (action.type === "ADD_TRACK_FROM_URL") trackOrder.push(action.id);
+      if (action.type === "REMOVE_TRACKS") {
+        for (const id of action.ids) { const index = trackOrder.indexOf(id); if (index >= 0) trackOrder.splice(index, 1); }
+      }
+    },
   } }, { host, quietly: fn => fn(), flash() {}, onPlay() {} });
   let finished = false;
   const first = shelf.addItems([entry]);
@@ -134,6 +139,8 @@ test("shelf add acknowledgement waits for persistence and retries a failed dupli
   await removalRejected;
   const retryRemoval = shelf.removeUri(entry.uri);
   assert.equal(saves.length, 4, "retrying an already-removed row still commits its removal");
+  assert.deepEqual(saves[3].items, []);
+  assert.equal(trackOrder.length, 0);
   saves[3].resolve();
   await retryRemoval;
 });

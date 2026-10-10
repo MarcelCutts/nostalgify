@@ -116,7 +116,7 @@ host.canUseClassicControl = command => {
 };
 function renderClassicCapabilities() {
   const controls = [
-    ["#volume, #equalizer-volume", "volume"], ["#position", "seek"],
+    ["#volume, #volume input, #equalizer-volume", "volume"], ["#position, #position input", "seek"],
     ["#next, .playlist-next-button", "next"], ["#previous, .playlist-previous-button", "previous"],
     ["#play, .playlist-play-button", "play"], ["#pause, .playlist-pause-button", "playpause"],
     ["#stop, .playlist-stop-button", "stop"], ["#shuffle", "shuffle"], ["#repeat", "repeat"],

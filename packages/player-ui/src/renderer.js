@@ -178,7 +178,7 @@ export async function mountPlayer(host, { target = document.getElementById("app"
   actionListeners.push((action, quiet, state) => {
     const pl = state.windows.genWindows.playlist;
     if (["TOGGLE_WINDOW", "CLOSE_WINDOW", "WINDOW_SIZE_CHANGED"].includes(action.type)) {
-      host.saveUiPrefs({ playlistOpen: pl.open, playlistExtraHeight: pl.size[1] });
+      void runUI(() => host.saveUiPrefs({ playlistOpen: pl.open, playlistExtraHeight: pl.size[1] }));
     }
   });
 
@@ -200,67 +200,135 @@ export async function mountPlayer(host, { target = document.getElementById("app"
   });
 
   // ---------- intercept buttons Webamp would handle itself ----------
-  // Capture phase on window runs before React's handlers on the root.
-  // The playlist window has its own small transport buttons. They map to the main ones.
+  // Capture phase on window runs before React's handlers on the root. The
+  // built-in menus use DOM labels (Webamp 2.x exposes no menu-action callback).
+  const canUse = command => host.canUseClassicControl?.(command) !== false;
+  async function runUI(callback) {
+    try { await callback(); }
+    catch (error) { flash(error?.message || "That action could not finish. Try again.", 6000); }
+  }
   const TRANSPORT = {
-    next: "next",
-    previous: "previous",
-    play: "play",
-    eject: "eject",
-    "playlist-next-button": "next",
-    "playlist-previous-button": "previous",
-    "playlist-play-button": "play",
-    "playlist-eject-button": "eject",
+    next: "next", previous: "previous", play: "play", pause: "playpause", stop: "stop", eject: "eject",
+    "playlist-next-button": "next", "playlist-previous-button": "previous",
+    "playlist-play-button": "play", "playlist-pause-button": "playpause",
+    "playlist-stop-button": "stop", "playlist-eject-button": "eject",
   };
-  window.addEventListener(
-    "click",
-    (e) => {
-      if (!(e.target instanceof Element)) return;
-      if (host.importFiles && e.target.closest("#playlist-add-menu .add-file, #playlist-add-menu .add-dir")) {
-        e.stopPropagation();
-        e.preventDefault();
-        void host.importFiles();
-        return;
-      }
-      if (e.target.closest("#equalizer-button")) {
-        if (eq.canShowPanel()) return;
-        e.stopPropagation();
-        e.preventDefault();
-        return;
-      }
-      const el = e.target.closest(
-        "#next, #previous, #eject, #play, .playlist-next-button, .playlist-previous-button, .playlist-play-button, .playlist-eject-button"
-      );
-      if (!el) return;
-      const key = el.id || [...el.classList].find((c) => TRANSPORT[c]);
-      const action = TRANSPORT[key];
-      // With a song loaded, Webamp's own Play works through the media bridge.
-      if (action === "play" && currentTrackId) return;
-      e.stopPropagation();
-      e.preventDefault();
-      if (action === "next") transport("next");
-      else if (action === "previous") transport("previous");
-      else if (action === "play") transport("playOrFallback");
-      else if (action === "eject") void sendCommand("eject");
-    },
-    true
-  );
+  const transportSelector = Object.keys(TRANSPORT).map(key => key.startsWith("playlist-") ? `.${key}` : `#${key}`).join(", ");
+  const CONTROL_COMMANDS = { volume: "volume", "equalizer-volume": "volume", position: "seek", shuffle: "shuffle", repeat: "repeat", ...TRANSPORT };
+  const controlSelector = `${transportSelector}, #volume, #equalizer-volume, #position, #shuffle, #repeat`;
+  const commandForControl = element => CONTROL_COMMANDS[element.id] || [...element.classList].map(key => CONTROL_COMMANDS[key]).find(Boolean);
+  const cancel = event => { event.preventDefault(); event.stopPropagation(); };
 
-  function transport(cmd) {
-    void sendCommand(cmd).then(() => setTimeout(poll, 250));
+  // Disabled ranges must also ignore synthetic input and wheel events. Native
+  // disabled attributes cover focus/default keyboard behavior; capture covers
+  // sprite buttons and controls mounted since the last state render.
+  for (const type of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "input", "change", "wheel"]) {
+    window.addEventListener(type, event => {
+      // Webamp treats wheel gestures anywhere on the main window as volume.
+      if (type === "wheel" && event.target?.closest?.("#main-window") && !canUse("volume")) { cancel(event); return; }
+      const element = event.target?.closest?.(controlSelector);
+      if (element && !canUse(commandForControl(element))) cancel(event);
+    }, { capture: true, passive: false });
   }
 
-  // Classic Winamp keys: Z prev, X play, C pause, V stop, B next.
-  window.addEventListener("keydown", (e) => {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey || e.target?.closest?.("input, textarea, select, button, a[href], [role=button], [role=menu], [role=menuitem], [contenteditable=true]")) return;
-    const k = e.key.toLowerCase();
-    if (k === "z") transport("previous");
-    else if (k === "x") transport(currentTrackId ? "play" : "playOrFallback");
-    else if (k === "c") transport("playpause");
-    else if (k === "v") webamp.stop();
-    else if (k === "b") transport("next");
-    else if (e.key === "ArrowLeft") webamp.seekBackward(5);
-    else if (e.key === "ArrowRight") webamp.seekForward(5);
+  function chooseSkinFile() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = ".wsz,.zip";
+    input.hidden = true;
+    input.addEventListener("change", () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (file) void runUI(() => host.importSkin(file));
+    }, { once: true });
+    input.addEventListener("cancel", () => input.remove(), { once: true });
+    document.body.append(input);
+    input.click();
+  }
+
+  const ownText = element => [...(element?.childNodes || [])].filter(node => node.nodeType === 3).map(node => node.textContent).join("").trim();
+  const playbackMenu = {
+    Previous: ["previous"], Play: ["play"], Pause: ["playpause"], Stop: ["stop"], Next: ["next"],
+    "Back 5 seconds": ["seek", -5], "Fwd 5 seconds": ["seek", 5],
+    "10 tracks back": ["previous", 10], "10 tracks fwd": ["next", 10],
+  };
+  function handleClassicMenu(target) {
+    const entry = target.closest("#webamp-context-menu li:not(.parent):not(.hr)");
+    if (!entry) return false;
+    const label = ownText(entry);
+    const parent = ownText(entry.parentElement?.closest("li.parent"));
+    if (parent === "Play" && label === "File..." && host.importFiles) {
+      void runUI(() => host.importFiles());
+    } else if (parent === "Playback" && playbackMenu[label]) {
+      const [command, amount] = playbackMenu[label];
+      if (command === "seek") seek(amount);
+      else transport(command === "play" ? "playOrFallback" : command, amount);
+    } else if (parent === "Skins" && entry === entry.parentElement.children[2] && label === "<Base Skin>" && host.selectSkin) {
+      void runUI(async () => { await host.selectSkin(null); eq.applyForSkin(null); });
+    } else if (parent === "Skins" && entry === entry.parentElement.firstElementChild && label === "Load Skin..." && host.importSkin) {
+      chooseSkinFile();
+    } else if ((!parent || parent === "Options") && ["Shuffle", "Repeat"].includes(label) && !canUse(label.toLowerCase())) {
+      // These options are also exposed in the standalone Options popup.
+    } else return false;
+    return true;
+  }
+
+  window.addEventListener("click", event => {
+    if (!(event.target instanceof Element)) return;
+    if (host.importFiles && event.target.closest("#playlist-add-menu .add-file, #playlist-add-menu .add-dir, #playlist-list-menu .load-list")) {
+      cancel(event);
+      void runUI(() => host.importFiles());
+      // Let Webamp's click-away listener close its own menu.
+      document.body.click();
+      return;
+    }
+    if (handleClassicMenu(event.target)) {
+      cancel(event);
+      document.body.click();
+      return;
+    }
+    if (event.target.closest("#equalizer-button") && !eq.canShowPanel()) { cancel(event); return; }
+    const element = event.target.closest(controlSelector);
+    if (!element) return;
+    const command = commandForControl(element);
+    if (!canUse(command)) { cancel(event); return; }
+    if (!element.matches(transportSelector)) return;
+    cancel(event);
+    if (command === "eject" && host.importFiles) void runUI(() => host.importFiles());
+    else transport(command === "play" && !currentTrackId ? "playOrFallback" : command);
+  }, true);
+
+  function transport(command, count = 1) {
+    if (!canUse(command)) return;
+    void (async () => {
+      for (let index = 0; index < count && canUse(command); index++) {
+        const result = await sendCommand(command);
+        if (result?.error) break;
+      }
+      setTimeout(poll, 250);
+    })();
+  }
+  function seek(seconds) {
+    if (!canUse("seek")) return;
+    if (seconds < 0) webamp.seekBackward(-seconds);
+    else webamp.seekForward(seconds);
+  }
+
+  // Classic letters still work after a desktop sprite slider retains focus.
+  // Arrow keys on any focused slider retain their native range semantics.
+  window.addEventListener("keydown", event => {
+    const target = event.composedPath?.()[0] || event.target;
+    const range = target?.closest?.('input[type="range"], [role="slider"]');
+    const classicRange = host.platform !== "ios" && range?.closest?.("#webamp");
+    if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || target?.isContentEditable) return;
+    if (range && (!classicRange || event.key.startsWith("Arrow"))) return;
+    if (!classicRange && target?.closest?.("input, textarea, select, button, a[href], [role=button], [role=menu], [role=menuitem], [contenteditable=true]")) return;
+    const commands = { z: "previous", x: currentTrackId ? "play" : "playOrFallback", c: "playpause", v: "stop", b: "next" };
+    const command = commands[event.key.toLowerCase()];
+    if (command) { event.preventDefault(); transport(command); }
+    else if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+      event.preventDefault(); seek(event.key === "ArrowLeft" ? -5 : 5);
+    }
   });
 
   // ---------- provider -> Webamp sync ----------
