@@ -49,7 +49,13 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
   }
 
   function save() {
-    void host.saveShelf(items()).catch(() => flash("Your shelf could not be saved. Try again."));
+    return host.saveShelf(items());
+  }
+
+  // Event handlers cannot return an acknowledgement to a caller. Keep their
+  // failures handled; API callers await save() and decide when to report success.
+  function saveFromUI() {
+    void Promise.resolve().then(save).catch((error) => flash(error?.message || "Your shelf could not be saved. Try again.", 6000));
   }
 
   async function load() {
@@ -64,7 +70,7 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
 
   // Native file imports already carry normalized shelf metadata. Keep the
   // native library authoritative while avoiding duplicate rows on refresh.
-  function addItems(entries) {
+  async function addItems(entries) {
     const have = new Set(items().map((item) => `${item.provider || "spotify"}:${item.uri}`));
     const fresh = entries.filter((item) => {
       if (!item || typeof item.uri !== "string") return false;
@@ -74,16 +80,17 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
       return true;
     });
     fresh.forEach(addItem);
-    if (fresh.length) save();
+    // Persist even when every entry is already visible: a previous save may
+    // have failed after adding its rows, and a retry still needs an acknowledgement.
+    await save();
     return fresh;
   }
 
-  function removeUri(uri) {
+  async function removeUri(uri) {
     const ids = [...byId].filter(([, item]) => item.uri === uri).map(([id]) => id);
-    if (!ids.length) return;
-    quietly(() => store.dispatch({ type: "REMOVE_TRACKS", ids }));
+    if (ids.length) quietly(() => store.dispatch({ type: "REMOVE_TRACKS", ids }));
     for (const id of ids) byId.delete(id);
-    save();
+    await save();
   }
 
   // The main process resolves supported links and supplies safe metadata.
@@ -106,7 +113,7 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
         return true;
       });
       fresh.forEach(addItem);
-      save();
+      await save();
       if (fresh.length === 1) flash("Added " + shelfLabel(fresh[0]));
       else if (fresh.length > 1) flash(`Added ${fresh.length} items`);
       else flash("Already on your shelf");
@@ -146,7 +153,7 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
   function onAction(action, quiet) {
     if (quiet) return;
     if (CHANGES.has(action.type)) {
-      save();
+      saveFromUI();
       return;
     }
     if (action.type === "PLAY_TRACK" && byId.has(action.id)) {
@@ -162,7 +169,11 @@ export function createShelf(webamp, { host = window.nostalgify, quietly, flash, 
   // shells also contain settings/link inputs, which must keep normal editing.
   document.addEventListener("paste", (e) => {
     const target = e.composedPath?.()[0] || e.target;
-    if (e.defaultPrevented || target?.isContentEditable || target?.closest?.("input, textarea, select")) return;
+    const control = target?.closest?.("input, textarea, select");
+    // Webamp ranges can retain focus after dragging; desktop paste remains a
+    // shelf action there. Native shell controls keep their usual editing behavior.
+    const classicRange = host.platform !== "ios" && control?.type === "range" && control.closest?.("#webamp");
+    if (e.defaultPrevented || target?.isContentEditable || (control && !classicRange)) return;
     const text = e.clipboardData && e.clipboardData.getData("text");
     if (text) {
       e.preventDefault();

@@ -53,9 +53,9 @@ test("native shelf retains imported files, omits unavailable Liked Songs, and pl
   shelf.onAction({ type: "PLAY_TRACK", id: rows[0].id }, false);
   await new Promise(setImmediate);
   assert.deepEqual(commands, [["playShelf", local.uri]]);
-  assert.deepEqual(shelf.addItems([local, local]), []);
+  assert.deepEqual(await shelf.addItems([local, local]), []);
   assert.equal(trackOrder.length, 1);
-  shelf.removeUri(local.uri);
+  await shelf.removeUri(local.uri);
   assert.equal(trackOrder.length, 0);
   assert.equal(shelf.isShelfTrack(rows[0].id), false);
 });
@@ -98,4 +98,77 @@ test("shelf paste preserves editable controls and still adds global Spotify link
   assert.equal(prevented, true);
   assert.deepEqual(resolved, [clipboardData.getData()]);
   assert.equal(added.length, 1);
+});
+
+
+test("shelf add acknowledgement waits for persistence and retries a failed duplicate", async (t) => {
+  const original = { window: globalThis.window, document: globalThis.document };
+  globalThis.window = { addEventListener() {} };
+  globalThis.document = { addEventListener() {} };
+  t.after(() => { globalThis.window = original.window; globalThis.document = original.document; });
+  const trackOrder = [], saves = [];
+  const entry = { provider: "spotify", kind: "album", uri: "spotify:album:0123456789abcdefghijkl", title: "Album" };
+  const host = { saveShelf(items) { return new Promise((resolve, reject) => saves.push({ items, resolve, reject })); } };
+  const shelf = createShelf({ store: {
+    getState: () => ({ playlist: { trackOrder } }),
+    dispatch(action) {
+      if (action.type === "ADD_TRACK_FROM_URL") trackOrder.push(action.id);
+      if (action.type === "REMOVE_TRACKS") {
+        for (const id of action.ids) { const index = trackOrder.indexOf(id); if (index >= 0) trackOrder.splice(index, 1); }
+      }
+    },
+  } }, { host, quietly: fn => fn(), flash() {}, onPlay() {} });
+  let finished = false;
+  const first = shelf.addItems([entry]);
+  const rejected = assert.rejects(first, /Storage is full/);
+  first.then(() => { finished = true; }, () => {});
+  await new Promise(setImmediate);
+  assert.equal(trackOrder.length, 1);
+  assert.equal(finished, false, "visible rows do not acknowledge an uncommitted save");
+  saves[0].reject(new Error("Storage is full"));
+  await rejected;
+  const retry = shelf.addItems([entry]);
+  assert.equal(saves.length, 2, "a duplicate retries the previously rejected save");
+  assert.deepEqual(saves[1].items, [entry]);
+  saves[1].resolve();
+  assert.deepEqual(await retry, []);
+  assert.equal(trackOrder.length, 1, "retry never duplicates the visible entry");
+  const removal = shelf.removeUri(entry.uri);
+  const removalRejected = assert.rejects(removal, /Storage is full/);
+  saves[2].reject(new Error("Storage is full"));
+  await removalRejected;
+  const retryRemoval = shelf.removeUri(entry.uri);
+  assert.equal(saves.length, 4, "retrying an already-removed row still commits its removal");
+  assert.deepEqual(saves[3].items, []);
+  assert.equal(trackOrder.length, 0);
+  saves[3].resolve();
+  await retryRemoval;
+});
+
+test("paste on a focused desktop classic range still adds a shelf link", async (t) => {
+  const original = { window: globalThis.window, document: globalThis.document };
+  let paste;
+  globalThis.window = { addEventListener() {} };
+  globalThis.document = { addEventListener(name, listener) { if (name === "paste") paste = listener; } };
+  t.after(() => { globalThis.window = original.window; globalThis.document = original.document; });
+  const resolved = [], trackOrder = [];
+  const host = {
+    platform: "darwin", saveShelf: async () => {},
+    resolveLinks: async text => { resolved.push(text); return [{ uri: "spotify:album:0123456789abcdefghijkl", title: "Album" }]; },
+  };
+  createShelf({ store: {
+    getState: () => ({ playlist: { trackOrder } }),
+    dispatch(action) { if (action.type === "ADD_TRACK_FROM_URL") trackOrder.push(action.id); },
+  } }, { host, quietly: fn => fn(), flash() {}, onPlay() {} });
+  const range = { type: "range", closest: selector => selector === "#webamp" ? {} : range };
+  let prevented = false;
+  paste({ target: range, clipboardData: { getData: () => "spotify:album:0123456789abcdefghijkl" }, preventDefault() { prevented = true; } });
+  await new Promise(setImmediate);
+  assert.equal(prevented, true);
+  assert.equal(resolved.length, 1);
+  assert.equal(trackOrder.length, 1);
+  host.platform = "ios";
+  paste({ target: range, clipboardData: { getData: () => "ignored" }, preventDefault() { assert.fail("native range paste was intercepted"); } });
+  await new Promise(setImmediate);
+  assert.equal(resolved.length, 1);
 });

@@ -2,7 +2,7 @@ import { Capacitor, registerPlugin } from "@capacitor/core";
 import { mountPlayer } from "@nostalgify/player-ui";
 import { createNativeHost } from "./bridge.js";
 import { attachSkinStore } from "./skins.js";
-import { LOCAL_URI } from "../../../packages/contracts/src/player.js";
+import { LOCAL_URI, commandCapability } from "../../../packages/contracts/src/player.js";
 import { createMockPlugin } from "./mock.js";
 import { safeWebError } from "./diagnostics.js";
 import { installSkinAccessibility } from "./skin-accessibility.js";
@@ -19,6 +19,7 @@ window.nostalgify = host;
 let mounted;
 let library = [];
 let savedShelf = [];
+let localPlaylistExcluded = new Set();
 let selectedSource = "spotify";
 let playerWidth = 275;
 let playerHeight = 377;
@@ -103,13 +104,39 @@ function renderState(state) {
   const status = demo ? `Development demo · ${playbackStatus.toLowerCase()}; no audio plays.` : state.message || playbackStatus;
   // Native progress events arrive frequently; unchanged live-region writes can interrupt VoiceOver.
   setText("player-status", status);
-  // The authentic controls use the same capability gates as the accessible controls.
-  for (const [selector, enabled] of [["#volume", caps.canSetVolume], ["#position", caps.canSeek], ["#next", caps.canSkipNext], ["#previous", caps.canSkipPrevious], ["#shuffle", caps.canShuffle], ["#repeat", caps.canRepeat]]) {
-    const element = document.querySelector(`#webamp ${selector}`);
-    if (element) { element.style.pointerEvents = enabled ? "" : "none"; element.style.opacity = enabled ? "" : ".45"; element.setAttribute("aria-disabled", String(!enabled)); }
-  }
+  renderClassicCapabilities();
   if (state.track?.id !== lastTrack) { lastTrack = state.track?.id; renderLists(); }
 }
+// Read cached state at activation time as well as rendering, so a newly opened
+// compact window cannot send unavailable commands between native snapshots.
+host.canUseClassicControl = command => {
+  const state = host.getCachedState();
+  const capability = commandCapability(command);
+  if (capability) return state.capabilities[capability] && (command !== "seek" || Boolean(state.track));
+  if (["play", "playOrFallback"].includes(command)) return state.running && (state.provider !== "local" || Boolean(state.track) || library.length > 0);
+  if (["pause", "playpause", "stop"].includes(command)) return state.running && Boolean(state.track);
+  return true;
+};
+function renderClassicCapabilities() {
+  const controls = [
+    ["#volume, #volume input, #equalizer-volume", "volume"], ["#position, #position input", "seek"],
+    ["#next, .playlist-next-button", "next"], ["#previous, .playlist-previous-button", "previous"],
+    ["#play, .playlist-play-button", "play"], ["#pause, .playlist-pause-button", "playpause"],
+    ["#stop, .playlist-stop-button", "stop"], ["#shuffle", "shuffle"], ["#repeat", "repeat"],
+  ];
+  for (const [selector, command] of controls) {
+    const enabled = host.canUseClassicControl(command);
+    for (const element of $("app").querySelectorAll(selector)) {
+      const disabled = String(!enabled);
+      if (element.getAttribute("aria-disabled") !== disabled) element.setAttribute("aria-disabled", disabled);
+      element.style.pointerEvents = enabled ? "" : "none";
+      element.style.opacity = enabled ? "" : ".45";
+      if ("disabled" in element && element.disabled !== !enabled) element.disabled = !enabled;
+    }
+  }
+}
+new MutationObserver(renderClassicCapabilities).observe($("app"), { childList: true, subtree: true });
+
 function resizePlayer() {
   const available = Math.max(240, $("player-viewport").clientWidth - 38);
   const scale = Math.min(1.7, available / playerWidth);
@@ -149,14 +176,23 @@ host.importFiles = async () => {
   if (skipped) showError(new Error(`Imported ${imported.length} ${imported.length === 1 ? "file" : "files"}. ${skipped} ${skipped === 1 ? "file could" : "files could"} not be imported. Choose unprotected audio downloaded in Files and try again.`));
   return imported;
 };
-const nativeSaveShelf = host.saveShelf;
 host.saveShelf = async items => {
-  // The native library owns local files. Preferences hold Spotify shortcuts only.
+  // Playlist membership is separate from file ownership. Existing libraries
+  // without exclusion metadata start with every local file on the playlist.
   savedShelf = items.filter(item => item.provider !== "local" && !item.uri?.startsWith("local:"));
-  await nativeSaveShelf(savedShelf);
+  const included = new Set(items.filter(item => item.uri?.startsWith("local:")).map(item => item.uri));
+  localPlaylistExcluded = new Set(library.map(item => item.uri || `local:${item.id}`).filter(uri => !included.has(uri)));
+  // One acknowledged patch commits links and membership together.
+  const result = await host.savePreferences({ shelf: savedShelf, localPlaylistExcluded: [...localPlaylistExcluded] });
   renderLists();
+  return result;
 };
-host.loadShelf = async () => [...savedShelf, ...library.map(localShelfItem)];
+host.loadShelf = async () => {
+  const preferences = await host.getPreferences();
+  localPlaylistExcluded = new Set((Array.isArray(preferences.localPlaylistExcluded) ? preferences.localPlaylistExcluded : []).filter(uri => typeof uri === "string" && LOCAL_URI.test(uri)));
+  return [...savedShelf, ...visibleLocalItems()];
+};
+const visibleLocalItems = () => library.map(localShelfItem).filter(item => !localPlaylistExcluded.has(item.uri));
 const parseLinks = host.resolveLinks;
 host.resolveLinks = async text => {
   if (LOCAL_URI.test(text)) return library.filter(item => item.uri === text).map(localShelfItem);
@@ -167,12 +203,14 @@ async function refreshLibrary() {
   const previous = library;
   library = await host.listAudio();
   if (mounted) {
+    // Add new library entries before persisting removals, so they cannot be
+    // mistaken for user exclusions while reconciling a changed native library.
+    await mounted.shelf.addItems(visibleLocalItems());
     const retained = new Set(library.map(item => item.uri || `local:${item.id}`));
     for (const item of previous) {
       const uri = item.uri || `local:${item.id}`;
       if (!retained.has(uri)) await mounted.shelf.removeUri(uri);
     }
-    await mounted.shelf.addItems(library.map(localShelfItem));
   }
   renderLists();
   updatePlayAvailability(host.getCachedState());
@@ -210,13 +248,21 @@ function renderList(container, items, emptyText) {
     play.addEventListener("click", () => action(() => host.command("playShelf", item.uri), play));
     const remove = document.createElement("button"); remove.className = "remove-item"; remove.textContent = "×"; remove.setAttribute("aria-label", `Remove ${item.title}`);
     play.dataset.uri = remove.dataset.uri = item.uri;
-    if (item.uri === focusURI) nextFocus = focusAction === "remove-item" ? remove : play;
+    const add = item.provider === "local" && localPlaylistExcluded.has(item.uri) ? document.createElement("button") : null;
+    if (add) {
+      add.className = "add-item"; add.textContent = "+"; add.dataset.uri = item.uri;
+      add.setAttribute("aria-label", `Add ${item.title} to playlist`);
+      add.addEventListener("click", () => action(() => mounted.shelf.addItems([item]), add));
+    }
+    if (item.uri === focusURI) nextFocus = focusAction === "remove-item" ? remove : focusAction === "add-item" && add ? add : play;
     remove.addEventListener("click", () => action(async () => {
       if (item.provider === "local") { await host.removeAudio(item.uri.slice(6)); await refreshLibrary(); }
       await mounted?.shelf.removeUri?.(item.uri);
       if (item.provider !== "local" && !mounted?.shelf.removeUri) await host.saveShelf(savedShelf.filter(saved => saved.uri !== item.uri));
     }, remove));
-    row.append(play, remove); container.append(row);
+    row.append(play);
+    if (add) row.append(add);
+    row.append(remove); container.append(row);
   }
   if (focused) (nextFocus || container.children[Math.min(focusIndex, items.length - 1)]?.querySelector("button"))?.focus({ preventScroll: true });
 }
