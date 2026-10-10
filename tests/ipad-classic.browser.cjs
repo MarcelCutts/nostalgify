@@ -23,6 +23,15 @@ async function settle(page) {
     await new Promise(requestAnimationFrame);
   });
 }
+async function waitForAsync(page, predicate, argument) {
+  const deadline = Date.now() + 15000;
+  for (;;) {
+    const satisfied = await page.evaluate(predicate, argument);
+    if (satisfied === true) return;
+    assert.ok(Date.now() < deadline, "Asynchronous browser condition did not become true within 15 seconds");
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+}
 async function playlistURLs(page) {
   return page.evaluate(() => {
     const state = window.__webamp.store.getState();
@@ -221,11 +230,28 @@ async function menuItem(page, parent, label) {
     await skinItem.click();
     const chooser = await chooserPromise;
     await chooser.setFiles({ name: "Classic regression.wsz", mimeType: "application/zip", buffer: skin });
-    await page.waitForFunction(async () => /^[0-9a-f]{64}$/.test((await window.__ipad.host.getPreferences()).skinId || ""));
+    await waitForAsync(page, async () => /^[0-9a-f]{64}$/.test((await window.__ipad.host.getPreferences()).skinId || ""));
     assert.deepEqual(await page.evaluate(() => window.__classicCalls.importSkin), [{ name: "Classic regression.wsz", size: skin.length }], "classic skin import stores the selected bytes through the host");
+    await settle(page);
+    const importedSkinID = await page.evaluate(async () => (await window.__ipad.host.getPreferences()).skinId);
+    const importedSkinOption = { value: importedSkinID, label: "Classic regression" };
+    assert.equal(await page.locator("#skin-select").inputValue(), importedSkinID, "classic skin import immediately selects its committed choice in the shell picker");
+    assert.deepEqual(await page.locator("#skin-select option").evaluateAll(options => options.map(option => ({ value: option.value, label: option.textContent }))), [{ value: "", label: "Classic Winamp" }, importedSkinOption], "classic skin import immediately adds its saved id and name to the shell picker");
     await (await menuItem(page, "Skins", "<Base Skin>")).click();
-    await page.waitForFunction(async () => (await window.__ipad.host.getPreferences()).skinId === null);
+    await waitForAsync(page, async () => (await window.__ipad.host.getPreferences()).skinId === null);
     assert.equal(await page.evaluate(() => window.__classicCalls.selectSkin.at(-1)), null, "classic default selection uses the persisted host choice");
+    await settle(page);
+    assert.equal(await page.locator("#skin-select").inputValue(), "", "classic default selection immediately resets the shell picker");
+    assert.deepEqual(await page.locator("#skin-select option").evaluateAll(options => options.map(option => ({ value: option.value, label: option.textContent }))), [{ value: "", label: "Classic Winamp" }, importedSkinOption], "switching to the base skin retains the imported skin option before reload");
+    await (await menuItem(page, "Skins", "Classic regression")).click();
+    await waitForAsync(page, async id => (await window.__ipad.host.getPreferences()).skinId === id, importedSkinID);
+    await settle(page);
+    assert.equal(await page.evaluate(() => window.__classicCalls.selectSkin.at(-1)), importedSkinID, "the named classic skin menu selects the saved skin through its host");
+    assert.equal(await page.locator("#skin-select").inputValue(), importedSkinID, "the named classic skin menu immediately synchronizes the shell picker with its committed choice");
+    await (await menuItem(page, "Skins", "<Base Skin>")).click();
+    await waitForAsync(page, async () => (await window.__ipad.host.getPreferences()).skinId === null);
+    await settle(page);
+    assert.equal(await page.locator("#skin-select").inputValue(), "", "returning from a named skin to the base skin synchronizes the picker before reload");
 
     console.log("classic regression: local playlist membership");
     await page.evaluate(uri => {
@@ -234,7 +260,7 @@ async function menuItem(page, parent, label) {
       if (id == null) throw new Error("Imported track is absent from the playlist");
       store.dispatch({ type: "REMOVE_TRACKS", ids: [id] });
     }, localURI);
-    await page.waitForFunction(async uri => (await window.__ipad.host.getPreferences()).localPlaylistExcluded?.includes(uri), localURI);
+    await waitForAsync(page, async uri => (await window.__ipad.host.getPreferences()).localPlaylistExcluded?.includes(uri), localURI);
     assert.equal((await playlistURLs(page)).includes(`shelf:${localURI}`), false);
     assert.deepEqual(await page.evaluate(() => window.__classicCalls.removeAudio), [], "classic playlist deletion never deletes native audio");
     assert.equal(await page.locator("#local-library .music-play").count(), 1, "Files continues to show the removed playlist member");
@@ -254,7 +280,7 @@ async function menuItem(page, parent, label) {
     assert.equal(await page.evaluate(async () => (await window.__ipad.host.listAudio()).length), 1, "playlist removal preserves native library records after reload");
     await page.locator("#local-source").click();
     await page.locator("#local-library").getByRole("button", { name: /^Add .* to playlist$/ }).click();
-    await page.waitForFunction(async uri => !(await window.__ipad.host.getPreferences()).localPlaylistExcluded?.includes(uri), localURI);
+    await waitForAsync(page, async uri => !(await window.__ipad.host.getPreferences()).localPlaylistExcluded?.includes(uri), localURI);
     assert.ok((await playlistURLs(page)).includes(`shelf:${localURI}`), "the explicit Files action re-adds an excluded playlist member");
     assert.deepEqual(await page.evaluate(async () => (await window.__ipad.host.getPreferences()).shelf), savedSpotify);
     assert.deepEqual(await page.evaluate(() => window.__classicCalls.removeAudio), []);
@@ -262,6 +288,92 @@ async function menuItem(page, parent, label) {
     assert.equal(await page.locator("#error-message").isVisible(), false);
     const unsupportedErrors = await page.evaluate(async () => (await window.__ipad.host.getDiagnostics()).web.filter(event => event.event === "failure" && event.code === "unsupported"));
     assert.deepEqual(unsupportedErrors, [], "unavailable controls do not emit unsupported-operation diagnostics");
+    console.log("classic regression: imported library survives a rejected shelf save");
+    await settle(page);
+    const failedImport = await page.evaluate(async () => {
+      const { host, plugin } = window.__ipad;
+      const before = await host.listAudio(), setPreferences = plugin.setPreferences;
+      plugin.setPreferences = async () => {
+        plugin.setPreferences = setPreferences;
+        throw Object.assign(new Error("fixture shelf preference failure"), { code: "preferences_too_large" });
+      };
+      let rejection = null;
+      try { await host.importFiles(); }
+      catch (error) { rejection = { code: error.code, message: error.message }; }
+      return {
+        rejection,
+        before: before.map(item => item.uri),
+        after: (await host.listAudio()).map(item => item.uri),
+        visible: [...document.querySelectorAll("#local-library .music-play")].map(button => button.dataset.uri),
+      };
+    });
+    const preferencesTooLarge = "There are too many saved settings. Remove some saved links and try again.";
+    assert.deepEqual(failedImport.rejection, { code: "preferences_too_large", message: preferencesTooLarge }, "the import promise preserves the specific shelf-save rejection");
+    assert.equal(failedImport.after.length, failedImport.before.length + 1, "native import still adds its file when saving playlist preferences fails");
+    assert.deepEqual(failedImport.visible, failedImport.after, "Files refreshes immediately to show every imported native record despite the rejected shelf save");
+    assert.equal(await page.locator("#error-message").textContent(), preferencesTooLarge, "the specific preference error remains visible after refreshing Files");
+    assert.equal(await page.locator("#error-message").isVisible(), true);
+    console.log("classic regression: deleted native file stays removed after a rejected shelf save");
+    const deletedURI = failedImport.after.find(uri => !failedImport.before.includes(uri));
+    assert.ok((await playlistURLs(page)).includes(`shelf:${deletedURI}`), "the deletion fixture starts with a real classic playlist member");
+    await page.evaluate(() => {
+      const plugin = window.__ipad.plugin, setPreferences = plugin.setPreferences;
+      plugin.setPreferences = async () => {
+        plugin.setPreferences = setPreferences;
+        throw Object.assign(new Error("fixture deletion preference failure"), { code: "preferences_too_large" });
+      };
+    });
+    await page.locator(`#local-library .remove-item[data-uri="${deletedURI}"]`).click();
+    await page.waitForFunction(uri => ![...document.querySelectorAll("#local-library .music-play")].some(button => button.dataset.uri === uri), deletedURI);
+    await settle(page);
+    assert.deepEqual(await page.evaluate(async () => (await window.__ipad.host.listAudio()).map(item => item.uri)), failedImport.before, "the explicit Files deletion removes only its native audio record despite the preference failure");
+    assert.equal((await playlistURLs(page)).includes(`shelf:${deletedURI}`), false, "a failed save while refreshing retained files must not leave the deleted file on the classic playlist");
+    assert.equal(await page.locator("#error-message").textContent(), preferencesTooLarge, "native deletion preserves the first specific preference error");
+    assert.equal(await page.locator("#error-message").isVisible(), true);
+    const deletionRefreshReads = await page.evaluate(() => window.__classicLibraryReads);
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.waitForFunction(reads => window.__classicLibraryReads > reads, deletionRefreshReads);
+    await settle(page);
+    assert.equal((await playlistURLs(page)).includes(`shelf:${deletedURI}`), false, "subsequent library refresh cannot retain or resurrect the deleted classic row");
+    assert.deepEqual(await page.locator("#local-library .music-play").evaluateAll(buttons => buttons.map(button => button.dataset.uri)), failedImport.before, "Files remains synchronized after another library refresh");
+    console.log("classic regression: every vanished file is reconciled despite repeated save failures");
+    const removedTogether = await page.evaluate(async () => {
+      const { host } = window.__ipad;
+      await host.importFiles();
+      const items = await host.listAudio();
+      // Model two native deletions before the shell receives its foreground
+      // refresh; direct native calls leave the shell's cached library intact.
+      for (const item of items) await host.removeAudio(item.id);
+      return items.map(item => item.uri);
+    });
+    assert.equal(removedTogether.length, 2, "the repeated-failure fixture removes two native files together");
+    for (const uri of removedTogether) assert.ok((await playlistURLs(page)).includes(`shelf:${uri}`), "both vanished files initially remain in the cached classic playlist");
+    await page.evaluate(() => {
+      const plugin = window.__ipad.plugin, setPreferences = plugin.setPreferences;
+      window.__classicPreferenceFailures = 0;
+      window.__restorePreferenceSaves = () => { plugin.setPreferences = setPreferences; };
+      plugin.setPreferences = async () => {
+        window.__classicPreferenceFailures++;
+        throw Object.assign(new Error("fixture repeated preference failure"), { code: window.__classicPreferenceFailures === 1 ? "preferences_too_large" : "invalid_preferences" });
+      };
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await page.waitForFunction(() => window.__classicPreferenceFailures === 3);
+    await page.waitForFunction(() => document.querySelectorAll("#local-library .music-play").length === 0);
+    await settle(page);
+    assert.deepEqual(await page.evaluate(() => window.__ipad.host.listAudio()), [], "both native deletions remain committed");
+    assert.deepEqual((await playlistURLs(page)).filter(url => url.startsWith("shelf:local:")), [], "every vanished classic row is removed even when each membership save rejects");
+    assert.equal(await page.locator("#error-message").textContent(), preferencesTooLarge, "later removal-save errors do not replace the first refresh failure");
+    assert.equal(await page.locator("#error-message").isVisible(), true);
+    const repeatedFailureReads = await page.evaluate(() => {
+      window.__restorePreferenceSaves();
+      return window.__classicLibraryReads;
+    });
+    await page.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    await page.waitForFunction(reads => window.__classicLibraryReads > reads, repeatedFailureReads);
+    await settle(page);
+    assert.deepEqual((await playlistURLs(page)).filter(url => url.startsWith("shelf:local:")), [], "a successful subsequent refresh cannot resurrect either vanished file");
+    assert.equal(await page.locator("#local-library .music-play").count(), 0);
     console.log("classic regression: asynchronous menu failures");
     await page.evaluate(() => {
       const plugin = window.__ipad.plugin, importAudio = plugin.importAudio;
@@ -287,7 +399,7 @@ async function menuItem(page, parent, label) {
     const unhandled = await page.evaluate(async () => (await window.__ipad.host.getDiagnostics()).web.filter(event => event.code === "unhandled_promise"));
     assert.deepEqual(unhandled, [], "rejected menu imports and UI preference saves are handled without unhandled rejections");
     assert.deepEqual(errors, []);
-    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, tests: ["built-in Play > File preserves Spotify shelf", "Playback Next/Previous route to provider", "unavailable main and mini transport, keyboard and compact volume", "normal/compact main-window wheel gates with available local-volume positive control", "native range arrow semantics", "desktop classic range letter shortcuts and paste", "classic skin host import and persistent default", "local playlist exclusion survives refresh/reload and explicit re-add", "specific menu import and UI preference errors without unhandled rejections"] };
+    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, tests: ["built-in Play > File preserves Spotify shelf", "Playback Next/Previous route to provider", "unavailable main and mini transport, keyboard and compact volume", "normal/compact main-window wheel gates with available local-volume positive control", "native range arrow semantics", "desktop classic range letter shortcuts and paste", "classic skin import, default and named selection immediately synchronize the picker", "local playlist exclusion survives refresh/reload and explicit re-add", "successful native import refreshes Files while preserving a rejected shelf-save error", "native deletion removes classic rows despite a preference failure and stays removed after refresh", "specific menu import and UI preference errors without unhandled rejections"] };
     writeFileSync(join(outdir, "result.json"), JSON.stringify(report, null, 2));
     console.log(JSON.stringify(report, null, 2));
     await context.tracing.stop();
