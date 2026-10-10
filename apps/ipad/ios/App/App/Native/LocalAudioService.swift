@@ -172,6 +172,12 @@ final class LocalAudioService {
             guard let self, let item = notification.object as? AVPlayerItem, item === self.player.currentItem else { return }
             self.failed("local_playback_failed", "This audio file could not be played.")
         }
+        observe(AVPlayerItem.timeJumpedNotification) { [weak self] notification in
+            guard let self, let item = notification.object as? AVPlayerItem, item === self.player.currentItem else { return }
+            // Plain seeks used during recovery can settle after their caller
+            // publishes. Reanchor metadata when that actual time jump arrives.
+            self.changed()
+        }
         observe(AVAudioSession.interruptionNotification) { [weak self] note in self?.interrupted(note) }
         observe(AVAudioSession.routeChangeNotification) { [weak self] note in
             guard let self, self.active,
@@ -200,7 +206,7 @@ final class LocalAudioService {
         periodicToken = observedPlayer.addPeriodicTimeObserver(forInterval: CMTime(seconds: 0.5, preferredTimescale: 600), queue: .main) { [weak self, weak observedPlayer] _ in
             Task { @MainActor in
                 guard let self, observedPlayer === self.player else { return }
-                self.changed()
+                self.progressChanged()
             }
         }
         rateObservation = observedPlayer.observe(\.timeControlStatus, options: [.new]) { [weak self] observedPlayer, _ in
@@ -430,6 +436,8 @@ final class LocalAudioService {
             if wantsPlayback { cancelPlaybackIntent() } else { try play() }
         case "stop":
             cancelPlaybackIntent(); stopped = true
+            // Stopping takes effect even if the bounded rewind later fails.
+            changed()
             try await seek(0)
         case "seek":
             guard let record = current else { throw NativeFailure(code: "no_track", message: "Choose a local audio file first.") }
@@ -579,34 +587,50 @@ final class LocalAudioService {
         changed()
     }
 
+    private func progressChanged() {
+        guard active else { return }
+        // Previous becomes available after three seconds even without a
+        // transport change. Only write flags whose values actually changed.
+        updateRemoteCommandAvailability()
+        onStateChanged?()
+    }
+
     private func changed() {
         guard active else { return }
         updateRemoteCommandAvailability()
+        // MediaPlayer extrapolates elapsed time from this position/rate anchor.
+        // Refresh it for transport changes and seeks, not each progress tick.
         updateNowPlaying()
         onStateChanged?()
     }
 
     private func updateNowPlaying() {
         guard let record = current else { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil; return }
+        // AVPlayer can retain a requested rate while waiting for data. Only
+        // extrapolate lock-screen progress while its clock is actually moving.
+        let rate: Float = player.timeControlStatus == .playing ? player.rate : 0
         MPNowPlayingInfoCenter.default().nowPlayingInfo = [
             MPMediaItemPropertyTitle: record.name, MPMediaItemPropertyArtist: record.artist,
             MPMediaItemPropertyAlbumTitle: record.album, MPMediaItemPropertyPlaybackDuration: record.duration,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: elapsed,
-            MPNowPlayingInfoPropertyPlaybackRate: player.rate,
+            MPNowPlayingInfoPropertyPlaybackRate: rate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0,
             MPNowPlayingInfoPropertyIsLiveStream: false]
-        MPNowPlayingInfoCenter.default().playbackState = player.rate > 0 ? .playing : (stopped ? .stopped : .paused)
+        MPNowPlayingInfoCenter.default().playbackState = rate > 0 ? .playing : (stopped ? .stopped : .paused)
     }
 
     private func updateRemoteCommandAvailability() {
         let center = MPRemoteCommandCenter.shared()
-        center.playCommand.isEnabled = !library.isEmpty
-        center.pauseCommand.isEnabled = wantsPlayback
-        center.togglePlayPauseCommand.isEnabled = !library.isEmpty
-        center.stopCommand.isEnabled = current != nil && !stopped
-        center.nextTrackCommand.isEnabled = canSkipNext
-        center.previousTrackCommand.isEnabled = canSkipPrevious
-        center.changePlaybackPositionCommand.isEnabled = current != nil
+        func setEnabled(_ command: MPRemoteCommand, _ enabled: Bool) {
+            if command.isEnabled != enabled { command.isEnabled = enabled }
+        }
+        setEnabled(center.playCommand, !library.isEmpty)
+        setEnabled(center.pauseCommand, wantsPlayback)
+        setEnabled(center.togglePlayPauseCommand, !library.isEmpty)
+        setEnabled(center.stopCommand, current != nil && !stopped)
+        setEnabled(center.nextTrackCommand, canSkipNext)
+        setEnabled(center.previousTrackCommand, canSkipPrevious)
+        setEnabled(center.changePlaybackPositionCommand, current != nil)
     }
 
     private func installRemoteCommands() {
