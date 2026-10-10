@@ -4,18 +4,19 @@
 // Production shell with a disposable native bridge fixture. This verifies the
 // accessible control at cold launch; native audio behavior lives in XCTest.
 const assert = require('node:assert/strict');
+const { execFileSync } = require('node:child_process');
 const { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } = require('node:fs');
 const { tmpdir } = require('node:os');
 const { resolve } = require('node:path');
 const { chromium, webkit, devices } = require('playwright');
 
 const root = resolve(__dirname, '..');
-const directory = resolve(root, 'apps/ipad/dist');
+const directory = mkdtempSync(resolve(tmpdir(), 'nostalgify-local-recovery-build-'));
 const engine = process.env.IPAD_SMOKE_BROWSER || process.env.BROWSER || 'chromium';
 assert.ok(['chromium', 'webkit'].includes(engine), 'IPAD_SMOKE_BROWSER must be chromium or webkit');
-assert.ok(existsSync(resolve(directory, 'index.html')), 'Run npm run build:ipad first');
 const artifacts = resolve(process.env.IPAD_SMOKE_ARTIFACT_DIR || mkdtempSync(resolve(tmpdir(), 'nostalgify-local-recovery-')), `local-recovery-${engine}`);
 mkdirSync(artifacts, { recursive: true });
+execFileSync(process.execPath, ['apps/ipad/scripts/build.mjs', '--outdir', directory], { cwd: root, stdio: 'inherit' });
 
 (async () => {
   const browser = await ({ chromium, webkit })[engine].launch({ headless: true });
