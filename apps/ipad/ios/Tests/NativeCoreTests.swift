@@ -310,6 +310,7 @@ final class NativeCoreTests: XCTestCase {
     func testBootstrapForwardsOrdinaryPromptsAndCookieOperations() async throws {
         let fixture = try BootstrapWebViewFixture(cookies: true, http: false)
         defer { fixture.close() }
+        try fixture.show()
         _ = try await fixture.load(in: self)
         let value = try await fixture.evaluate("""
         (() => {
@@ -400,12 +401,15 @@ final class NativeCoreTests: XCTestCase {
 /// The saved-prompt sentinel makes an unpatched bridge fail by a call count,
 /// without entering WebKit's document-start synchronous IPC path in the control.
 @MainActor
-private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, WKUIDelegate {
+private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
     enum Scenario { case normal, missing, throwing, foreignPrompt, foreignGetter }
     enum PromptProperty { case data, ownAccessor, inheritedAccessor, immutableAccessor }
     let webView: WKWebView
     private var report: [String: Any]?
     private var reportReady: XCTestExpectation?
+    private var navigationReady: XCTestExpectation?
+    private var loadingNavigation: WKNavigation?
+    private var navigationResult: Result<Void, Error>?
     private(set) var prompts: [(message: String, defaultText: String?)] = []
 
     init(cookies: Bool, http: Bool, installShim: Bool = true, scenario: Scenario = .normal,
@@ -551,16 +555,65 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         content.add(self, name: "bridge")
         content.add(self, name: "bootstrapResult")
         webView.uiDelegate = self
+        webView.navigationDelegate = self
+    }
+
+    func show() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive })
+        let window = try XCTUnwrap(scene.windows.first { $0.isKeyWindow })
+        webView.frame = window.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // Use the existing host window without replacing its controller or focus.
+        window.addSubview(webView)
+        window.layoutIfNeeded()
+        XCTAssertTrue(webView.window === window)
+        XCTAssertFalse(window.isHidden)
+        XCTAssertGreaterThan(webView.bounds.width, 0)
+        XCTAssertGreaterThan(webView.bounds.height, 0)
     }
 
     func load(in test: XCTestCase) async throws -> [String: Any] {
         report = nil
-        let ready = test.expectation(description: "bootstrap document finished")
+        navigationResult = nil
+        let ready = test.expectation(description: "bootstrap document script completed")
+        let navigated = test.expectation(description: "bootstrap navigation finished")
         reportReady = ready
-        webView.loadHTMLString("<html><body>Bootstrap fixture</body></html>", baseURL: URL(string: "https://bootstrap.invalid/"))
-        await test.fulfillment(of: [ready], timeout: 10)
-        reportReady = nil
+        navigationReady = navigated
+        defer {
+            reportReady = nil
+            navigationReady = nil
+            loadingNavigation = nil
+        }
+        loadingNavigation = try XCTUnwrap(webView.loadHTMLString(
+            "<html><body>Bootstrap fixture</body></html>", baseURL: URL(string: "https://bootstrap.invalid/")))
+        // A document-end message can arrive before WebKit finishes navigation.
+        // Run the post-load prompt check after both events, within one bound.
+        await test.fulfillment(of: [ready, navigated], timeout: 10)
+        try XCTUnwrap(navigationResult).get()
         return try XCTUnwrap(report)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finishNavigation(navigation, result: .success(()))
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finishNavigation(navigation, result: .failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finishNavigation(navigation, result: .failure(error))
+    }
+
+    private func finishNavigation(_ navigation: WKNavigation?, result: Result<Void, Error>) {
+        guard navigation === loadingNavigation, navigationResult == nil, navigationReady != nil else { return }
+        navigationResult = result
+        navigationReady?.fulfill()
+        if case .failure = result, report == nil {
+            reportReady?.fulfill()
+            reportReady = nil
+        }
     }
 
     func evaluate(_ source: String, in test: XCTestCase) async throws -> Any {
@@ -597,7 +650,9 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     func close() {
         webView.stopLoading()
         webView.uiDelegate = nil
+        webView.navigationDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapResult")
+        webView.removeFromSuperview()
     }
 }
