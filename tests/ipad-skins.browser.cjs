@@ -75,9 +75,9 @@ async function failNextSkinSave(page, { failRefresh = false } = {}) {
         background: window.__webamp.store.getState().display.skinPlaylistStyle?.normalbg || "#000000",
       };
       if (failRefresh) {
-        const init = host.initSkins;
-        host.initSkins = async () => {
-          host.initSkins = init;
+        const get = host.getPreferences;
+        host.getPreferences = async () => {
+          host.getPreferences = get;
           window.__skinRefreshFailed = true;
           throw new Error("Injected picker refresh failure");
         };
@@ -102,15 +102,7 @@ async function snapshot(page) {
   return page.evaluate(async () => {
     const host = window.__ipad.host;
     const skins = (await host.initSkins()).skins.map(({ id, name, url }) => ({ id, name, url })).sort((a, b) => a.id.localeCompare(b.id));
-    const records = await new Promise((resolve, reject) => {
-      const request = indexedDB.open("nostalgify-ipad-skins", 1);
-      request.onerror = () => reject(request.error);
-      request.onsuccess = () => {
-        const db = request.result, tx = db.transaction("skins", "readonly"), read = tx.objectStore("skins").getAll();
-        tx.oncomplete = () => { db.close(); resolve(read.result.map(({ id, name, bytes }) => ({ id, name, bytes: Array.from(new Uint8Array(bytes)) }))); };
-        tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
-      };
-    });
+    const records = await window.__skinProbe.readRecords();
     // Bypass the renderer's fetch listener: checking bytes must not choose a skin.
     const blobs = await Promise.all(skins.map(async skin => ({ id: skin.id, bytes: Array.from(new Uint8Array(await (await window.__skinProbe.fetch(skin.url)).arrayBuffer())) })));
     return {
@@ -121,6 +113,15 @@ async function snapshot(page) {
       blobs,
     };
   });
+}
+
+async function persistentSnapshot(page) {
+  // Inspect durable state without calling host.initSkins or consuming its retry.
+  return page.evaluate(async () => ({
+    records: await window.__skinProbe.readRecords(),
+    preferences: await window.__ipad.host.getPreferences(),
+    persisted: (await window.__ipad.plugin.getPreferences()).value,
+  }));
 }
 
 (async () => {
@@ -136,7 +137,38 @@ async function snapshot(page) {
     page.on("dialog", dialog => dialog.dismiss());
     await page.addInitScript(() => {
       const create = URL.createObjectURL.bind(URL), revoke = URL.revokeObjectURL.bind(URL);
-      window.__skinProbe = { fetch: window.fetch.bind(window), created: [], revoked: [] };
+      const getAll = IDBObjectStore.prototype.getAll;
+      const probe = window.__skinProbe = {
+        fetch: window.fetch.bind(window), created: [], revoked: [],
+        documentId: crypto.randomUUID(), readMode: sessionStorage.getItem("skin-read-failure"), reads: 0, abortedReads: 0,
+        readRecords: () => new Promise((resolve, reject) => {
+          const request = indexedDB.open("nostalgify-ipad-skins", 1);
+          request.onerror = () => reject(request.error);
+          request.onsuccess = () => {
+            const db = request.result, tx = db.transaction("skins", "readonly");
+            // Use the real IDB API without the injected application-read abort.
+            const read = getAll.call(tx.objectStore("skins"));
+            tx.oncomplete = () => {
+              db.close();
+              resolve(read.result.map(({ id, name, bytes }) => ({ id, name, bytes: Array.from(new Uint8Array(bytes)) })).sort((a, b) => a.id.localeCompare(b.id)));
+            };
+            tx.onerror = tx.onabort = () => { db.close(); reject(tx.error); };
+          };
+        }),
+      };
+      IDBObjectStore.prototype.getAll = function (...args) {
+        const request = getAll.apply(this, args);
+        if (this.name === "skins" && this.transaction.db.name === "nostalgify-ipad-skins") {
+          probe.reads++;
+          if (probe.readMode === "all" || probe.readMode === "next" || (probe.readMode === "once" && probe.abortedReads === 0) || (probe.readMode === "twice" && probe.abortedReads < 2)) {
+            probe.abortedReads++;
+            // Make storage healthy before the rejected selection's UI catch runs.
+            if (probe.readMode === "next") probe.readMode = null;
+            queueMicrotask(() => this.transaction.abort());
+          }
+        }
+        return request;
+      };
       URL.createObjectURL = blob => {
         const url = create(blob);
         if (blob.type === "application/zip") window.__skinProbe.created.push(url);
@@ -239,11 +271,125 @@ async function snapshot(page) {
     assert.deepEqual(reloaded.records, before.records, "reload restores the original stored bytes");
     assert.deepEqual(reloaded.blobs, before.blobs, "reload creates usable blob URLs for both stored skins");
 
+    const durableBeforeReadFailure = await persistentSnapshot(page);
+    await page.evaluate(() => sessionStorage.setItem("skin-read-failure", "once"));
+    await page.reload();
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    await installOperationProbe(page);
+    assert.equal(await page.evaluate(() => window.__skinProbe.abortedReads), 1, "the first startup read really aborts");
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure, "a transient startup read failure preserves the existing database and preferences");
+    const transientDocument = await page.evaluate(() => window.__skinProbe.documentId);
+    assert.deepEqual(await importSkin(page, original), { ok: true }, "a healthy database allows import retry in the same page after an initial read abort");
+    assert.equal(await page.evaluate(() => window.__skinProbe.documentId), transientDocument, "recovery must not require another reload");
+    await assertVisibleSkin(page, original.background);
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure, "re-import after recovery preserves saved bytes and preferences");
+    assert.equal(await page.locator("#skin-select option").count(), 3);
+    assert.equal(await page.locator("#skin-select").inputValue(), original.id);
+    assert.equal(await page.evaluate(() => window.__skinProbe.created.length), 2, "recovered startup creates one URL per saved skin");
+
+    // Recovery during the last startup read must restore artwork before announcing readiness.
+    await page.evaluate(() => sessionStorage.setItem("skin-read-failure", "twice"));
+    await page.reload();
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    const startupRecovery = await page.evaluate(async () => ({
+      ready: document.documentElement.dataset.playerReady,
+      documentId: window.__skinProbe.documentId,
+      reads: window.__skinProbe.reads,
+      abortedReads: window.__skinProbe.abortedReads,
+      picker: document.getElementById("skin-select").value,
+      selected: (await window.__ipad.host.getPreferences()).skinId,
+      persisted: (await window.__ipad.plugin.getPreferences()).value.skinId,
+      background: window.__webamp.store.getState().display.skinPlaylistStyle?.normalbg || "#000000",
+      renderedBackground: getComputedStyle(document.getElementById("playlist-window")).backgroundColor,
+      loading: window.__webamp.store.getState().display.loading,
+      catalog: window.__webamp.store.getState().settings.availableSkins.map(({ id }) => id).sort(),
+      createdURLs: window.__skinProbe.created.length,
+    }));
+    writeFileSync(join(artifacts, "startup-recovery.json"), JSON.stringify(startupRecovery, null, 2) + "\n");
+    assert.equal(startupRecovery.ready, "true");
+    assert.equal(startupRecovery.reads, 3, "the healthy third startup read follows exactly two aborted reads");
+    assert.equal(startupRecovery.abortedReads, 2);
+    for (const key of ["picker", "selected", "persisted"]) assert.equal(startupRecovery[key], original.id, `${key} restores the saved skin at ready`);
+    assert.equal(startupRecovery.background, original.background, "saved picker and artwork must agree at ready, before any explicit import");
+    assert.equal(startupRecovery.renderedBackground, "rgb(18, 21, 20)", "the saved skin is actually rendered at ready");
+    assert.equal(startupRecovery.loading, false);
+    assert.deepEqual(startupRecovery.catalog, [original.id, selected.id].sort());
+    assert.equal(startupRecovery.createdURLs, 2);
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure, "startup recovery retains all saved bytes and preferences");
+    await installOperationProbe(page);
+    assert.deepEqual(await runOperation(page, "selectSkin", () => page.locator("#skin-select").selectOption(selected.id)), { ok: true });
+    await assertVisibleSkin(page, selected.background);
+    assert.deepEqual(await importSkin(page, original), { ok: true }, "explicit import remains usable after startup recovery");
+    await assertVisibleSkin(page, original.background);
+    assert.equal(await page.evaluate(() => window.__skinProbe.documentId), startupRecovery.documentId, "selection and import recover without another navigation");
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure);
+
+    await page.evaluate(() => sessionStorage.setItem("skin-read-failure", "all"));
+    await page.reload();
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    await installOperationProbe(page);
+    const unavailableDocument = await page.evaluate(() => window.__skinProbe.documentId);
+    for (const skin of [original, rejected]) {
+      assert.deepEqual(await importSkin(page, skin), { ok: false, message: "Skin storage is unavailable." });
+      assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure, "repeated unavailable reads cannot overwrite saved records or preferences");
+    }
+    const readsBeforeSelection = await page.evaluate(() => {
+      window.__skinProbe.readMode = "next";
+      return window.__skinProbe.reads;
+    });
+    assert.deepEqual(await runOperation(page, "selectSkin", () => page.locator("#skin-select").selectOption("")), { ok: false, message: "Skin storage is unavailable." }, "default selection cannot erase an unreadable saved choice");
+    await page.waitForFunction(() => !document.getElementById("error-message").hidden && document.getElementById("error-message").textContent === "Skin storage is unavailable.");
+    const selectionRecovery = await page.evaluate(async () => ({
+      reads: window.__skinProbe.reads,
+      readMode: window.__skinProbe.readMode,
+      picker: document.getElementById("skin-select").value,
+      options: Array.from(document.querySelectorAll("#skin-select option"), option => option.value),
+      selected: (await window.__ipad.host.getPreferences()).skinId,
+      persisted: (await window.__ipad.plugin.getPreferences()).value.skinId,
+      background: window.__webamp.store.getState().display.skinPlaylistStyle?.normalbg || "#000000",
+      renderedBackground: getComputedStyle(document.getElementById("playlist-window")).backgroundColor,
+      catalogCount: window.__webamp.store.getState().settings.availableSkins.length,
+      createdURLs: window.__skinProbe.created.length,
+    }));
+    writeFileSync(join(artifacts, "selection-recovery.json"), JSON.stringify(selectionRecovery, null, 2) + "\n");
+    assert.equal(selectionRecovery.readMode, null, "the failed selection leaves the database healthy for an explicit retry");
+    assert.equal(selectionRecovery.reads, readsBeforeSelection + 1, "selection error rendering must not silently retry the failed read");
+    assert.equal(selectionRecovery.picker, "", "error rendering cannot show an unloaded saved skin in the picker");
+    assert.deepEqual(selectionRecovery.options, [""]);
+    assert.equal(selectionRecovery.selected, original.id);
+    assert.equal(selectionRecovery.persisted, original.id);
+    assert.equal(selectionRecovery.background, "#000000");
+    assert.equal(selectionRecovery.renderedBackground, "rgb(0, 0, 0)");
+    assert.equal(selectionRecovery.catalogCount, 0);
+    assert.equal(selectionRecovery.createdURLs, 0);
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure);
+    const failedReads = await page.evaluate(() => ({ reads: window.__skinProbe.reads, aborted: window.__skinProbe.abortedReads, created: window.__skinProbe.created.length }));
+    assert.ok(failedReads.aborted >= 3, "failed initialization is retried while the database stays unavailable");
+    assert.equal(failedReads.created, 0, "failed reads cannot publish partial skin URLs");
+
+    await page.evaluate(() => sessionStorage.removeItem("skin-read-failure"));
+    assert.deepEqual(await importSkin(page, original), { ok: true }, "user import recovers once the same-page database becomes readable");
+    assert.equal(await page.evaluate(() => window.__skinProbe.documentId), unavailableDocument);
+    await assertVisibleSkin(page, original.background);
+    assert.deepEqual(await persistentSnapshot(page), durableBeforeReadFailure);
+    const recovered = await snapshot(page);
+    assert.equal(recovered.skins.length, 2);
+    assert.deepEqual(recovered.records, before.records);
+    assert.deepEqual(recovered.blobs, before.blobs);
+    const availableSkins = await page.evaluate(() => window.__webamp.store.getState().settings.availableSkins.map(({ id, name, url }) => ({ id, name, url })).sort((a, b) => a.id.localeCompare(b.id)));
+    assert.deepEqual(availableSkins, recovered.skins, "storage recovery republishes the complete catalog to the mounted Webamp");
+    assert.equal(await page.locator("#skin-select").inputValue(), original.id);
+    assert.equal(await page.locator("#skin-select option").count(), 3);
+    await page.evaluate(() => Promise.all(Array.from({ length: 4 }, () => window.__ipad.host.initSkins())));
+    assert.equal(await page.evaluate(() => window.__skinProbe.reads), failedReads.reads + 1, "successful recovery memoizes the read for concurrent later callers");
+    assert.equal(await page.evaluate(() => window.__skinProbe.created.length), 2, "repeated initialization does not duplicate recovered blob URLs");
+    assert.deepEqual((await snapshot(page)).skins, recovered.skins, "memoized initialization keeps recovered URLs stable");
+
     assert.deepEqual(await runOperation(page, "selectSkin", () => page.locator("#skin-select").selectOption("")), { ok: true });
     await assertVisibleSkin(page, "#000000");
     assert.equal((await snapshot(page)).persisted, null);
     assert.deepEqual(errors, [], "rollback and reload produce no uncaught browser exceptions");
-    const result = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["two valid skin imports", "same-byte re-import preference failure preserves records and original URLs", "new import preference failure restores prior visible skin and removes only its new record", "default and saved-skin preference failures restore prior visible skin and picker", "malformed archive recovery", "original save error survives secondary picker refresh failure", "successful selection and IndexedDB reload", "successful default selection"] };
+    const result = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["two valid skin imports", "same-byte re-import preference failure preserves records and original URLs", "new import preference failure restores prior visible skin and removes only its new record", "default and saved-skin preference failures restore prior visible skin and picker", "malformed archive recovery", "original save error survives secondary picker refresh failure", "successful selection and IndexedDB reload", "same-page import retry after transient initial read abort", "two aborted startup reads restore picker, preferences and artwork before ready", "repeated unreadable storage preserves records and preferences until recovery", "selection error rendering does not retry storage or populate an unloaded saved skin", "recovered initialization retains one stable URL per saved skin", "successful default selection"] };
     writeFileSync(join(artifacts, "result.json"), JSON.stringify(result, null, 2) + "\n");
     console.log(JSON.stringify(result, null, 2));
   } catch (error) {

@@ -20,7 +20,7 @@ async function transaction(mode, operation) {
 }
 
 export function attachSkinStore(host) {
-  let skins = [];
+  const skins = [];
   const setListeners = new Set();
   const changeListeners = new Set();
   const byURL = new Map();
@@ -42,11 +42,24 @@ export function attachSkinStore(host) {
   };
   let initialization;
   host.initSkins = () => initialization ||= (async () => {
+    let records;
     try {
-      skins = (await transaction("readonly", store => store.getAll())).map(createSkin);
-      storageLoaded = true;
+      records = await transaction("readonly", store => store.getAll());
+    } catch {
+      // Share pending reads, but let a later user action retry an unavailable
+      // store. Its records must be read before imports can claim ownership.
+      initialization = null;
+      host.recordError("skin_storage_unavailable");
+      return { skins, initial: null };
     }
-    catch { host.recordError("skin_storage_unavailable"); }
+    skins.push(...records.map(createSkin));
+    storageLoaded = true;
+    // Keep initial catalog references live and publish recovery to an already
+    // mounted player. A listener failure must not invalidate the storage read.
+    for (const callback of changeListeners) {
+      try { callback(skins.slice()); }
+      catch { host.recordError("skin_load_failed"); }
+    }
     // Start with the embedded skin, then restore through the same validated selection path.
     return { skins, initial: null };
   })();
@@ -84,7 +97,7 @@ export function attachSkinStore(host) {
   }
   async function selectSkin(id, confirmed, current) {
     await host.initSkins();
-    if (id && !storageLoaded) throw new Error("Skin storage is unavailable.");
+    if (!storageLoaded) throw new Error("Skin storage is unavailable.");
     const previous = (await host.getPreferences()).skinId || null;
     let applied = false;
     try {
