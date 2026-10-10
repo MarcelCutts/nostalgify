@@ -121,16 +121,39 @@ final class AppUITests: XCTestCase {
 
     private func text(_ label: String) -> XCUIElement { webView.staticTexts[label].firstMatch }
 
-    private func reveal(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
+    private func firstSnapshot(in root: XCUIElementSnapshot,
+                               matching predicate: (XCUIElementSnapshot) -> Bool) -> XCUIElementSnapshot? {
+        if predicate(root) { return root }
+        for child in root.children {
+            if let match = firstSnapshot(in: child, matching: predicate) { return match }
+        }
+        return nil
+    }
+
+    @discardableResult
+    private func reveal(_ element: XCUIElement, file: StaticString = #filePath,
+                        line: UInt = #line) -> XCUIElementSnapshot? {
         XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
+        // A scroll moves content within this viewport; it does not resize the
+        // viewport. Read its bounds once, after any rotation/keyboard dismissal.
+        let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
         for _ in 0..<8 {
-            let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
-            let frame = element.frame
+            let snapshot: XCUIElementSnapshot
+            do {
+                snapshot = try element.snapshot()
+            } catch {
+                XCTFail("Could not inspect the control: \(error)", file: file, line: line)
+                return nil
+            }
+            let frame = snapshot.frame
             let center = CGPoint(x: frame.midX, y: frame.midY)
-            if element.isHittable && visible.contains(center) { return }
+            // Avoid an expensive hit-point query for a known offscreen control.
+            // Return this same snapshot for subsequent frame/label assertions.
+            if visible.contains(center) && element.isHittable { return snapshot }
             if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
         }
         XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
+        return nil
     }
 
     private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
@@ -147,12 +170,24 @@ final class AppUITests: XCTestCase {
     }
 
     private var keyboardIsVisible: Bool {
-        let keyboard = app.keyboards.firstMatch
-        guard keyboard.exists else { return false }
-        // iPadOS 27 retains a zero-height keyboard and its offscreen preview
-        // buttons after dismissal. Existence alone does not mean it is open.
-        let visible = keyboard.frame.intersection(app.frame)
-        return !visible.isNull && visible.width > 1 && visible.height > 1
+        // Keep the common no-keyboard path to one cheap existence query.
+        guard app.keyboards.firstMatch.exists else { return false }
+        do {
+            // The keyboard can disappear between separate exists/frame reads.
+            // Inspect a single app snapshot after the check so disappearance is
+            // normal, never a failed lookup of the now-absent keyboard query.
+            let snapshot = try app.snapshot()
+            return firstSnapshot(in: snapshot) { element in
+                guard element.elementType == .keyboard else { return false }
+                // iPadOS 27 retains a zero-height keyboard and offscreen preview
+                // buttons after dismissal. Existence alone does not mean open.
+                let visible = element.frame.intersection(snapshot.frame)
+                return !visible.isNull && visible.width > 1 && visible.height > 1
+            } != nil
+        } catch {
+            XCTFail("Could not inspect the application's keyboard state: \(error)")
+            return true // A failed snapshot must never authorize a content tap.
+        }
     }
 
     private func waitUntil(_ message: String, timeout: TimeInterval = 10, _ condition: @escaping () -> Bool) {
@@ -204,6 +239,7 @@ final class AppUITests: XCTestCase {
         reveal(clientID)
         clientID.tap()
         clientID.typeText("invalid")
+        XCTAssertEqual(clientID.value as? String, "invalid", "The keyboard must enter the validation input.")
         tap(button("", "Save connection settings"))
         let error = text("Enter the 32-character client ID from your Spotify developer app.")
         XCTAssertTrue(error.waitForExistence(timeout: 10))
@@ -241,6 +277,8 @@ final class AppUITests: XCTestCase {
         reveal(link)
         link.tap()
         link.typeText("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC")
+        XCTAssertEqual(link.value as? String, "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+                       "The keyboard must enter the complete Spotify link before saving.")
         tap(button("", "Save Spotify link"))
         let saved = webView.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Play Spotify track")).firstMatch
         tap(saved)
@@ -283,22 +321,25 @@ final class AppUITests: XCTestCase {
         playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             XCUIDevice.shared.orientation = orientation
-            waitUntil("The app must adopt the requested \(orientation == .portrait ? "portrait" : "landscape") layout") {
-                let bounds = self.app.frame
-                return orientation == .portrait ? bounds.height > bounds.width : bounds.width > bounds.height
+            waitUntil("The app and WebView must adopt the requested \(orientation == .portrait ? "portrait" : "landscape") layout") {
+                guard let snapshot = try? self.app.snapshot(),
+                      let web = self.firstSnapshot(in: snapshot, matching: { $0.elementType == .webView }) else { return false }
+                return [snapshot.frame, web.frame].allSatisfy { bounds in
+                    orientation == .portrait ? bounds.height > bounds.width : bounds.width > bounds.height
+                }
             }
             let settings = button("settings-toggle", "Settings")
-            reveal(settings)
+            let settingsSnapshot = try XCTUnwrap(reveal(settings))
             let bounds = app.frame
-            let settingsFrame = settings.frame
+            let settingsFrame = settingsSnapshot.frame
             XCTAssertGreaterThanOrEqual(settingsFrame.width, 44)
             XCTAssertGreaterThanOrEqual(settingsFrame.height, 44)
             XCTAssertGreaterThanOrEqual(settingsFrame.minX, bounds.minX)
             XCTAssertLessThanOrEqual(settingsFrame.maxX, bounds.maxX)
             let pause = button("play-button", "Pause")
-            reveal(pause)
-            XCTAssertEqual(pause.label, "Pause", "Native playback must remain active across rotation.")
-            let pauseFrame = pause.frame
+            let pauseSnapshot = try XCTUnwrap(reveal(pause))
+            XCTAssertEqual(pauseSnapshot.label, "Pause", "Native playback must remain active across rotation.")
+            let pauseFrame = pauseSnapshot.frame
             XCTAssertGreaterThanOrEqual(pauseFrame.width, 44)
             XCTAssertGreaterThanOrEqual(pauseFrame.height, 44)
             XCTAssertTrue(bounds.intersects(pauseFrame))
