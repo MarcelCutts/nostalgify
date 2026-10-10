@@ -1,0 +1,15 @@
+{
+  "name": "@nostalgify/desktop",
+  "productName": "Nostalgify",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "start": "npm run build && electron dist"
+  },
+  "dependencies": {
+    "@nostalgify/player-ui": "0.1.0",
+    "hls.js": "1.7.3"
+  }
+}

@@ -4,12 +4,14 @@
 
 # Nostalgify
 
-**Classic Winamp skins for Spotify and SoundCloud.**
+**Classic Winamp skins for desktop and iPad.**
 
 A macOS app that controls the Spotify desktop app and plays public SoundCloud tracks
-through classic Winamp 2 skins. SoundCloud playback currently requires your own API application credentials.
+through classic Winamp 2 skins. A native iPad development app controls Spotify and
+plays imported local audio. SoundCloud playback on desktop requires your own API application credentials.
 
-[Install](#install) ·
+[Desktop install](#install) ·
+[iPad setup](docs/ipad.md) ·
 [SoundCloud setup](docs/soundcloud.md) ·
 [Upstream website and demo](https://0xchaosbi.github.io/nostalgify/)
 
@@ -139,7 +141,7 @@ A few things to know:
 - **The shelf contains saved links.** It does not expand playlists into tracks or provide a queue spanning both services.
 - **SoundCloud playback depends on API access.** Public links can still be blocked or limited to previews by the
   service. Search, private content and account-library browsing are not implemented.
-- **macOS only.** Spotify control uses AppleScript. Spotify may briefly appear when it starts before Nostalgify hides it.
+- **Platform-specific sources.** macOS supports Spotify through AppleScript and SoundCloud. The native iPad development build supports Spotify App Remote and local files; see [iPad setup and limits](docs/ipad.md).
 
 If something goes wrong, Nostalgify writes a log to `~/Library/Application Support/Nostalgify/nostalgify.log`.
 Review it for private information before attaching it to an [issue](https://github.com/MarcelCutts/nostalgify/issues).
@@ -149,9 +151,11 @@ Review it for private information before attaching it to an [issue](https://gith
 After cloning and running `npm ci`:
 
 ```sh
-npm start              # build the renderer and launch from source
+npm start              # build and launch the desktop app
 npm test               # unit and integration tests that do not launch Electron
-npm run build          # bundle the renderer
+npm run build          # build desktop and iPad web assets
+npm run ipad:sync      # build iPad web assets and sync the Xcode project
+npm run ipad:open      # open the native project on a Mac
 npm run install-app    # build and install into Applications
 npm run package -- arm64  # package for Apple Silicon; use x64 for Intel
 ```
@@ -164,20 +168,20 @@ records API decisions, personal-use scope and remaining checks.
 ### Project layout
 
 ```
-src/main/             Electron window, menus, Spotify control and playback coordination
-src/main/soundcloud/  SoundCloud authentication, API client and protected media proxy
-src/preload/          The narrow bridge between the renderer and main process
-src/renderer/         Webamp UI, shelf, SoundCloud audio engine and layout rules
-tests/                Unit tests, Electron test helpers and generated media fixtures
+apps/desktop/         Electron host, desktop audio engine and app staging
+apps/ipad/            Touch interface, Capacitor bridge and native Xcode project
+packages/player-ui/   Shared Webamp skin/player presentation
+packages/contracts/   Portable playback state and bridge validation
+tests/                Unit tests, browser checks and Electron test helpers
 build/                App icon and macOS app settings
-scripts/              Packaging, API checks and asset-generation tools
+scripts/              Packaging, native verification and build-boundary checks
 skins/                Local development skins (not committed)
 ```
 
 ### How it works
 
 [Webamp](https://github.com/captbaritone/webamp) implements Winamp 2 in the browser, including its skin format.
-Nostalgify runs it in Electron. A main-process playback coordinator routes controls to the selected source,
+The desktop app runs it in Electron; the iPad app runs it in a native Capacitor WebView. A main-process playback coordinator routes controls to the selected source,
 pauses Spotify before SoundCloud starts, stops SoundCloud before Spotify starts, and updates the display from playback state.
 
 Spotify plays in its desktop app. AppleScript sends commands and reads its state once a second.
@@ -192,12 +196,14 @@ for its source and contribution instructions.
 
 ### Optional release tooling
 
-The inherited GitHub Actions workflow builds both Mac downloads and opens a draft release when a version
-tag is pushed. Personal local builds do not need this step:
+The desktop GitHub Actions workflow builds both Mac downloads and opens a draft release when a
+`desktop-v*` tag is pushed. iPad distribution is handled separately through Xcode. Personal local builds do not need this step:
 
 ```sh
-npm version patch    # or minor or major. Updates package.json and creates a tag
-git push --follow-tags
+npm version patch --workspace=@nostalgify/desktop --no-git-tag-version
+# Commit the version and lockfile, then tag that commit:
+git tag desktop-v0.1.1
+git push origin desktop-v0.1.1
 ```
 
 Then review the draft on the Releases page and publish it.

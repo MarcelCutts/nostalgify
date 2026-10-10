@@ -23,7 +23,7 @@ function harness({ platform = "darwin", mock, packaged = false, disposeError = f
     console: { log: (...args) => messages.push(args.join(" ")), error: (...args) => messages.push(args.join(" ")) },
     setTimeout, clearTimeout,
     require(name) {
-      if (name === "../../src/main/spotify-selftest") return {
+      if (name === "../../apps/desktop/src/main/spotify-selftest") return {
         bounded: async (_label, operation) => operation(),
         restoreSpotifyVolume: async (volume) => { calls.push(["restore", volume]); state.volume = volume; },
       };

@@ -8,19 +8,19 @@ set -e
 cd "$(dirname "$0")/.."
 
 ARCH="${1:-$(uname -m)}"
-VERSION=$(node -p "require('./package.json').version")
+VERSION=$(node -p "require('./apps/desktop/package.json').version")
 
-npm run build
+npm run build --workspace @nostalgify/desktop
 
-npx electron-packager . Nostalgify \
+npx --no-install electron-packager apps/desktop/dist Nostalgify \
   --platform=darwin --arch="$ARCH" --out=out --overwrite \
   --app-version="$VERSION" --app-bundle-id=local.nostalgify \
   --app-category-type=public.app-category.music \
   --icon=build/icon.icns --extend-info=build/extra.plist \
-  --ignore='^/src/renderer/.*\.js$' \
-  --ignore='^/(skins|scripts|build|out|\.github)(/|$)' \
+  --ignore='^/skins(/|$)' \
   --ignore='^/tests(/|$)' \
   --ignore='^/\.env(\..*)?$' \
+  --ignore='^/(development|metafile)\.json$' \
   --ignore='^/[^/]+\.md$' --ignore='^/LICENSE$' --ignore='^/\.gitignore$' \
   --ignore='^/node_modules/\.package-lock\.json$'
 

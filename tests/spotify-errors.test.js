@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { spotifyCommandError } = require("../src/main/spotify-errors");
-const { createPlayback } = require("../src/main/playback");
+const { spotifyCommandError } = require("../apps/desktop/src/main/spotify-errors");
+const { createPlayback } = require("../apps/desktop/src/main/playback");
 
 test("Spotify command errors explain permission and timeout failures without echoing raw details", () => {
   for (const detail of ["permission", "Not authorized to send Apple events. (-1743)", "not authorised: private-command-detail"]) {

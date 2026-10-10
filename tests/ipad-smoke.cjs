@@ -1,0 +1,413 @@
+// UI contract smoke only: mocked native plugin and browser touch emulation, no real audio/iPad claims.
+const { chromium, webkit, devices } = require("playwright");
+const { execFileSync } = require("node:child_process");
+const { mkdtempSync, mkdirSync, existsSync, readFileSync, writeFileSync } = require("node:fs");
+const { tmpdir } = require("node:os");
+const { join, resolve } = require("node:path");
+const assert = require("node:assert/strict");
+const engine = process.env.IPAD_SMOKE_BROWSER || "chromium";
+assert.ok(["chromium", "webkit"].includes(engine), "IPAD_SMOKE_BROWSER must be chromium or webkit");
+const browserType = engine === "webkit" ? webkit : chromium;
+const root = resolve(__dirname, "..");
+const outdir = mkdtempSync(join(tmpdir(), "nostalgify-ipad-smoke-"));
+const productionDir = join(outdir, "production");
+const artifacts = process.env.IPAD_SMOKE_ARTIFACT_DIR || outdir;
+async function assertPlaylistReadoutBounds(page) {
+  const overflow = await page.locator(".playlist-running-time-display").evaluate(element => {
+    const box = element.getBoundingClientRect(), footer = element.closest(".playlist-bottom").getBoundingClientRect();
+    const within = (inner, outer) => inner.left >= outer.left - 1 && inner.top >= outer.top - 1 && inner.right <= outer.right + 1 && inner.bottom <= outer.bottom + 1;
+    const range = document.createRange(); range.selectNodeContents(element);
+    return {
+      readoutOutsideFooter: !within(box, footer),
+      textOutsideReadout: !within(range.getBoundingClientRect(), box),
+      descendantsOutsideReadout: [...element.querySelectorAll("*")].filter(child => !within(child.getBoundingClientRect(), box)).map(child => child.tagName),
+    };
+  });
+  assert.deepEqual(overflow, { readoutOutsideFooter: false, textOutsideReadout: false, descendantsOutsideReadout: [] }, "duration artwork and text bounds must fit their readout and playlist footer on both axes");
+}
+async function assertClassicWindowNames(page) {
+  assert.equal(await page.getByRole("application", { name: "Classic Winamp player", exact: true }).count(), 1);
+  for (const name of ["Main player window", "Equalizer window", "Playlist window"]) {
+    const compactPlaylist = name === "Playlist window" && await page.locator("#playlist-window-shade").count() === 1;
+    assert.equal(await page.getByRole("group", { name, exact: true }).getAttribute("tabindex"), compactPlaylist ? null : "-1", "named windows retain their original focus behavior; compact playlist has no recovery target");
+  }
+}
+mkdirSync(artifacts, { recursive: true });
+execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--dev", "--outdir", outdir], { cwd: root, stdio: "inherit" });
+execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", productionDir], { cwd: root, stdio: "inherit" });
+(async () => {
+  const system = engine === "chromium" ? process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE || (!existsSync(chromium.executablePath()) && existsSync("/usr/bin/chromium") ? "/usr/bin/chromium" : undefined) : undefined;
+  const browser = await browserType.launch({ executablePath: system, headless: true, args: engine === "chromium" ? ["--no-sandbox", "--disable-crashpad-for-testing"] : [] });
+  const errors = [];
+  let page;
+  let context;
+  try {
+    context = await browser.newContext({ ...devices["iPad Pro 11"] });
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: true });
+    page = await context.newPage();
+    page.on("pageerror", error => errors.push(error.message));
+    page.on("dialog", dialog => dialog.dismiss());
+    await page.addInitScript(() => {
+      if (location.hostname !== "nostalgify.test" || sessionStorage.getItem("startup-storage-probed")) return;
+      // Hold real asynchronous skin storage initialization, without a timed sleep.
+      let release;
+      const gate = new Promise(resolve => { release = resolve; });
+      window.__releaseStartupStorage = () => { sessionStorage.setItem("startup-storage-probed", "true"); release(); };
+      const open = indexedDB.open.bind(indexedDB);
+      indexedDB.open = (...args) => {
+        const request = open(...args);
+        if (args[0] !== "nostalgify-ipad-skins") return request;
+        indexedDB.open = open;
+        Object.defineProperty(request, "onsuccess", { set(handler) {
+          request.addEventListener("success", event => {
+            window.__startupStoragePending = true;
+            void gate.then(() => handler.call(request, event));
+          }, { once: true });
+        } });
+        return request;
+      };
+    });
+    // Fulfil requests from the build directory: no server or external traffic.
+    await page.route("**/*", async route => {
+      const url = new URL(route.request().url());
+      // WebKit routes blob fetches through interception; these stay inside the browser.
+      if (url.protocol === "blob:" || url.protocol === "data:") return route.continue();
+      if (!["nostalgify.test", "nostalgify-production.test"].includes(url.hostname)) return route.abort();
+      const directory = url.hostname === "nostalgify-production.test" ? productionDir : outdir;
+      const file = resolve(directory, "." + (url.pathname === "/" ? "/index.html" : url.pathname));
+      if (!file.startsWith(directory + "/") || !existsSync(file)) return route.fulfill({ status: 404, body: "Not found" });
+      const contentType = file.endsWith(".html") ? "text/html" : file.endsWith(".js") ? "application/javascript" : file.endsWith(".css") ? "text/css" : "application/octet-stream";
+      return route.fulfill({ contentType, body: readFileSync(file) });
+    });
+    await page.goto("https://nostalgify.test/?mock=1");
+    await page.waitForFunction(() => window.__startupStoragePending === true);
+    assert.equal(await page.locator("#settings-toggle").isEnabled(), true, "settings remain available while the player initializes");
+    assert.equal(await page.locator("#spotify-source").isDisabled(), true);
+    assert.equal(await page.locator("#local-source").isDisabled(), true, "Files cannot expose library rows that startup will still replace");
+    await page.locator("#local-source").evaluate(button => button.click());
+    assert.equal(await page.locator("#local-panel").isVisible(), false);
+    await page.evaluate(() => window.__releaseStartupStorage());
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    assert.equal(await page.locator("#spotify-source").isEnabled(), true);
+    assert.equal(await page.locator("#local-source").isEnabled(), true);
+    const stableText = await page.evaluate(async () => {
+      const ids = ["source-label", "elapsed", "duration", "volume-note", "play-button", "connect-button", "track-title", "track-artist", "player-status"];
+      const original = ids.map(id => document.getElementById(id).firstChild);
+      const changes = [];
+      const observer = new MutationObserver(records => changes.push(...records.filter(record => ids.includes(record.target.id)).map(record => record.target.id)));
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true });
+      for (let index = 0; index < 3; index++) await window.__ipad.host.getState();
+      await new Promise(requestAnimationFrame);
+      observer.disconnect();
+      return { changes, replaced: ids.filter((id, index) => original[index] !== document.getElementById(id).firstChild) };
+    });
+    assert.deepEqual(stableText, { changes: [], replaced: [] }, "unchanged native snapshots preserve the text nodes accessibility is reading");
+    const stableSkinSemantics = await page.evaluate(async () => {
+      const frame = () => new Promise(requestAnimationFrame);
+      await frame(); await frame();
+      const writes = [], clockChanges = [];
+      const observer = new MutationObserver(records => {
+        for (const record of records) {
+          if (record.attributeName === "class") {
+            if (record.target.closest("#time")) clockChanges.push(record.target.id);
+            continue;
+          }
+          // Capability writes in the outer shell are separate from the EQ and
+          // skin semantic policies under test here.
+          if (record.attributeName === "aria-disabled" && !record.target.closest("#equalizer-window")) continue;
+          writes.push(`${record.target.id || record.target.className}:${record.attributeName}`);
+        }
+      });
+      observer.observe(document.getElementById("webamp"), { subtree: true, attributes: true, attributeFilter: ["class", "role", "aria-label", "aria-description", "aria-hidden", "aria-disabled", "aria-pressed", "aria-haspopup", "aria-expanded", "tabindex", "title", "disabled", "data-skin-control"] });
+      const elapsed = window.__webamp.store.getState().media.timeElapsed;
+      for (const value of [1, 2, 3, elapsed]) {
+        window.__webamp.store.dispatch({ type: "STEP_MARQUEE" });
+        window.__webamp.store.dispatch({ type: "UPDATE_TIME_ELAPSED", elapsed: value });
+        await frame(); await frame();
+      }
+      observer.disconnect();
+      return { writes, clockChanges: clockChanges.length };
+    });
+    assert.ok(stableSkinSemantics.clockChanges > 0, "the semantic regression exercises real clock sprite updates");
+    assert.deepEqual(stableSkinSemantics.writes, [], "clock and marquee updates do not rewrite unchanged accessibility attributes");
+    assert.equal(await page.locator("#demo-banner").isVisible(), true);
+    assert.equal(await page.getByRole("link", { name: "Nostalgify for iPad player" }).count(), 1);
+    assert.equal(await page.getByRole("heading", { name: "Ready when you are. No track selected", exact: true }).textContent(), "Ready when you are.", "the empty now-playing heading's accessible name includes its visible text");
+    assert.equal(await page.getByRole("button", { name: "Save Spotify link" }).textContent(), "Save", "spoken command includes the visible button label");
+    assert.equal(await page.locator("#main-window").isVisible(), true);
+    await assertClassicWindowNames(page);
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
+    assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "bitmap marquee is one complete accessible message, without separate glyphs");
+    assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
+    assert.equal(await page.getByRole("slider", { name: "Balance (unavailable)" }).isDisabled(), true);
+    assert.equal(await page.locator("#webamp #next").getAttribute("aria-disabled"), "true");
+    for (const key of ["Tab", "Shift+Tab"]) {
+      await page.locator("#webamp #next").focus();
+      await page.keyboard.press(key);
+      assert.equal(await page.locator("#webamp #next").evaluate(element => element === document.activeElement), false, `${key} must leave an unavailable classic control`);
+    }
+    const spriteGeometry = await page.evaluate(() => ({
+      volume: document.querySelector("#webamp #volume").clientHeight,
+      seek: document.querySelector("#webamp #position").clientHeight,
+      outerSeek: document.querySelector("#seek").clientHeight,
+      glyphIndent: getComputedStyle(document.querySelector("#webamp .character")).textIndent,
+    }));
+    assert.ok(spriteGeometry.volume < 44 && spriteGeometry.seek < 44, "outer 44px targets must not enlarge classic sprite sliders");
+    assert.ok(spriteGeometry.outerSeek >= 44, "the accessible outer slider retains its large target");
+    assert.equal(spriteGeometry.glyphIndent, "0px", "bitmap glyphs must not create off-screen accessibility bounds");
+    const message = "A long title with  ***  inside must stay complete";
+    await page.evaluate(value => window.__webamp.store.dispatch({ type: "SET_USER_MESSAGE", message: value }), message);
+    await page.waitForFunction(value => document.querySelector("#marquee").getAttribute("aria-label") === `Classic player display: ${value}`, message);
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "UNSET_USER_MESSAGE" }));
+    assert.equal(await page.locator("#equalizer-window .band").first().getAttribute("aria-hidden"), "true", "decorative EQ bands are omitted while its working title controls remain");
+    assert.equal(await page.locator("#webamp #play").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working classic transport remains exposed");
+    assert.equal(await page.locator("#equalizer-window #equalizer-close").evaluate(element => element.closest('[aria-hidden="true"]') === null), true, "working EQ window controls remain exposed");
+    await page.getByRole("button", { name: "EQ: Toggle equalizer" }).focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => !document.getElementById("equalizer-window"));
+    await page.keyboard.press("Space");
+    await page.locator("#equalizer-window").waitFor();
+    await page.getByRole("button", { name: "Toggle compact equalizer", exact: true }).focus();
+    await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
+    await page.keyboard.press("Enter");
+    assert.equal(await page.locator("#equalizer-balance").isDisabled(), true, "compact EQ balance must also be honestly unavailable");
+    await assertClassicWindowNames(page);
+    await page.waitForFunction(() => document.getElementById("equalizer-shade") === document.activeElement);
+    await page.keyboard.press("Space");
+    await page.getByRole("img", { name: /^Equalizer artwork:/ }).waitFor();
+    const eqBox = await page.locator("#equalizer-window").boundingBox();
+    const artworkBox = await page.getByRole("img", { name: /^Equalizer artwork:/ }).boundingBox();
+    assert.ok(artworkBox.x >= eqBox.x && artworkBox.y >= eqBox.y && artworkBox.x + artworkBox.width <= eqBox.x + eqBox.width + 1 && artworkBox.y + artworkBox.height <= eqBox.y + eqBox.height + 1, "decorative artwork accessibility frame stays inside the EQ window");
+    const frame = await page.locator("#player-viewport").boundingBox();
+    const classicPlayer = await page.locator("#main-window").boundingBox();
+    assert.ok(classicPlayer.x >= frame.x && classicPlayer.y >= frame.y, "classic player must render inside its frame");
+    assert.ok(classicPlayer.x + classicPlayer.width <= frame.x + frame.width, "classic player must fit its frame");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_DOUBLESIZE_MODE" }));
+    await page.waitForTimeout(100);
+    const doubledMain = await page.locator("#main-window").boundingBox();
+    const doubledEQ = await page.locator("#equalizer-window").boundingBox();
+    const doubledFrame = await page.locator("#player-viewport").boundingBox();
+    assert.ok(doubledEQ.y >= doubledMain.y + doubledMain.height - 1, "double-size windows must not overlap");
+    assert.ok(doubledMain.x + doubledMain.width <= doubledFrame.x + doubledFrame.width, "double-size mode must fit the frame");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_DOUBLESIZE_MODE" }));
+    assert.deepEqual(await page.evaluate(async () => (await window.nostalgify.getDiagnostics()).web.filter(event => event.event === "web_error")), [], "startup and resize must not report JavaScript or ResizeObserver errors");
+    assert.equal(await page.locator("#error-message").isVisible(), false);
+    assert.equal(await page.locator("#native-volume").isDisabled(), true);
+    await page.locator("#webamp #close").tap();
+    assert.equal(await page.locator("#main-window").isVisible(), true, "desktop close must not strand the iPad interface");
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    await page.locator("#settings-toggle").focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await page.locator("#spotify-client-id").evaluate(input => input === document.activeElement), true, "opening settings focuses its first field");
+    await page.keyboard.press("Escape");
+    assert.equal(await page.locator("#settings-panel").isVisible(), false);
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => button === document.activeElement), true, "Escape returns focus to the settings opener");
+    await page.keyboard.press("Enter");
+    await page.locator("#spotify-client-id").fill("invalid-client");
+    await page.locator("#spotify-settings button[type=submit]").tap();
+    await page.waitForFunction(() => document.getElementById("spotify-client-id").getAttribute("aria-invalid") === "true");
+    assert.equal(await page.locator("#spotify-client-id").evaluate(input => input === document.activeElement), true);
+    assert.equal(await page.locator("#spotify-client-id").getAttribute("aria-errormessage"), "error-message");
+    assert.equal(await page.locator("#error-message").isVisible(), true);
+    await page.locator("#spotify-client-id").fill("0123456789abcdef0123456789abcdef");
+    const pasteCanceled = await page.locator("#spotify-client-id").evaluate(input => {
+      const clipboardData = new DataTransfer(); clipboardData.setData("text/plain", "0123456789abcdef0123456789abcdef");
+      return !input.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData }));
+    });
+    assert.equal(pasteCanceled, false, "pasting in Settings must not be captured by the playlist");
+    await page.locator("#spotify-settings button[type=submit]").tap();
+    await page.waitForFunction(() => document.getElementById("diagnostics-status").textContent.includes("saved"));
+    assert.equal(await page.locator("#spotify-client-id").getAttribute("aria-invalid"), null);
+    assert.equal(await page.locator("#error-message").isVisible(), false);
+    await page.locator("#settings-close").tap();
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => button === document.activeElement), true);
+    await page.locator("#connect-button").tap();
+    await page.locator("#spotify-link").fill("https://open.spotify.com/track/0123456789abcdefghijkl");
+    await page.locator("#link-form button").tap();
+    await page.locator("#spotify-shelf .music-play").waitFor();
+    await page.reload();
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    await page.locator("#spotify-shelf .music-play").waitFor();
+    await page.locator("#connect-button").tap();
+    await page.locator("#spotify-shelf .music-play").tap();
+    await page.waitForFunction(() => document.getElementById("track-title").textContent === "Demo track");
+    await page.locator("#play-button").tap();
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Play");
+    await page.locator("#local-source").tap();
+    await page.getByRole("button", { name: "Add music to playlist" }).focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Add URL from clipboard" }).waitFor();
+    await page.keyboard.press("End");
+    assert.equal(await page.getByRole("menuitem", { name: "Add file from Files" }).evaluate(element => element === document.activeElement), true);
+    await page.keyboard.press("Enter");
+    await page.locator("#local-library .music-play").waitFor();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => document.getElementById("playlist-add-menu").getAttribute("role") === "button");
+    await page.locator("#import-button").tap();
+    await page.waitForFunction(() => document.querySelectorAll("#local-library .music-play").length === 2);
+    await page.locator("#local-library .remove-item").last().tap();
+    await page.waitForFunction(() => document.querySelectorAll("#local-library .music-play").length === 1);
+    await page.getByRole("button", { name: "Sel: Select playlist items" }).focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Select all", exact: true }).waitFor();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => window.__webamp.store.getState().playlist.selectedTracks.length === window.__webamp.store.getState().playlist.trackOrder.length);
+    await page.getByRole("button", { name: "Sel: Select playlist items" }).focus();
+    await page.keyboard.press("ArrowDown");
+    await page.getByRole("menuitem", { name: "Invert selection" }).waitFor();
+    await page.keyboard.press("ArrowDown");
+    // Move focus during the same event turn as the command: the old menu's
+    // queued post-render callback must not steal it back on the next frame.
+    await page.evaluate(() => {
+      document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
+      document.getElementById("playlist-misc-menu").focus();
+    });
+    await page.waitForFunction(() => window.__webamp.store.getState().playlist.selectedTracks.length === 0);
+    await page.evaluate(() => new Promise(resolve => requestAnimationFrame(resolve)));
+    assert.equal(await page.locator("#playlist-misc-menu").evaluate(element => element === document.activeElement), true, "a deferred menu callback must preserve newer user focus");
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Sort list", exact: true }).waitFor();
+    const menuPosition = await page.evaluate(() => window.__ipad.host.getCachedState().position);
+    await page.keyboard.press("ArrowRight");
+    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), menuPosition, "playlist menu navigation must not trigger global transport shortcuts");
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Sort list by title", exact: true }).waitFor();
+    const previousOrder = await page.evaluate(() => [...window.__webamp.store.getState().playlist.trackOrder]);
+    await page.keyboard.press("ArrowDown");
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(expected => JSON.stringify(window.__webamp.store.getState().playlist.trackOrder) === JSON.stringify(expected), previousOrder.reverse());
+    await page.waitForFunction(() => !document.getElementById("playlist-misc-menu").querySelector("ul"));
+    await page.waitForFunction(() => document.getElementById("playlist-misc-menu") === document.activeElement);
+    await page.getByRole("button", { name: "List opts: Playlist lists" }).focus();
+    await page.keyboard.press("Enter");
+    await page.getByRole("menuitem", { name: "Load list", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    await page.locator("#option-context").tap();
+    await page.locator("#webamp-context-menu .context-menu").waitFor();
+    assert.equal(await page.locator("#webamp-context-menu .context-menu").getAttribute("aria-label"), null, "a later Winamp menu must not inherit a closed playlist submenu's name");
+    await page.locator("#source-label").tap();
+    assert.equal(await page.getByRole("img", { name: "Winamp playlist", exact: true }).count(), 1);
+    assert.match(await page.locator(".playlist-running-time-display").ariaSnapshot(), /img "Selected and total playlist duration: 0:00\/0:00"/);
+    await assertPlaylistReadoutBounds(page);
+    await page.locator("#local-library .music-play").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().provider === "local");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "playing");
+    assert.equal(await page.locator("#local-library .music-play").evaluate(button => button === document.activeElement), true, "starting a track preserves keyboard focus through list refresh");
+    assert.equal(await page.locator("#native-volume").isDisabled(), false);
+    assert.equal(await page.locator("#local-library .music-play").evaluate(button => document.getElementById(button.getAttribute("aria-describedby"))?.textContent), "Demo file", "the track artist remains available as the play button's accessible description");
+    assert.match(await page.locator("#track-title").textContent(), /Imported demo/);
+    assert.equal(await page.getByRole("heading", { name: "Now playing: Imported demo recording" }).count(), 1, "now-playing heading must have a distinct accessible name");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Pause");
+    assert.equal(await page.locator("#source-label").getAttribute("aria-label"), "Playback source: Local files");
+    assert.equal(await page.getByRole("status", { name: "Playback source: Local files" }).count(), 1);
+    assert.match(await page.locator("#equalizer-window").getAttribute("aria-description"), /local file playback/, "a real provider change still updates the EQ description");
+    await page.getByRole("button", { name: "Main classic player: Pause", exact: true }).focus();
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    await page.getByRole("button", { name: "Main classic player: Play", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "playing");
+    await page.locator("#seek").focus();
+    const positionBefore = await page.evaluate(() => window.__ipad.host.getCachedState().position);
+    await page.keyboard.press("ArrowRight");
+    await page.waitForFunction(value => window.__ipad.host.getCachedState().position === value, positionBefore + 1);
+    assert.equal(await page.locator("#seek").getAttribute("aria-valuetext"), "1 second of 1 minute 0 seconds");
+    await page.locator("#native-volume").focus();
+    const volumeBefore = await page.evaluate(() => window.__ipad.host.getCachedState().volume);
+    await page.keyboard.press("ArrowLeft");
+    await page.waitForFunction(value => window.__ipad.host.getCachedState().volume === value, volumeBefore - 1);
+    assert.equal(await page.locator("#native-volume").getAttribute("aria-valuetext"), `${volumeBefore - 1} percent`);
+    assert.equal(await page.evaluate(() => window.__ipad.host.getCachedState().position), positionBefore + 1, "volume arrow keys must not trigger classic-player seek shortcuts");
+    await page.locator("#play-button").focus();
+    await page.keyboard.press("Space");
+    await page.waitForFunction(() => window.__ipad.host.getCachedState().state === "paused");
+    assert.equal(await page.locator("#play-button").getAttribute("aria-label"), "Play");
+    assert.equal(await page.locator("#play-button").evaluate(button => button === document.activeElement), true);
+    const mobileSize = await page.locator("#play-button").boundingBox();
+    assert.ok(mobileSize.width >= 44 && mobileSize.height >= 44);
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth > innerWidth);
+    assert.equal(overflow, false);
+    // A deterministic ZIP containing PLEDIT.TXT exercises real Webamp parsing and IndexedDB bytes.
+    const skin = Buffer.from("UEsDBBQAAAAAAAAAIQAf/pkIVQAAAFUAAAAKAAAAUExFRElULlRYVFtUZXh0XQpOb3JtYWw9I0Q4RUM3RgpDdXJyZW50PSNGRkZGRkYKTm9ybWFsQkc9IzEyMTUxNApTZWxlY3RlZEJHPSMzNDNEMzYKRm9udD1BcmlhbApQSwECFAMUAAAAAAAAACEAH/6ZCFUAAABVAAAACgAAAAAAAAAAAAAAgAEAAAAAUExFRElULlRYVFBLBQYAAAAAAQABADgAAAB9AAAAAAA=", "base64");
+    await page.locator("#skin-file").setInputFiles({ name: "Probe skin.wsz", mimeType: "application/zip", buffer: skin });
+    await page.waitForFunction(async () => /^[0-9a-f]{64}$/.test((await window.__ipad.host.getPreferences()).skinId || ""));
+    await page.waitForFunction(() => /^[0-9a-f]{64}$/.test(document.getElementById("skin-select").value));
+    const stableSkin = await page.locator("#skin-select").inputValue();
+    await page.reload();
+    await page.waitForFunction(() => Boolean(window.__ipad?.mounted));
+    assert.equal(await page.locator("#skin-select").inputValue(), stableSkin);
+    assert.equal(await page.locator("#skin-select option").count(), 2);
+    assert.match(await page.locator("#webamp #marquee").ariaSnapshot(), /^- '?img "Classic player display: [^\n]+"'?$/, "skin reload preserves a single readable message");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
+    await page.waitForFunction(() => document.querySelector("#main-window .mini-time")?.getAttribute("aria-hidden") === "true");
+    await assertClassicWindowNames(page);
+    assert.equal(await page.locator("#main-window .mini-time").ariaSnapshot(), "", "new compact-mode bitmap readouts must not expose individual characters");
+    await page.evaluate(() => window.__webamp.store.dispatch({ type: "TOGGLE_WINDOW_SHADE_MODE", windowId: "main" }));
+    await page.waitForFunction(() => document.querySelector("#webamp #marquee")?.getAttribute("role") === "img");
+    await page.getByRole("button", { name: "Toggle compact playlist", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#playlist-window-shade").waitFor();
+    await assertClassicWindowNames(page);
+    await page.getByRole("button", { name: "Toggle compact playlist", exact: true }).focus();
+    await page.keyboard.press("Enter");
+    await page.locator("#playlist-window").waitFor();
+    await assertClassicWindowNames(page);
+    assert.equal(await page.getByRole("img", { name: "Winamp", exact: true }).count(), 1, "shade and skin updates do not duplicate the main title description");
+    assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
+    assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
+    await page.locator("#skin-select").selectOption("");
+    await page.waitForFunction(async () => (await window.__ipad.host.getPreferences()).skinId === null);
+    await page.locator("#skin-file").setInputFiles({ name: "broken.wsz", mimeType: "application/zip", buffer: Buffer.from([80, 75, 3, 4, 0, 0]) });
+    await page.waitForFunction(() => document.getElementById("error-message").textContent.includes("skin could not be read"));
+    assert.equal(await page.evaluate(async () => (await window.__ipad.host.getPreferences()).skinId || null), null);
+    assert.equal(await page.locator("#main-window").isVisible(), true);
+    await page.locator("#local-source").tap();
+    await page.locator("#import-button").tap();
+    await page.locator("#local-library .music-play").tap();
+    await page.locator("#local-library .remove-item").focus();
+    await page.keyboard.press("Enter");
+    await page.waitForFunction(() => document.querySelectorAll("#local-library .music-play").length === 0);
+    assert.equal(await page.locator("#import-button").evaluate(button => button === document.activeElement), true, "removing the last track returns focus to Import");
+    assert.deepEqual(errors, []);
+    await page.screenshot({ path: join(artifacts, "ipad-ui.png"), fullPage: true });
+    await page.setViewportSize({ width: 500, height: 900 });
+    await page.waitForTimeout(100);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, "split view must not overflow horizontally");
+    await page.evaluate(() => { document.documentElement.style.fontSize = `${parseFloat(getComputedStyle(document.documentElement).fontSize) * 2}px`; });
+    await page.locator("#settings-toggle").tap();
+    for (const width of [500, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      await page.waitForTimeout(100);
+      assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `200% text must fit a ${width}px window`);
+      const clippedControls = await page.evaluate(() => [...document.querySelectorAll(".shell button, .shell input, .shell select")]
+        .filter(element => !element.closest("#webamp") && element.getClientRects().length)
+        .filter(element => { const r = element.getBoundingClientRect(); return r.left < 0 || r.right > innerWidth + 1 || r.width < 44 || r.height < 44; })
+        .map(element => element.id || element.className));
+      assert.deepEqual(clippedControls, [], `all visible controls must fit and retain 44px targets at 200% text/${width}px`);
+      await assertPlaylistReadoutBounds(page);
+    }
+    await page.screenshot({ path: join(artifacts, "ipad-large-text.png"), fullPage: true });
+    assert.equal(await page.locator("#settings-toggle").evaluate(button => getComputedStyle(button).transitionDuration), "0s", "reduced motion disables shell transitions");
+    await page.goto("https://nostalgify-production.test/?mock=1");
+    await page.waitForFunction(() => document.documentElement.dataset.playerReady === "true");
+    assert.equal(await page.locator("#demo-banner").isVisible(), false, "production query parameters cannot enable simulated playback");
+    assert.equal(await page.locator("#browser-banner").isVisible(), true);
+    assert.equal(await page.evaluate(() => typeof window.__ipad), "undefined");
+    const meta = JSON.parse(readFileSync(join(outdir, "metafile.json"), "utf8"));
+    assert.equal(Object.keys(meta.inputs).some(input => /apps\/desktop\/|node_modules\/electron\//.test(input)), false);
+    const report = { pass: true, engine, browser: browser.version(), actualIPad: false, actualAudio: false, outdir, artifacts, tests: ["production mock rejection", "shared player frame containment and double size", "Settings keyboard focus, Escape, paste and Spotify configuration", "saved link persistence after reload", "touch and keyboard transport", "classic playlist keyboard menus, import, selection and ordering", "submenu focus recovery and menu ownership", "playlist readouts without bitmap glyph noise", "native file import contract", "spoken playback position and volume", "range keyboard isolation from classic shortcuts", "provider-dependent volume", "skin parse and IndexedDB persistence", "malformed skin preserves selection", "close cannot strand interface", "library deletion and focus recovery", "split-view and 200% text no horizontal overflow or clipped controls", "reduced motion", "no JS exceptions"] };
+    writeFileSync(join(artifacts, "result.json"), JSON.stringify(report, null, 2));
+    console.log(JSON.stringify(report, null, 2));
+    await context.tracing.stop();
+  } catch(error) {
+    await page?.screenshot({ path: join(artifacts, "failure.png"), fullPage: true, timeout: 5000 }).catch(() => {});
+    await context?.tracing.stop({ path: join(artifacts, "trace.zip") }).catch(() => {});
+    writeFileSync(join(artifacts, "failure.log"), `${error.stack}\n${errors.join("\n")}`);
+    throw error;
+  } finally { await context?.close(); await browser.close(); }
+})().catch(error => { console.error(error); process.exitCode = 1; });

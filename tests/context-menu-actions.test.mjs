@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { build } from "esbuild";
 
 const built = await build({
-  entryPoints: [new URL("../src/renderer/contextMenu.js", import.meta.url).pathname],
+  entryPoints: [new URL("../packages/player-ui/src/contextMenu.js", import.meta.url).pathname],
   bundle: true, platform: "node", format: "esm", write: false,
 });
 const { installContextMenus } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString("base64")}`);

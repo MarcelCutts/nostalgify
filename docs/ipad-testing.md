@@ -1,0 +1,144 @@
+# iPad validation
+
+The iPad target uses the shared player UI, Spotify App Remote, and a native local-file player. The desktop target keeps its own Electron services. A successful simulator build verifies integration and native code; Spotify playback, audible output, background behavior, and routing still require a physical iPad.
+
+## Repeatable automated checks
+
+From the repository root, with Node 24:
+
+```sh
+npm ci
+npm test
+npm run build
+npm run ipad:sync
+npm run check
+```
+
+`npm test` runs the desktop, shared-contract, and iPad JavaScript tests. The build produces separate desktop staging and iPad web assets. `ipad:sync` copies the latter into the committed Capacitor project; it requires no Spotify account, client secret, signing certificate, or connected iPad. The browser smoke test runs the bundled UI against its test adapter:
+
+```sh
+npx playwright install --with-deps chromium webkit
+npm run test:ipad:browser
+IPAD_SMOKE_BROWSER=webkit npm run test:ipad:browser
+```
+
+The same UI smoke test runs in Chromium and WebKit, including touch layout, controls, provider changes, skin import and persistence after reload. These browser checks use a test adapter; the simulator self-check separately verifies the real Capacitor bridge. CI runs each engine in the official Playwright 1.62.1 Ubuntu Noble container, pinned by digest and checked against the npm dependency. Browsers and their OS dependencies are already installed; CI does not download Ubuntu packages for each smoke test. Each engine saves its screenshot, result and Playwright trace under a separate artifact directory. Linux WebKit is useful cross-engine coverage, but does not establish behavior in the iPad's WKWebView.
+
+The browser regression also advances the real clock and marquee state while observing the classic player's accessibility attributes. Unchanged roles, names and descriptions must not be rewritten on each animation update; real provider changes must still update the EQ description. These guards compare the current DOM, so replacing skin controls still initializes their semantics. This reduces measured redundant DOM mutations without establishing a cause or fix for intermittent native interaction delays.
+
+The portable checks inspect the actual esbuild input/import graphs and packaging output. They reject Electron/Node imports in either renderer, SoundCloud/HLS or desktop implementation imports in the iPad renderer, Capacitor/iPad imports in the desktop renderer, and iOS project files accidentally included in desktop staging. The native structural check verifies Swift build-phase membership, the shared XCTest/XCUITest scheme, exact Swift dependency revisions, iPad targeting, callback registration, background audio configuration, and bundled rather than remotely hosted web assets. These checks do not compile Swift.
+
+Linux CI also runs nine Python standard-library regressions for the native diagnostic watcher: container replacement, simulator identity, startup-probe selection, unique WebContent mapping, executable identity and bounded command/report handling. Run them with `python3 -B -m unittest discover -s tests -p 'test_ios_startup_watcher.py'`. Apple command results and sampling clocks are mocked; short-lived local Python children verify timeout output and process cleanup. These tests require neither Xcode nor real process sampling.
+
+On a Mac with Xcode and an installed iPad simulator runtime:
+
+```sh
+bash scripts/check-ios-simulator.sh
+```
+
+This resolves only the committed Swift package revisions, builds the actual application for iOS Simulator with signing disabled, also compiles an unsigned Release build against the device SDK, and creates a disposable iPad simulator. It first installs and launches the application for a required native self-check, captures a screenshot, terminates that process, then runs the `App` scheme's native and application UI tests. The simulator is removed afterward.
+
+A Debug-only `--native-local-selfcheck` launch also imports two generated WAV files into an isolated temporary library and verifies distinct identities, native queue advancement and persistence without JavaScript timers. It additionally verifies that the shared player has mounted in the real WKWebView and a native-plugin `getState` call resolves through Capacitor. After simulator installation, launch and container lookup return, CI polls for its structured `native-selfcheck.json` result for 60 seconds and requires it to pass. This is not a 60-second bound on those simulator commands or on total first-launch time; process launch alone never establishes success.
+
+The self-check establishes first-launch readiness on the newly created simulator before accessibility automation begins. Subsequent XCUITest launches use fresh app processes and isolated fixture libraries on that initialized simulator; they do not establish startup on an untouched simulator. This ordering follows observed delayed startup callbacks and incomplete WebKit evaluations during initial automated launches. It preserves both failure gates and the original time limits; it is not a retry or proof of the underlying cause.
+
+Results are written under `out/ios-ci/run.*`: package/build/test logs, `.xcresult` bundles, selected runtime, resolved dependencies, a deduplicated first-party Swift warning inventory, the self-check result, launch logs and a screenshot.
+
+`simulator-command-timings.log` records UTC start/finish times, elapsed whole seconds and original exit codes for simulator boot, boot-status waiting, installation, preflight launch and its data-container lookup. A start without a finish identifies an unfinished command. These records separate simulator-command latency from the subsequent self-check and UI readiness waits; they add no retries or command deadlines and do not capture command arguments or alter their output.
+
+XCUITest operates the real app with a Debug-only, isolated local library fixture. It exercises settings, local playback and persistence, provider switching, rotation, and accessible controls. Files and Settings accessibility audits run as independent cases, preserving audit categories while keeping individual failures and timings attributable. The Xcode 27 lane also checks actual VoiceOver navigation and speech through `XCUIVoiceOverService`; that test is explicitly skipped on the compatibility lane because the service requires iPadOS 27. These tests do not authenticate to Spotify or assert audible output.
+
+Source controls remain disabled until initialization finishes mounting the player, restoring its skin and rendering the final library and state. The library can appear earlier during initialization, so its presence alone does not establish readiness. Each Files navigation performs one tap, then requires its native selected value to become `1` within a configured ten-second wait. It does not tap again if selection fails. This attributes a missed action to source selection before attempting playback; it does not fix or explain a touch-delivery failure. Before the Files audit, the test also requires Import from Files and both real fixture tracks to be present. It always retains the accessibility hierarchy immediately before the audit, including on a passing run. The audit categories and failure behavior are unchanged. Native CI exercises this readiness boundary. The retained hierarchy helps investigate findings when an audit omits its affected element; a passing run alone does not explain an earlier unattributed finding.
+
+The VoiceOver case begins with one coordinate touch on the visible Settings control, following Apple's [touch-exploration contract](https://support.apple.com/guide/ipad/ipad58ced58d/ipados): select and speak the item without activating it. Actual speech must identify Settings as a button; forward navigation must leave it and backward navigation must return. Every service error remains a failure. A passing case verifies this navigation flow without establishing that a VoiceOver service defect was fixed.
+
+CI inspects both compiled executables: the Debug binary must contain the fixture storage marker, and the Release binary must exclude the UI-test launch flag and fixture markers. The result is saved as `release-fixture-check.json`.
+
+The native suite currently contains 31 tests, including ten audio-recovery tests, plus seven application UI tests; the compatibility lane runs six UI tests and explicitly skips the VoiceOver service test. These are expected test counts, not evidence that a particular run passed.
+
+On UI-test failure, `tests.xcresult` includes the app screenshot and accessibility hierarchy; cleanup exports attachments under `test-attachments` for inspection without Xcode, recording any export failure in `attachment-export.log`. Every failed validation also attempts a separate `failure-screen.png`, preserving the earlier preflight screenshot in `launch.png`.
+
+Debug UI-test launches also write bounded, sanitized startup probe JSON under `Documents/UITestStartupDiagnostics`. Cleanup exports these as `startup-probes/*.json` even when tests fail. Each filename contains the fixture and launch UUID, retaining cold-launch and persistence-relaunch evidence separately. Scheduled/requested/completed phases distinguish a stalled JavaScript callback from a callback that reports an unready document; no URLs, script contents, user metadata or raw error messages are exported.
+
+During XCTest, a diagnostic watcher can sample one stalled startup per run. It watches the existing 20-second probe, allows two seconds for its callback, and only considers a still-loading document. An unready completed callback remains eligible. Because XCTest can reinstall the app, the watcher refreshes this bundle's current data-container location at most once every 15 seconds, with a five-second lookup timeout. Its summary distinguishes unseen probes, unmatched stall conditions and rejected process identities using fixed statuses and counts.
+
+The watcher verifies the probe's numeric App PID against that simulator's installed executable, then requests a one-second stack sample with a 20-second cap for the sample command and its report generation. Process identity and container/mapping lookups retain their separate two/five-second limits. Timed-out commands retain bounded partial output; sample metadata records elapsed time and report size even when no usable stack report is produced. It samples WebContent only when that App's WebKit launch log identifies a unique live process with the expected executable. A missing or ambiguous mapping is recorded without guessing another process. Serial collection can take up to 49 seconds and overlap fixture teardown, so a usable child-process report is not guaranteed. `startup-sample.json` and any `startup-sample-*.log` files describe the capture; cleanup stops and joins the watcher. These samples may affect timing slightly and are diagnostic evidence, never retries or a replacement for the original test verdict.
+
+After an unsuccessful test run, cleanup performs one diagnostic-only comparison: it launches a fresh UI fixture with `simctl` outside XCTest, waits at most 25 seconds for that fixture's completed startup probe, and captures `comparison.png` plus a structural `comparison.json`. The original failure screen and test verdict are preserved. This does not retry a failed test, change its result, or establish successful playback; it helps distinguish a general startup failure from behavior associated with the automation environment.
+
+CI runs on pull requests, pushes to `main`, and manual dispatch. A branch push that updates an open PR starts its PR run, avoiding a second identical heavy native run for the same update. There are no path filters that leave documentation-only changes waiting for a missing required check. Linux unit/build checks and both browser engines remain independent required jobs. Native validation runs two explicit environments:
+
+| Lane | GitHub runner | Xcode selection | Required iPad simulator runtime |
+| --- | --- | --- | --- |
+| Current platform | `xcode-27` | `/Applications/Xcode_27.app/Contents/Developer` (27.0) | iOS 27.0 |
+| Compatibility | `macos-26` | `/Applications/Xcode_26.6.app/Contents/Developer` | iOS 26.5 |
+
+These paths and runtimes were verified against GitHub's [Xcode 27 image](https://github.com/actions/runner-images/blob/main/images/macos/xcode-27-arm64-Readme.md) and [macOS 26 image](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md) on 9 October 2026. The `xcode-27` runner image is still labelled a [public preview](https://github.com/actions/runner-images/issues/14404); the selected Xcode 27.0 is stable. Neither lane silently selects a beta SDK or the newest installed simulator. Local runs default to the selected Xcode's simulator SDK version; set `NOSTALGIFY_IOS_RUNTIME=27.0` to choose explicitly.
+
+The current lane enables `SWIFT_STRICT_CONCURRENCY=complete` while retaining Swift 5 language mode. `swift-warnings.json` records unique first-party source/message pairs, including warnings from failed builds. This is a migration diagnostic inventory, not a claim of Swift 6 compatibility or a zero-warning gate. Spotify's Objective-C delegate protocols need a documented main-thread compatibility boundary; new application warnings must be reviewed rather than hidden with blanket suppression.
+
+Reviewed migration work includes actor-aware teardown for native observer and
+remote-command tokens, typed Sendable results for Spotify's request continuation,
+and explicit isolation adapters for Capacitor/Spotify's unannotated protocols.
+Do not solve those diagnostics by declaring SDK objects unchecked Sendable or by
+assuming every final reference is released on the main actor. Notification
+delivery can use the main actor directly because its observer explicitly selects
+the main operation queue; a background-post regression checks that boundary.
+
+The iPadOS 27 runtime also reports an `AVAudioSession_iOS.mm:978` warning about synchronous audio-session activation on the main thread. Native tests complete, so this warning alone does not establish a hang or explain a VoiceOver failure. Profile command latency and audio-route changes on a physical iPad before deciding whether activation needs a separate concurrency change.
+
+`Package.resolved` commits Capacitor 8.5.3 and Spotify iOS SDK 5.0.1 with their official Git tag commit IDs. Both package manifests were inspected and have no transitive package dependencies. Portable checks verify the full set of identities, URLs, versions and revisions; Xcode resolves and builds with `-onlyUsePackageVersionsFromResolvedFile` and `-disableAutomaticPackageResolution`. Dependency changes require updating the reviewed manifest versions, lockfile and structural check together. CI also uploads the actual lockfile used by Xcode.
+
+Xcode's additional system-wide failure diagnostics are disabled with `-collect-test-diagnostics never`, an [Apple-documented command-line option](https://developer.apple.com/forums/thread/698054). CI verifies the flag exists in each selected toolchain's help output. This addresses an observed Xcode 27 run where all test verdicts were complete, then simulator diagnostic collection stalled for exactly 600 seconds before timing out. Test failures, `.xcresult` results, XCTest screenshot/hierarchy attachments, exported attachments, app, WebKit and relevant simulator lifecycle logs and our screenshots remain collected. `validation-started-at.log` and `test-started-at.log` record the preflight and XCTest start times with UTC offsets; `simulator.log` captures the entire preflight and test interval rather than only its last five minutes, bounded by the native job deadline. This retains evidence from the first cold launch even when later tests take several minutes. A full system-wide sysdiagnose is no longer part of normal CI; investigate platform-wide failures separately when that extra evidence is needed.
+
+Native unit tests default to a 120-second execution allowance; application UI tests explicitly request 180 seconds to allow simulator interaction and accessibility work. After `app.launch()` returns, one configured 60-second readiness wait uses XCTest's native element query to find an enabled Files source control. Settings must then exist immediately; there is no second readiness wait. Launch and readiness timings are recorded separately, so this is not a 60-second bound on the whole launch operation. Every case, including setup and teardown, retains a configured maximum allowance of 180 seconds using Apple's [test-timeout options](https://developer.apple.com/documentation/xcode-release-notes/xcode-11_4-release-notes); framework scheduling and reporting can slightly exceed that wall-clock duration. A timed-out test fails and records diagnostics in the result bundle. The separate 45-minute native job timeout allows clean simulator boot plus both builds and the suite; it does not bypass a failure. Missing tooling fails visibly. Diagnostic artifacts are retained for seven days, including on failure. Use **CI / Required checks** as the combined required status check; it cannot pass when a unit/build, browser engine or native lane fails or is skipped.
+
+The same bounded simulator log interval includes direct `VoiceOverTouch`, `AccessibilityUIServer` and `axassetsd` output, plus the exact `com.apple.Accessibility` / `AXVOAutomation` category. These service identities appeared in the failing VoiceOver run's launch records; retaining their own messages helps distinguish missing initial focus from a service transport or speech-asset failure.
+
+## What each environment establishes
+
+| Environment | Evidence it can provide | What it does not establish |
+| --- | --- | --- |
+| Node tests and build checks | Provider/contract behavior, isolated bundles, packaging boundaries, predictable errors with test doubles | Apple SDK compilation or device playback |
+| Chromium and WebKit browser smoke | Mounted UI, touch layout, controls and persistent skin import against the test adapter | Real Capacitor/Spotify integration or native audio playback |
+| Xcode simulator/device builds, XCTest and XCUITest | Debug simulator and unsigned Release device compilation on both lanes, Spotify SDK linking, native unit tests, application interaction and selected accessibility audits | Spotify App Remote communication with the real Spotify iPad app |
+| Simulator launch, native self-check and screenshot | Bundled UI starts; native WAV import, queue progression and persistence operate without live credentials | Correct audible output, long background sessions, Bluetooth/AirPlay behavior |
+| Physical iPad | Real authentication/app switching, audible playback, Files imports, lock screen, interruptions and touch interaction | Compatibility with untested OS/device versions |
+
+The iPad build must not load a Spotify client secret or reuse desktop SoundCloud credentials. Physical Spotify tests use an individually configured Spotify application and an account permitted by that application's current access mode. Keep credentials and private callback URLs out of test reports and shared logs.
+
+## Physical iPad test matrix
+
+Record the application commit, iPad model, iPadOS version, Spotify version, account eligibility, network state and output route for each session. Test at least one supported older iPadOS version as well as the current release when claiming support for both. Use small, owned or appropriately licensed audio samples; include two short tracks to exercise automatic advancement.
+
+| Scenario | Procedure | Required result |
+| --- | --- | --- |
+| Fresh installation and cold launch | Launch before entering Spotify settings and with no local library | Shared player is visible; setup and empty-library states are actionable; no indefinite loading or crash |
+| Spotify not installed | Attempt a connection with Spotify removed | Explain that Spotify is required and offer a usable next step; local files remain usable |
+| Invalid client ID or callback | Supply an invalid ID or mismatched redirect, attempt authorization, then cancel | Failure/cancellation is visible; no false connected state; settings can be corrected and retried |
+| Valid Spotify authorization | Connect, approve in Spotify, return through the registered callback | App Remote connects; track state reflects Spotify; transport controls act on that player |
+| App switching and reconnection | Switch to Spotify, change tracks there, return; repeat after a long background interval | State is refreshed; disconnection/reconnection is explicit; stale callbacks cannot overwrite a newer provider selection |
+| Session expiry or revoked access | Revoke authorization or wait for expiry, then retry | Reauthorization is recoverable; tokens are not logged or embedded in saved diagnostics |
+| Spotify playback restrictions | Try an unavailable track/context or an account with limited playback capability | Report the SDK/service result; do not claim playback succeeded or enable unavailable controls |
+| Provider switching | While playing Spotify, switch to local files; then reverse | Source and controls agree with the audible player; no unintended overlapping local audio or stale metadata |
+| Import from Files | Select multiple supported audio files from On My iPad and iCloud Drive; cancel once | Import reports success/failure accurately, cancellation is harmless, and imported files appear once in the intended library |
+| Unsupported, corrupt or unavailable file | Import a non-audio/corrupt file and a cloud file that cannot be downloaded | Show a recoverable per-file failure; retain already imported valid tracks; do not freeze the picker or player |
+| Persistent local library | Import, terminate/relaunch, then enable Airplane Mode | App-managed imports and library entries remain available; missing originals do not silently become playable entries |
+| Local playback controls | Play, pause, seek near the end, change volume and resume | Position and duration remain valid, seeking matches audible output, and errors leave a recoverable state |
+| Local background and next track | Start two short tracks, lock the iPad, leave it locked through the transition | Playback and queue advancement continue without JavaScript timers; lock-screen title/elapsed time and controls reflect the active track |
+| Interruption | During local playback trigger an audio interruption, dismiss it, and return; repeat after manually pausing | Playback follows saved user intent and the interruption's resume indication; user-paused playback does not unexpectedly restart |
+| Media services reset | Use the device's developer audio-reset control while local playback is playing, paused, and while Spotify is selected | Local audio objects and observers are recreated; selection/queue survive; local playback waits for a new user command and never takes audio ownership from Spotify |
+| Route change | Connect/disconnect wired or Bluetooth audio; test AirPlay where supported | State follows the native audio session; unplugging does not unexpectedly play loudly through the speaker; no duplicate audio engine |
+| EQ and visualisation | Inspect EQ on a local track; switch to Spotify | EQ remains flat, OFF and decorative for both sources; no synthetic audio is created to drive the iPad visualizer |
+| Skins and touch | Load representative supported Winamp skins; drag/resize windows and seek with touch | Controls remain reachable, text fits, no hover-only actions are required, and gestures do not accidentally start playback |
+| Accessibility | Navigate settings and playback with VoiceOver and a hardware keyboard; increase text size; test pointer controls | Focus order and spoken descriptions remain useful, sliders are adjustable, and the surrounding controls remain usable regardless of the imported skin |
+| Rotation and multitasking | Rotate and resize the app using supported iPad multitasking modes | Windows remain recoverable and safe areas are respected; playback continues across layout changes |
+| Recovery and diagnostics | Repeat failure/retry cycles, switch providers rapidly, reconnect after network loss | No crash, stuck spinner, accumulating listeners, secret-bearing logs, or misleading success state |
+
+For long-running audio checks, record elapsed time and whether the device was locked, backgrounded or force-quit. Background playback and continuing after the user explicitly force-quits an app are different behaviors; do not report one as evidence of the other.
+
+## Results and release boundaries
+
+Attach the CI run URL and commit to the implementation report. Record physical cases individually as **passed**, **failed**, or **not run**, with a brief observation; do not mark the physical matrix passed from simulator results. For a failure, include the exact reproduction, source, device/OS and a sanitized message. `.xcresult` bundles open in Xcode; build errors and native test failures must be resolved before calling the native build verified.
+
+Desktop releases are separate: only `desktop-v*` tags trigger the workflow that packages desktop ZIPs and creates a draft GitHub release. iPad code is never packaged into those desktop artifacts. The repository does not automatically sign, distribute, upload to TestFlight, or submit an iPad app. Personal device installation uses the documented Xcode signing setup; keep personal team/configuration files local.

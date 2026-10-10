@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 // Read-only service checks. Credentials and signed media URLs never reach stdout.
-const { createSoundCloudAuth } = require("../src/main/soundcloud/auth");
-const { createSoundCloudClient } = require("../src/main/soundcloud/client");
-const { createMediaProxy } = require("../src/main/soundcloud/media-proxy");
+const { createSoundCloudAuth } = require("../apps/desktop/src/main/soundcloud/auth");
+const { createSoundCloudClient } = require("../apps/desktop/src/main/soundcloud/client");
+const { createMediaProxy } = require("../apps/desktop/src/main/soundcloud/media-proxy");
 
 async function main() {
   let url;

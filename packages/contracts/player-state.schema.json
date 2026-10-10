@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Nostalgify native playback snapshot",
+  "type": "object",
+  "required": ["provider", "running", "state", "position", "volume", "track", "capabilities"],
+  "properties": {
+    "provider": {"enum": ["spotify", "local"]},
+    "running": {"type": "boolean"},
+    "state": {"enum": ["playing", "paused", "stopped", "loading", "buffering"]},
+    "position": {"type": "number", "minimum": 0, "description": "Seconds"},
+    "volume": {"type": "number", "minimum": 0, "maximum": 100},
+    "sequence": {"type": "integer", "minimum": 0},
+    "track": {"type": ["object", "null"]},
+    "capabilities": {"type": "object", "properties": {
+      "canSeek": {"type": "boolean"}, "canSetVolume": {"type": "boolean"},
+      "canSkipNext": {"type": "boolean"}, "canSkipPrevious": {"type": "boolean"},
+      "canShuffle": {"type": "boolean"}, "canRepeat": {"type": "boolean"}
+    }, "required": ["canSeek", "canSetVolume", "canSkipNext", "canSkipPrevious", "canShuffle", "canRepeat"]}
+  }
+}

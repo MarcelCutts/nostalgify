@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { build } from "esbuild";
 
 const built = await build({
-  entryPoints: [new URL("../src/renderer/eq.js", import.meta.url).pathname],
+  entryPoints: [new URL("../packages/player-ui/src/eq.js", import.meta.url).pathname],
   bundle: true, platform: "node", format: "esm", write: false,
 });
 const { createEqPolicy } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString("base64")}`);
@@ -15,6 +15,7 @@ function element({ tag = "div", id, className, children = [] } = {}) {
     attributes: { ...(id ? { id } : {}), ...(className ? { class: className } : {}) },
     title: "", children,
     setAttribute(name, value) { this.attributes[name] = String(value); },
+    getAttribute(name) { return this.attributes[name] ?? null; },
     get tabIndex() { return this.attributes.tabindex == null ? (tag === "input" ? 0 : -1) : Number(this.attributes.tabindex); },
     set tabIndex(value) { this.attributes.tabindex = String(value); },
     matches(selector) {

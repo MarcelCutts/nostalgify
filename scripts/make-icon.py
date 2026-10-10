@@ -1,9 +1,12 @@
 """Draws the Nostalgify icon: a pixel-art spectrum analyser in a bevelled case.
 
-Writes build/icon.png (1024px) and build/icon.icns.
-Needs only numpy plus macOS's sips and iconutil.
+Writes build/icon.png (1024px) and build/icon.icns by default.
+With --ipad, writes the full-square opaque iPad asset using the same artwork.
+Needs numpy; macOS output additionally needs sips and iconutil.
 Run: python3 scripts/make-icon.py
+     python3 scripts/make-icon.py --ipad
 """
+import argparse
 import os
 import struct
 import subprocess
@@ -83,21 +86,33 @@ def rounded_canvas(grid, size=1024):
     return canvas
 
 
-def write_png(path, rgba):
-    h, w, _ = rgba.shape
-    raw = b"".join(b"\x00" + rgba[y].tobytes() for y in range(h))
+def write_png(path, pixels):
+    h, w, channels = pixels.shape
+    if channels not in (3, 4):
+        raise ValueError("PNG pixels must be RGB or RGBA")
+    raw = b"".join(b"\x00" + pixels[y].tobytes() for y in range(h))
 
     def chunk(tag, data):
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF)
 
-    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 6, 0, 0, 0))
+    png = b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2 if channels == 3 else 6, 0, 0, 0))
     png += chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
     with open(path, "wb") as f:
         f.write(png)
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--ipad", action="store_true", help="Build the opaque 1024px iPad AppIcon without macOS tools")
+    args = parser.parse_args()
     grid = draw_grid()
+    if args.ipad:
+        # iPadOS applies its own corner mask; supply neither padding nor alpha.
+        icon = np.repeat(np.repeat(grid[:, :, :3], 1024 // G, axis=0), 1024 // G, axis=1)
+        path = os.path.join(ROOT, "apps/ipad/ios/App/App/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png")
+        write_png(path, icon)
+        print("wrote " + os.path.relpath(path, ROOT))
+        return
     icon = rounded_canvas(grid)
     os.makedirs(os.path.join(ROOT, "build"), exist_ok=True)
     png = os.path.join(ROOT, "build", "icon.png")

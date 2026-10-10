@@ -1,6 +1,6 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createMediaProxy } = require('../src/main/soundcloud/media-proxy');
+const { createMediaProxy } = require('../apps/desktop/src/main/soundcloud/media-proxy');
 
 const SECRET = 'private-oauth-token';
 const PLAYLIST = '#EXTM3U\n#EXTINF:4,\nsegment.ts?signature=private\n#EXT-X-ENDLIST\n';

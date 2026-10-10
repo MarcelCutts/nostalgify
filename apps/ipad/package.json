@@ -1,0 +1,19 @@
+{
+  "name": "@nostalgify/ipad",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev:build": "node scripts/build.mjs --dev",
+    "sync": "npm run build && cap sync ios",
+    "open": "cap open ios"
+  },
+  "dependencies": {
+    "@capacitor/core": "8.5.3",
+    "@capacitor/ios": "8.5.3",
+    "@nostalgify/player-ui": "0.1.0",
+    "@nostalgify/contracts": "0.1.0"
+  },
+  "devDependencies": { "@capacitor/cli": "8.5.3" }
+}

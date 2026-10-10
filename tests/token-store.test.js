@@ -4,8 +4,8 @@ const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createTokenStore } = require('../src/main/soundcloud/token-store');
-const { createSoundCloudAuth } = require('../src/main/soundcloud/auth');
+const { createTokenStore } = require('../apps/desktop/src/main/soundcloud/token-store');
+const { createSoundCloudAuth } = require('../apps/desktop/src/main/soundcloud/auth');
 
 function encryptionAdapter(overrides = {}) {
   const key = crypto.randomBytes(32);
