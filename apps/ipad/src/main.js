@@ -296,7 +296,15 @@ $("skin-file").addEventListener("change", () => action(async () => {
   const file = $("skin-file").files?.[0]; if (!file) return;
   const skin = await host.importSkin(file); await renderSkins(); $("skin-select").value = skin.id; $("skin-file").value = "";
 }));
-$("skin-select").addEventListener("change", () => action(() => host.selectSkin($("skin-select").value)));
+$("skin-select").addEventListener("change", () => action(async () => {
+  try { await host.selectSkin($("skin-select").value); }
+  catch (error) {
+    // Reflect rollback in the picker without masking the selection failure.
+    await renderSkins().catch(() => {});
+    throw error;
+  }
+  await renderSkins();
+}));
 async function renderSkins() {
   const { skins } = await host.initSkins();
   const selected = (await host.getPreferences()).skinId || "";
