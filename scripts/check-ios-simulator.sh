@@ -162,7 +162,10 @@ if '-collect-test-diagnostics' not in result.stdout:
 PY
 node scripts/check-ios-project.cjs
 
+# Both pinned dependencies are public. Avoid interactive Keychain access on a
+# developer Mac when SwiftPM downloads their binary artifacts.
 xcodebuild -resolvePackageDependencies -project "$NOSTALGIFY_PROJECT" -scheme App \
+  -packageAuthorizationProvider netrc \
   -onlyUsePackageVersionsFromResolvedFile -disableAutomaticPackageResolution \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
   2>&1 | tee "$NOSTALGIFY_IOS_RESULTS/packages.log"
@@ -170,6 +173,7 @@ node scripts/check-ios-project.cjs
 cp "$NOSTALGIFY_PACKAGE_LOCK" "$NOSTALGIFY_IOS_RESULTS/Package.resolved"
 
 xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
+  -packageAuthorizationProvider netrc \
   -destination 'generic/platform=iOS Simulator' \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
@@ -181,6 +185,7 @@ xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug
 # Also compile the device SDK and Release-only paths, including the Spotify
 # XCFramework's device slice. This is an unsigned build, never an archive/upload.
 xcodebuild build -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Release \
+  -packageAuthorizationProvider netrc \
   -destination 'generic/platform=iOS' \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
@@ -293,6 +298,7 @@ NOSTALGIFY_STARTUP_WATCHER_ID=$!
 NOSTALGIFY_UI_TESTS_STARTED=true
 date '+%Y-%m-%d %H:%M:%S %z' > "$NOSTALGIFY_IOS_RESULTS/test-started-at.log"
 xcodebuild test -project "$NOSTALGIFY_PROJECT" -scheme App -configuration Debug \
+  -packageAuthorizationProvider netrc \
   -destination "platform=iOS Simulator,id=$NOSTALGIFY_SIMULATOR_ID" \
   -parallel-testing-enabled NO \
   -test-timeouts-enabled YES \

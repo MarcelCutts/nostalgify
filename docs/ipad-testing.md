@@ -22,7 +22,7 @@ npm run test:ipad:browser
 IPAD_SMOKE_BROWSER=webkit npm run test:ipad:browser
 ```
 
-The same UI smoke test runs in Chromium and WebKit, including touch layout, controls, provider changes, skin import and persistence after reload. These browser checks use a test adapter; the simulator self-check separately verifies the real Capacitor bridge. CI runs each engine in the official Playwright 1.62.1 Ubuntu Noble container, pinned by digest and checked against the npm dependency. Browsers and their OS dependencies are already installed; CI does not download Ubuntu packages for each smoke test. Each engine saves its screenshot, result and Playwright trace under a separate artifact directory. Linux WebKit is useful cross-engine coverage, but does not establish behavior in the iPad's WKWebView.
+The same UI smoke test runs in Chromium and WebKit, including touch layout, controls, provider changes, skin import and persistence after reload. These browser checks use a test adapter; the simulator self-check separately verifies the real Capacitor bridge. CI runs each engine in the official Playwright 1.62.1 Ubuntu Noble container, pinned by digest and checked against the npm dependency. Browsers and their OS dependencies are already installed; CI does not download Ubuntu packages for each smoke test. Each engine saves screenshots and its result under a separate artifact directory; failures also retain a Playwright trace and error log. Linux WebKit is useful cross-engine coverage, but does not establish behavior in the iPad's WKWebView.
 
 The browser regression also advances the real clock and marquee state while observing the classic player's accessibility attributes. Unchanged roles, names and descriptions must not be rewritten on each animation update; real provider changes must still update the EQ description. These guards compare the current DOM, so replacing skin controls still initializes their semantics. This reduces measured redundant DOM mutations without establishing a cause or fix for intermittent native interaction delays.
 
@@ -36,11 +36,23 @@ On a Mac with Xcode and an installed iPad simulator runtime:
 bash scripts/check-ios-simulator.sh
 ```
 
+If `xcode-select --print-path` reports `/Library/Developer/CommandLineTools`, select the installed Xcode for this invocation:
+
+```sh
+DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer bash scripts/check-ios-simulator.sh
+```
+
+Adjust the path if Xcode is installed elsewhere. Apple's [`DEVELOPER_DIR` override](https://developer.apple.com/documentation/xcode/configuring-command-line-tools-settings) applies to this command and its children without changing the Mac's default developer directory or requiring administrator access.
+
 This resolves only the committed Swift package revisions, builds the actual application for iOS Simulator with signing disabled, also compiles an unsigned Release build against the device SDK, and creates a disposable iPad simulator. It first installs and launches the application for a required native self-check, captures a screenshot, terminates that process, then runs the `App` scheme's native and application UI tests. The simulator is removed afterward.
 
 A Debug-only `--native-local-selfcheck` launch also imports two generated WAV files into an isolated temporary library and verifies distinct identities, native queue advancement and persistence without JavaScript timers. It additionally verifies that the shared player has mounted in the real WKWebView and a native-plugin `getState` call resolves through Capacitor. After simulator installation, launch and container lookup return, CI polls for its structured `native-selfcheck.json` result for 60 seconds and requires it to pass. This is not a 60-second bound on those simulator commands or on total first-launch time; process launch alone never establishes success.
 
 The self-check establishes first-launch readiness on the newly created simulator before accessibility automation begins. Subsequent XCUITest launches use fresh app processes and isolated fixture libraries on that initialized simulator; they do not establish startup on an untouched simulator. This ordering follows observed delayed startup callbacks and incomplete WebKit evaluations during initial automated launches. It preserves both failure gates and the original time limits; it is not a retry or proof of the underlying cause.
+
+Capacitor 8.5.3's document-start bridge synchronously calls JavaScript `prompt` to read the Cookies and HTTP plugin enablement flags, including when both are disabled. iPadOS 27 CI samples captured WebContent waiting for that prompt IPC before the bundled page rendered. `NostalgifyViewController` supplies those two exact configuration responses from the effective native configuration using Capacitor's [public subclass hooks](https://capacitorjs.com/docs/ios/viewcontroller). A later document-start script restores the original prompt before page content runs. Other prompts and cookie operations keep their normal behavior. This is a targeted dependency workaround; it does not establish the cause of every startup or simulator failure.
+
+Native WKWebView regressions load the framework's actual `native-bridge.js` and compare an unpatched control with the application wrapper. A test-only prompt recorder makes the control deterministic without entering the stalled IPC path. The tests check all four flag combinations, repeat navigation, prompt forwarding and restoration, and cleanup after an export fails. Review this workaround when updating Capacitor: its configuration requests and script ordering are part of the tested dependency contract. Real application startup remains a separate required self-check and UI-test gate.
 
 Results are written under `out/ios-ci/run.*`: package/build/test logs, `.xcresult` bundles, selected runtime, resolved dependencies, a deduplicated first-party Swift warning inventory, the self-check result, launch logs and a screenshot.
 
@@ -77,17 +89,22 @@ These paths and runtimes were verified against GitHub's [Xcode 27 image](https:/
 
 The current lane enables `SWIFT_STRICT_CONCURRENCY=complete` while retaining Swift 5 language mode. `swift-warnings.json` records unique first-party source/message pairs, including warnings from failed builds. This is a migration diagnostic inventory, not a claim of Swift 6 compatibility or a zero-warning gate. Spotify's Objective-C delegate protocols need a documented main-thread compatibility boundary; new application warnings must be reviewed rather than hidden with blanket suppression.
 
-Reviewed migration work includes actor-aware teardown for native observer and
+Outstanding migration work includes actor-aware teardown for native observer and
 remote-command tokens, typed Sendable results for Spotify's request continuation,
 and explicit isolation adapters for Capacitor/Spotify's unannotated protocols.
+The current code still produces complete-concurrency warnings at these boundaries.
 Do not solve those diagnostics by declaring SDK objects unchecked Sendable or by
 assuming every final reference is released on the main actor. Notification
-delivery can use the main actor directly because its observer explicitly selects
-the main operation queue; a background-post regression checks that boundary.
+delivery explicitly selects the main operation queue and uses
+`MainActor.assumeIsolated`; a background-post regression checks its runtime
+behavior, but the compiler still warns about transferring the non-Sendable
+`Notification` payload across that isolation boundary.
 
 The iPadOS 27 runtime also reports an `AVAudioSession_iOS.mm:978` warning about synchronous audio-session activation on the main thread. Native tests complete, so this warning alone does not establish a hang or explain a VoiceOver failure. Profile command latency and audio-route changes on a physical iPad before deciding whether activation needs a separate concurrency change.
 
 `Package.resolved` commits Capacitor 8.5.3 and Spotify iOS SDK 5.0.1 with their official Git tag commit IDs. Both package manifests were inspected and have no transitive package dependencies. Portable checks verify the full set of identities, URLs, versions and revisions; Xcode resolves and builds with `-onlyUsePackageVersionsFromResolvedFile` and `-disableAutomaticPackageResolution`. Dependency changes require updating the reviewed manifest versions, lockfile and structural check together. CI also uploads the actual lockfile used by Xcode.
+
+Resolution, builds and tests also select `-packageAuthorizationProvider netrc`, which Apple documents in the [Xcode 16 release notes](https://developer.apple.com/documentation/xcode-release-notes/xcode-16-release-notes). Both pinned dependencies are public, so they need no credentials or `.netrc` entries. Explicitly choosing this provider avoids an observed noninteractive macOS Keychain lookup stall during package resolution; it does not change the pinned revisions.
 
 Xcode's additional system-wide failure diagnostics are disabled with `-collect-test-diagnostics never`, an [Apple-documented command-line option](https://developer.apple.com/forums/thread/698054). CI verifies the flag exists in each selected toolchain's help output. This addresses an observed Xcode 27 run where all test verdicts were complete, then simulator diagnostic collection stalled for exactly 600 seconds before timing out. Test failures, `.xcresult` results, XCTest screenshot/hierarchy attachments, exported attachments, app, WebKit and relevant simulator lifecycle logs and our screenshots remain collected. `validation-started-at.log` and `test-started-at.log` record the preflight and XCTest start times with UTC offsets; `simulator.log` captures the entire preflight and test interval rather than only its last five minutes, bounded by the native job deadline. This retains evidence from the first cold launch even when later tests take several minutes. A full system-wide sysdiagnose is no longer part of normal CI; investigate platform-wide failures separately when that extra evidence is needed.
 
