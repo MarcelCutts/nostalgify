@@ -163,10 +163,22 @@ final class SpotifyConnectionWaiter {
     }
 }
 
+/// The SDK's state callback has no sender. Each subscription needs its own
+/// receiver, including when the same App Remote instance reconnects. Retirement
+/// also rejects queued callbacks that still retain an old, otherwise weak delegate.
+@MainActor
+private final class SpotifyPlayerStateDelegate: NSObject, SPTAppRemotePlayerStateDelegate {
+    private var receive: ((SPTAppRemotePlayerState) -> Void)?
+
+    init(receive: @escaping (SPTAppRemotePlayerState) -> Void) { self.receive = receive }
+    func retire() { receive = nil }
+    func playerStateDidChange(_ playerState: SPTAppRemotePlayerState) { receive?(playerState) }
+}
+
 /// Spotify remains the audio owner. This service never opens an AVAudioSession,
 /// manufactures audio, or pauses Spotify merely because Nostalgify backgrounds.
 @MainActor
-final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePlayerStateDelegate {
+final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate {
     var onStateChanged: (() -> Void)?
 
     private let diagnostics: NativeDiagnostics
@@ -177,6 +189,9 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     private var clientID: String?
     private var redirectURL: URL?
     private var playerState: SPTAppRemotePlayerState?
+    private var playerStateDelegate: SpotifyPlayerStateDelegate?
+    // Track observation history separately from metadata cleared by logout/configuration.
+    private var hasEstablishedConnection = false
     private var stateRevision = 0
     private var stateReadID = UUID()
     private var positionReceivedAt = ProcessInfo.processInfo.systemUptime
@@ -385,6 +400,9 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     }
 
     func suspend() {
+        // A lifecycle gap lets Spotify change playback without our observing it,
+        // even if an earlier provider handoff confirmed a pause.
+        if hasEstablishedConnection { mayHaveActivePlayback = true }
         foreground = false
         closeTransport(preserveAuthorization: true)
     }
@@ -504,20 +522,30 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         }
     }
 
-    /// A switch must not start a second provider until Spotify acknowledges a pause.
+    /// Confirm a pause and retire observation together, before enabling the next
+    /// provider. Only this completed handoff may preserve the confirmed pause.
     func pauseBeforeProviderSwitch() async throws {
         guard remote?.isConnected == true else {
             if mayHaveActivePlayback || authorizing {
                 throw NativeFailure(code: "spotify_pause_unconfirmed", message: "Reconnect to Spotify so Nostalgify can pause it before switching to local files.")
             }
+            suspendAfterProviderSwitch()
             return
         }
+        let session = generation
         stateReadID = UUID()
         _ = try await request { $0.pause($1) }
         try await refreshStateAfterCommand()
-        guard playerState?.isPaused == true, !mayHaveActivePlayback else {
+        guard generation == session, foreground, remote?.isConnected == true,
+              playerState?.isPaused == true, !mayHaveActivePlayback else {
             throw NativeFailure(code: "spotify_pause_unconfirmed", message: "Spotify has not confirmed it paused. Try switching again after pausing Spotify.")
         }
+        suspendAfterProviderSwitch()
+    }
+
+    private func suspendAfterProviderSwitch() {
+        foreground = false
+        closeTransport(preservePausedPlayback: true)
     }
 
     func snapshot() -> [String: Any] {
@@ -568,15 +596,22 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         notify()
     }
 
-    private func closeTransport(preserveAuthorization: Bool = false) {
+    private func closeTransport(preserveAuthorization: Bool = false, preservePausedPlayback: Bool = false) {
         if !preserveAuthorization || !authorizing { generation = UUID() }
         stateReadID = UUID()
         connecting = false
         connectionTimeout?.cancel()
         connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
         cancelPendingRequests()
+        retirePlayerStateDelegate(preservePausedPlayback: preservePausedPlayback)
         // App Remote releases its APIs on disconnect; their delegate is weak and nonnull in the SDK.
         remote?.disconnect()
+    }
+
+    private func retirePlayerStateDelegate(preservePausedPlayback: Bool = false) {
+        if playerStateDelegate != nil, !preservePausedPlayback { mayHaveActivePlayback = true }
+        playerStateDelegate?.retire()
+        playerStateDelegate = nil
     }
 
     private func cancelPendingRequests() {
@@ -684,10 +719,17 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         authorizing = false
         // A successful transport without a state cannot yet prove playback paused.
         mayHaveActivePlayback = true
+        hasEstablishedConnection = true
         failure = nil
         statusMessage = ""
-        appRemote.playerAPI?.delegate = self
         let session = generation
+        retirePlayerStateDelegate()
+        let delegate = SpotifyPlayerStateDelegate { [weak self, weak appRemote] state in
+            guard let self, let appRemote, self.remote === appRemote, self.generation == session else { return }
+            self.accept(state)
+        }
+        playerStateDelegate = delegate
+        appRemote.playerAPI?.delegate = delegate
         appRemote.playerAPI?.subscribe(toPlayerState: { [weak self, weak appRemote] _, error in
             guard let self, let appRemote, self.remote === appRemote, self.generation == session else { return }
             if error != nil {
@@ -709,6 +751,8 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
 
     func appRemote(_ appRemote: SPTAppRemote, didDisconnectWithError error: Error?) {
         guard remote === appRemote else { return }
+        retirePlayerStateDelegate()
+        stateReadID = UUID()
         connecting = false
         connectionTimeout?.cancel()
         connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
@@ -719,8 +763,6 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         }
         notify()
     }
-
-    func playerStateDidChange(_ playerState: SPTAppRemotePlayerState) { accept(playerState) }
 
     private func require(_ capability: Bool) throws {
         guard remote?.isConnected == true else {
