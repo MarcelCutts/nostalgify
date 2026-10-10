@@ -236,16 +236,28 @@ final class NativeCoreTests: XCTestCase {
     @MainActor
     func testBootstrapForwardsOrdinaryPromptsAndCookieOperations() async throws {
         let fixture = try BootstrapWebViewFixture(cookies: true, http: false)
-        defer { fixture.close() }
+        defer {
+            fixture.attachPromptTrace()
+            fixture.close()
+        }
         try fixture.show()
         _ = try await fixture.load(in: self)
         let value = try await fixture.evaluate("""
         (() => {
+          const phase = value => window.webkit.messageHandlers.bootstrapPromptPhase.postMessage(value);
           window.__bootstrapTest.useNativePrompt = true;
+          phase('ordinary requested');
           const ordinary = prompt('ordinary', 'prefill');
+          phase('ordinary returned');
+          phase('cancel requested');
           const cancelled = prompt('cancel');
+          phase('cancel returned');
+          phase('cookie get requested');
           const cookie = document.cookie;
+          phase('cookie get returned');
+          phase('cookie set requested');
           document.cookie = 'fixture=updated; domain=localhost';
+          phase('cookie set returned');
           return {ordinary, cancelled, cookie};
         })()
         """, in: self)
@@ -337,6 +349,7 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     private var navigationReady: XCTestExpectation?
     private var loadingNavigation: WKNavigation?
     private var navigationResult: Result<Void, Error>?
+    private var promptTrace: [String] = []
     private(set) var prompts: [(message: String, defaultText: String?)] = []
 
     init(cookies: Bool, http: Bool, installShim: Bool = true, scenario: Scenario = .normal,
@@ -345,6 +358,10 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         let bridgeSource = try String(contentsOf: bridgeURL, encoding: .utf8)
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        // This inline fixture has no remote content to classify. WebKit can
+        // defer native prompt delivery beyond didFinish while a URL reputation
+        // lookup is pending; that service is outside this bridge regression.
+        configuration.preferences.isFraudulentWebsiteWarningEnabled = false
         let content = configuration.userContentController
         func add(_ source: String, at time: WKUserScriptInjectionTime = .atDocumentStart) {
             content.addUserScript(WKUserScript(source: source, injectionTime: time, forMainFrameOnly: true))
@@ -481,6 +498,7 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         super.init()
         content.add(self, name: "bridge")
         content.add(self, name: "bootstrapResult")
+        content.add(self, name: "bootstrapPromptPhase")
         webView.uiDelegate = self
         webView.navigationDelegate = self
     }
@@ -546,7 +564,9 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     func evaluate(_ source: String, in test: XCTestCase) async throws -> Any {
         let ready = test.expectation(description: "bootstrap JavaScript completed")
         var result: Result<Any, Error>?
-        webView.evaluateJavaScript(source) { value, error in
+        recordPromptPhase("evaluation requested")
+        webView.evaluateJavaScript(source) { [weak self] value, error in
+            self?.recordPromptPhase(error == nil ? "evaluation completed" : "evaluation failed")
             result = error.map { .failure($0) } ?? .success(value ?? NSNull())
             ready.fulfill()
         }
@@ -555,6 +575,10 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "bootstrapPromptPhase", let phase = message.body as? String {
+            recordPromptPhase(phase)
+            return
+        }
         guard message.name == "bootstrapResult", report == nil else { return }
         report = message.body as? [String: Any]
         reportReady?.fulfill()
@@ -564,6 +588,9 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
                  defaultText: String?, initiatedByFrame frame: WKFrameInfo,
                  completionHandler: @escaping @MainActor (String?) -> Void) {
         prompts.append((prompt, defaultText))
+        let index = prompts.count
+        recordPromptPhase("native prompt \(index) received")
+        defer { recordPromptPhase("native prompt \(index) completed") }
         switch prompt {
         case "cancel": completionHandler(nil)
         case #"{"type":"CapacitorCookies.get"}"#: completionHandler("fixture=value")
@@ -574,12 +601,28 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         }
     }
 
+    private func recordPromptPhase(_ phase: String) {
+        promptTrace.append(phase)
+        print("BOOTSTRAP_PROMPT \(phase)")
+    }
+
+    func attachPromptTrace() {
+        let state = "nativePrompts=\(prompts.count), loading=\(webView.isLoading), attached=\(webView.window != nil)"
+        XCTContext.runActivity(named: "Bootstrap native prompt transport") { activity in
+            let attachment = XCTAttachment(string: (promptTrace + [state]).joined(separator: "\n"))
+            attachment.name = "Bootstrap prompt phases"
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
+    }
+
     func close() {
         webView.stopLoading()
         webView.uiDelegate = nil
         webView.navigationDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapResult")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapPromptPhase")
         webView.removeFromSuperview()
     }
 }
