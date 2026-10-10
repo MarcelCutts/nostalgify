@@ -541,15 +541,21 @@ final class SpotifyRecoveryTests: XCTestCase {
     func testPostCommandStateReadTimesOutAndDisconnectReleasesIt() async throws {
         for disconnect in [false, true] {
             let f = try SpotifyRecoveryFixture(requestTimeout: 20_000_000)
-            defer { f.cleanup() }
+            defer {
+                f.remote.api.onStateRead = nil
+                f.cleanup()
+            }
             f.establish(paused: true)
             f.remote.api.delayState = true
             let read = expectation(description: "Post-command read requested")
-            f.remote.api.onStateRead = { read.fulfill() }
+            f.remote.api.onStateRead = {
+                // Cancel synchronously, before waiting for XCTest can let the timeout win.
+                if disconnect { f.service.disconnect() }
+                read.fulfill()
+            }
             let seek = Task { @MainActor in try await f.service.command("seek", arg: -2) }
             await fulfillment(of: [read], timeout: 1)
             XCTAssertEqual(f.remote.api.seekPositions, [0])
-            if disconnect { f.service.disconnect() }
             do { try await seek.value; XCTFail("An unavailable state must not leave the command pending") }
             catch let error as NativeFailure {
                 XCTAssertEqual(error.code, disconnect ? "spotify_disconnected" : "spotify_command_timeout")
