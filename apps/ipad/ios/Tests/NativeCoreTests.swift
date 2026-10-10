@@ -138,6 +138,79 @@ final class NativeCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeDiagnosticsRejectTokenShapedLabelsAndPreserveKnownCodes() {
+        let log = NativeDiagnostics()
+        log.record("private_token", requestId: "private_id", command: "private_command", code: "private_token")
+        log.record("private-filename.mp3", code: "ABC123secret")
+        log.record("spotify_failure", code: "spotify_connection_timeout")
+        log.record("local.playback_failed", code: "local_seek_timeout")
+        log.record("provider.changed", code: "local")
+        log.record("selfcheck.failed", code: "selfcheck_webview_bridge")
+        let events = log.snapshot()["events"] as? [[String: Any]] ?? []
+        XCTAssertEqual(events.count, 6)
+        for entry in events.prefix(2) {
+            XCTAssertEqual(entry["event"] as? String, "redacted")
+            XCTAssertEqual(entry["code"] as? String, "redacted")
+            XCTAssertNil(entry["requestId"])
+            XCTAssertNil(entry["command"])
+        }
+        XCTAssertEqual(events.suffix(4).compactMap { $0["code"] as? String },
+            ["spotify_connection_timeout", "local_seek_timeout", "local", "selfcheck_webview_bridge"])
+        XCTAssertFalse(String(describing: events).contains("private"))
+        XCTAssertFalse(String(describing: events).contains("secret"))
+    }
+
+    @MainActor
+    func testExportURLPreservesSkinAndNativeFailureCodesWithoutSecrets() throws {
+        let log = NativeDiagnostics()
+        log.record("private_native_token", code: "private_native_code")
+        let codes = ["skin_storage_unavailable", "skin_load_failed", "skin_preference_failed",
+            "spotify_connection_timeout", "spotify_connection_cancelled", "spotify_authorization_timeout",
+            "spotify_authorization_denied", "spotify_connection_failed", "spotify_subscription_failed",
+            "invalid_provider", "inactive_provider", "invalid_command", "picker_unavailable",
+            "audio_services_reset", "local_playback_failed", "local_seek_failed", "local_seek_timeout"]
+        let requestID = UUID().uuidString
+        let known: [[String: Any]] = codes.enumerated().map { index, code in
+            ["event": code.hasPrefix("skin_") ? "web_error" : "failure", "code": code,
+             "requestId": requestID, "time": "2026-10-10T12:34:56.789Z", "durationMs": 12.5,
+             "errorClass": "TypeError", "source": "app.js", "line": index, "column": 7,
+             "message": "access_token=private", "stack": "private stack", "url": "https://private.example",
+             "metadata": ["token": "private"]]
+        }
+        let untrusted: [[String: Any]] = [
+            ["event": "web_error", "code": "private_token", "errorClass": "private_class",
+             "source": "private_filename.mp3", "line": Double.infinity, "column": -1,
+             "requestId": "private_id", "time": "private_time", "durationMs": Double.infinity],
+            ["event": "private_event", "code": "private_code", "message": "private_message"]
+        ]
+        let input = Array(repeating: ["event": "getState"] as [String: Any], count: 160) + known + untrusted
+        let url = try log.exportURL(webEvents: input)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let data = try Data(contentsOf: url)
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let events = try XCTUnwrap(report["webEvents"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 150)
+        let exported = Array(events.suffix(codes.count + 2).prefix(codes.count))
+        XCTAssertEqual(exported.compactMap { $0["code"] as? String }, codes)
+        for entry in exported {
+            XCTAssertEqual(entry["requestId"] as? String, requestID)
+            XCTAssertEqual(entry["time"] as? String, "2026-10-10T12:34:56.789Z")
+            XCTAssertEqual(entry["durationMs"] as? Double, 12.5)
+            XCTAssertNil(entry["message"])
+            XCTAssertNil(entry["stack"])
+            XCTAssertNil(entry["url"])
+            XCTAssertNil(entry["metadata"])
+        }
+        XCTAssertEqual(exported.first?["line"] as? Int, 0)
+        XCTAssertEqual(events[events.count - 2]["code"] as? String, "unexpected")
+        XCTAssertEqual(events[events.count - 2].count, 2)
+        XCTAssertEqual(events.last?["event"] as? String, "redacted")
+        XCTAssertEqual(events.last?["code"] as? String, "redacted")
+        let text = String(decoding: data, as: UTF8.self)
+        for secret in ["private", "access_token", "https://", "secret"] { XCTAssertFalse(text.contains(secret)) }
+    }
+
+    @MainActor
     func testWebViewProbeWaitsThroughStartupNavigationAndAsyncBridge() async throws {
         let webView = WKWebView()
         webView.loadHTMLString("<html><body>Loading</body></html>", baseURL: nil)

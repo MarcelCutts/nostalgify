@@ -15,12 +15,12 @@ final class NativeDiagnostics {
     func record(_ event: String, requestId: String? = nil, command: String? = nil,
                 durationMs: Double? = nil, code: String? = nil) {
         var entry: [String: Any] = ["time": ISO8601DateFormatter().string(from: Date()),
-                                    "event": label(event)]
+                                    "event": Self.nativeEvents.contains(event) ? event : "redacted"]
         // A caller cannot accidentally put a URL or user text in a request ID.
         if let value = requestId.flatMap(UUID.init(uuidString:)) { entry["requestId"] = value.uuidString }
         if let value = command, Self.commands.contains(value) { entry["command"] = value }
         if let value = durationMs, value.isFinite { entry["durationMs"] = max(0, value) }
-        if let value = code { entry["code"] = label(value) }
+        if let value = code { entry["code"] = Self.nativeCodes.contains(value) ? value : "redacted" }
         events.append(entry)
         if events.count > limit { events.removeFirst(events.count - limit) }
         let safeEvent = entry["event"] as? String ?? "event"
@@ -43,12 +43,6 @@ final class NativeDiagnostics {
                   let interval = commandIntervals.removeValue(forKey: id) {
             signposter.endInterval("Playback command", interval)
         }
-    }
-
-    private func label(_ value: String) -> String {
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.-")
-        guard value.count <= 64, value.unicodeScalars.allSatisfy(allowed.contains) else { return "redacted" }
-        return value
     }
 
     func snapshot() -> [String: Any] {
@@ -88,20 +82,34 @@ final class NativeDiagnostics {
         "configureSpotify", "connectSpotify", "disconnectSpotify", "listAudio", "importAudio", "removeAudio",
         "getDiagnostics", "exportDiagnostics", "failure", "web_error", "listener_unavailable"]
     private static let webCodes: Set<String> = ["timeout", "native_unavailable", "native_error", "unsupported",
-        "invalid_link", "skin_storage_unavailable", "skin_preference_failed", "javascript_error",
-        "unhandled_promise", "startup_failed", "resize_observer_loop", "spotify_configuration", "spotify_redirect", "spotify_not_installed",
-        "spotify_disconnected", "spotify_state_unavailable", "spotify_pause_unconfirmed", "spotify_command_timeout",
-        "spotify_command_failed", "spotify_restricted", "spotify_uri", "spotify_token_storage", "unsupported_command",
-        "unsupported_audio", "import_failed", "not_found", "library_write_failed", "empty_library", "no_track",
-        "audio_session_failed", "queue_boundary", "dialog_busy", "invalid_preferences", "preferences_too_large", "invalid_argument"]
+        "invalid_link", "skin_storage_unavailable", "skin_load_failed", "skin_preference_failed", "javascript_error",
+        "unexpected", "unhandled_promise", "startup_failed", "resize_observer_loop", "spotify_configuration",
+        "spotify_redirect", "spotify_not_installed", "spotify_sdk_missing", "spotify_disconnected",
+        "spotify_connection_timeout", "spotify_connection_cancelled", "spotify_authorization_timeout",
+        "spotify_authorization_denied", "spotify_connection_failed", "spotify_subscription_failed",
+        "spotify_state_unavailable", "spotify_pause_unconfirmed", "spotify_command_timeout", "spotify_command_failed",
+        "spotify_restricted", "spotify_uri", "spotify_token_storage", "unsupported_command", "unsupported_audio",
+        "import_failed", "not_found", "library_write_failed", "empty_library", "no_track", "local_playback_failed",
+        "audio_services_reset", "audio_session_failed", "local_seek_failed", "local_seek_timeout", "queue_boundary",
+        "dialog_busy", "picker_unavailable", "invalid_preferences", "preferences_too_large", "invalid_argument",
+        "invalid_command", "invalid_provider", "inactive_provider"]
+    private static let nativeEvents: Set<String> = ["app.started", "app.active", "app.inactive", "command.started",
+        "command.completed", "command.failed", "provider.changed", "local.import_completed", "local.import_failed",
+        "local.interruption_began", "local.interruption_ended", "local.library_read_failed", "local.media_services_reset",
+        "local.playback_failed", "local.remote_failed", "local.removed", "local.route_disconnected",
+        "local.session_configure_failed", "local.session_deactivate_failed", "local.track_finished",
+        "spotify_authorization_started", "spotify_authorization_completed", "spotify_logged_out", "spotify_connected",
+        "spotify_failure", "selfcheck.started", "selfcheck.passed", "selfcheck.failed"]
+    private static let nativeCodes = webCodes.union(["local", "spotify", "unsupported_or_unreadable", "command_failed",
+        "selfcheck_failed", "selfcheck_identity", "selfcheck_persistence", "selfcheck_queue", "selfcheck_webview_banner",
+        "selfcheck_webview_bridge", "selfcheck_webview_error", "selfcheck_webview_timeout"])
 
     /// Structural browser error locations are useful; raw messages, stacks and
     /// URLs can contain user data and must never cross into exported reports.
     static func sanitizedWebError(_ input: [String: Any]) -> [String: Any] {
-        let codes: Set<String> = ["javascript_error", "unhandled_promise", "startup_failed", "resize_observer_loop"]
         let classes: Set<String> = ["Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError", "URIError", "DOMException", "ResizeObserver", "Unknown"]
         let code = input["code"] as? String ?? "unexpected"
-        var result: [String: Any] = ["code": codes.contains(code) ? code : "unexpected"]
+        var result: [String: Any] = ["code": webCodes.contains(code) ? code : "unexpected"]
         if let value = input["errorClass"] as? String, classes.contains(value) { result["errorClass"] = value }
         if let value = input["source"] as? String, ["app.js", "unknown"].contains(value) { result["source"] = value }
         for key in ["line", "column"] {

@@ -325,15 +325,35 @@ async function renderSkins() {
   $("skin-select").value = selected;
 }
 
-$("diagnostics-button").addEventListener("click", () => action(async () => {
-  const result = await host.exportDiagnostics();
-  $("diagnostics-status").textContent = result?.shared ? "Diagnostics exported." : "Export closed.";
-}, $("diagnostics-button")));
-$("web-diagnostics-button").addEventListener("click", () => action(async () => {
-  const report = await host.getDiagnostics();
-  const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
-  const link = document.createElement("a"); link.href = url; link.download = "nostalgify-diagnostics.json"; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
-}, $("web-diagnostics-button")));
+async function exportDiagnostics() {
+  $("diagnostics-status").textContent = "Preparing diagnostics…";
+  try {
+    if (native) {
+      const result = await host.exportDiagnostics();
+      $("diagnostics-status").textContent = result?.shared ? "Diagnostics exported." : "Export closed.";
+      return;
+    }
+    const report = await host.getDiagnostics();
+    const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+    const link = document.createElement("a");
+    try {
+      link.href = url;
+      link.download = "nostalgify-diagnostics.json";
+      document.body.append(link);
+      link.click();
+      $("diagnostics-status").textContent = "Diagnostics download started.";
+    } finally {
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  } catch (error) {
+    $("diagnostics-status").textContent = "Diagnostics export failed. Try again.";
+    throw error;
+  }
+}
+for (const id of ["diagnostics-button", "web-diagnostics-button"]) {
+  $(id).addEventListener("click", () => action(exportDiagnostics, $(id)));
+}
 window.addEventListener("error", event => { const details = safeWebError(event); host.recordError(details.code, details); showError(new Error("The interface encountered an error. Refresh the connection or export diagnostics.")); });
 window.addEventListener("unhandledrejection", event => { host.recordError("unhandled_promise", safeWebError({ error: event.reason })); showError(new Error("An action could not finish. Try again or export diagnostics.")); });
 document.addEventListener("visibilitychange", () => { if (!document.hidden) void action(async () => { await host.getState(); if (native || demo) await refreshLibrary(); }); });
