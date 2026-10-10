@@ -116,8 +116,10 @@ PY
     if [ -n "$NOSTALGIFY_VALIDATION_LOG_START" ]; then
       NOSTALGIFY_LOG_TIME_ARGUMENTS=(--start "$NOSTALGIFY_VALIDATION_LOG_START")
     fi
+    # Include the VoiceOver and accessibility services identified in actual
+    # simulator launch records, plus the exact automation category across clients.
     xcrun simctl spawn "$NOSTALGIFY_SIMULATOR_ID" log show "${NOSTALGIFY_LOG_TIME_ARGUMENTS[@]}" --style compact \
-      --predicate 'process == "App" OR process == "Nostalgify" OR process == "AppUITests-Runner" OR process == "testmanagerd" OR process == "runningboardd" OR process == "SpringBoard" OR subsystem BEGINSWITH "com.apple.WebKit"' \
+      --predicate 'process == "App" OR process == "Nostalgify" OR process == "AppUITests-Runner" OR process == "testmanagerd" OR process == "runningboardd" OR process == "SpringBoard" OR subsystem BEGINSWITH "com.apple.WebKit" OR process == "VoiceOverTouch" OR process == "AccessibilityUIServer" OR process == "axassetsd" OR (subsystem == "com.apple.Accessibility" AND category == "AXVOAutomation")' \
       > "$NOSTALGIFY_IOS_RESULTS/simulator.log" 2>&1 || true
     xcrun simctl shutdown "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
     xcrun simctl delete "$NOSTALGIFY_SIMULATOR_ID" >/dev/null 2>&1 || true
