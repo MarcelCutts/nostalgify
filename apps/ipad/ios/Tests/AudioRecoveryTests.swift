@@ -5,6 +5,288 @@ import XCTest
 
 final class AudioRecoveryTests: XCTestCase {
     @MainActor
+    func testPeriodicProgressKeepsNowPlayingAnchorAndUpdatesPreviousAtThreeSeconds() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        await settleNotifications()
+        let player = fixture.players[0]
+        let nowPlaying = MPNowPlayingInfoCenter.default()
+        let commands = MPRemoteCommandCenter.shared()
+        let anchor = try XCTUnwrap(nowPlaying.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double)
+        XCTAssertFalse(commands.previousTrackCommand.isEnabled)
+        var positions: [Double] = []
+        service.onStateChanged = { [weak service] in
+            if let position = service?.snapshot()["position"] as? Double { positions.append(position) }
+        }
+        for tick in 1...8 {
+            let position = Double(tick) / 2
+            player.simulatePosition(position)
+            player.periodicCallback?(player.currentTime())
+            try await eventually { positions.count == tick }
+            XCTAssertEqual(positions.last, position, "Each half-second tick still publishes measured local progress.")
+            XCTAssertEqual(nowPlaying.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, anchor,
+                           "MediaPlayer extrapolates from its anchor; progress must not rewrite it.")
+            XCTAssertEqual(commands.previousTrackCommand.isEnabled, position > 3)
+        }
+        XCTAssertEqual(positions.count, 8)
+        try service.setActive(false)
+        player.periodicCallback?(player.currentTime())
+        await settleNotifications()
+        XCTAssertEqual(positions.count, 8, "An inactive provider must not publish local progress.")
+    }
+
+    @MainActor
+    func testNowPlayingUpdatesForRateSeekTrackAndProviderChanges() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let player = fixture.players[0]
+        let center = MPNowPlayingInfoCenter.default()
+        player.simulatePlaybackRate(1)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float) == 1 }
+        player.simulatePosition(2)
+        try await service.command("pause", arg: nil)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 0)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 2)
+        try await service.command("seek", arg: 4)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4)
+        try await service.command("play", arg: nil)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 1)
+        try await service.command("next", arg: nil)
+        XCTAssertEqual(center.nowPlayingInfo?[MPMediaItemPropertyTitle] as? String, fixture.records[1].name)
+        try service.setActive(false)
+        XCTAssertNil(center.nowPlayingInfo)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().playCommand.isEnabled)
+        try service.setActive(true)
+        XCTAssertEqual(center.nowPlayingInfo?[MPMediaItemPropertyTitle] as? String, fixture.records[1].name)
+        XCTAssertTrue(MPRemoteCommandCenter.shared().playCommand.isEnabled)
+        XCTAssertFalse(MPRemoteCommandCenter.shared().pauseCommand.isEnabled)
+    }
+
+    @MainActor
+    func testNowPlayingStopsExtrapolatingWhilePlayerWaitsAtRequestedRate() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let player = fixture.players[0]
+        let center = MPNowPlayingInfoCenter.default()
+        player.simulatePlaybackRate(1, status: .playing)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float) == 1 }
+        player.simulatePosition(2.5)
+        player.simulatePlaybackRate(1, status: .waitingToPlayAtSpecifiedRate)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float) == 0 }
+        XCTAssertEqual(player.rate, 1, "Requested playback rate can remain nonzero during a stall.")
+        XCTAssertEqual(player.timeControlStatus, .waitingToPlayAtSpecifiedRate)
+        var ticks = 0
+        service.onStateChanged = { ticks += 1 }
+        for tick in 1...8 {
+            player.periodicCallback?(player.currentTime())
+            try await eventually { ticks == tick }
+            XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 2.5)
+            XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 0,
+                           "A stalled clock must not extrapolate even without periodic reanchors.")
+        }
+        player.simulatePlaybackRate(1, status: .playing)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float) == 1 }
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 2.5,
+                       "Resuming anchors interpolation at the measured position.")
+    }
+
+    @MainActor
+    func testTimeJumpDefersPlayerReadsAndPublicationUntilNotificationReturns() async throws {
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        await settleNotifications()
+        let player = fixture.players[0]
+        let item = try XCTUnwrap(player.currentItem)
+        let center = MPNowPlayingInfoCenter.default()
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 0)
+        player.simulatePosition(4)
+        var publications = 0
+        service.onStateChanged = { publications += 1 }
+        let itemReads = player.currentItemReads
+        let clockReads = player.currentTimeReads
+
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: item)
+
+        XCTAssertEqual(player.currentItemReads, itemReads, "Notification delivery must not synchronously query AVPlayer.")
+        XCTAssertEqual(player.currentTimeReads, clockReads, "Reading the clock during its own notification can deadlock AVFoundation.")
+        XCTAssertEqual(publications, 0, "Listeners must run after notification delivery returns.")
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 0)
+        try await eventually { publications == 1 }
+        XCTAssertGreaterThan(player.currentTimeReads, clockReads)
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
+                       "The deferred callback must still publish the measured time jump.")
+    }
+
+    @MainActor
+    func testQueuedTimeJumpRejectsItemReplacedBeforePublication() async throws {
+        let fixture = try AudioRecoveryFixture(ownsPlayerItems: true)
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        await settleNotifications()
+        let player = fixture.players[0]
+        let oldItem = try XCTUnwrap(player.currentItem)
+        let replacementItem = RecoveryProbeItem(url: fixture.directory.appendingPathComponent(fixture.records[1].filename))
+        var publications = 0
+        service.onStateChanged = { publications += 1 }
+
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: oldItem)
+        // Replace only the probe's owned item before the queued callback runs.
+        // Service removal also pauses twice, queuing unrelated rate publications.
+        // Keep both items alive so this exercises identity rather than lifetime.
+        player.replaceCurrentItem(with: replacementItem)
+        XCTAssertTrue(player.currentItem === replacementItem)
+        let center = MPNowPlayingInfoCenter.default()
+        let anchor = try XCTUnwrap(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double)
+        let publicationsAfterReplacement = publications
+        let itemReadsAfterReplacement = player.currentItemReads
+        let clockReadsAfterReplacement = player.currentTimeReads
+        player.simulatePosition(5)
+
+        try await eventually { player.currentItemReads > itemReadsAfterReplacement }
+
+        XCTAssertTrue(player.currentItem === replacementItem)
+        XCTAssertFalse(player.currentItem === oldItem)
+        XCTAssertEqual(publications, publicationsAfterReplacement, "A queued old-item jump must not publish replacement state.")
+        XCTAssertEqual(player.currentTimeReads, clockReadsAfterReplacement, "Reject the stale item before reading the replacement player's clock.")
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, anchor)
+    }
+
+    @MainActor
+    func testLateResetPositionRestorationReanchorsNowPlayingWithoutResuming() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        try await service.command("seek", arg: 4)
+        let oldItem = try XCTUnwrap(fixture.players[0].currentItem)
+        fixture.holdSimpleSeeksOnNewPlayers = true
+        fixture.postReset()
+        let restored = try XCTUnwrap(fixture.players.last)
+        XCTAssertEqual(fixture.players.count, 2)
+        let currentItem = try XCTUnwrap(restored.currentItem)
+        let center = MPNowPlayingInfoCenter.default()
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 0)
+        restored.completeSimpleSeek()
+        XCTAssertEqual(service.snapshot()["position"] as? Double, 4)
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: currentItem)
+        try await eventually { (center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double) == 4 }
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
+                       "Late asynchronous restoration must replace the initial zero-position anchor.")
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 0)
+        XCTAssertEqual(restored.playCalls, 0)
+        XCTAssertEqual(service.snapshot()["state"] as? String, "paused")
+        XCTAssertEqual(service.snapshot()["error"] as? String, "audio_services_reset")
+        await settleNotifications()
+        restored.simulatePosition(5)
+        fixture.center.post(name: AVPlayerItem.timeJumpedNotification, object: oldItem)
+        restored.periodicCallback?(restored.currentTime())
+        await settleNotifications()
+        XCTAssertEqual(center.nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
+                       "Old-item jumps and ordinary progress must not rewrite the current anchor.")
+        XCTAssertEqual(service.snapshot()["error"] as? String, "audio_services_reset")
+    }
+
+    @MainActor
+    func testStopPublishesBeforeRewindFinishesAndRemainsStoppedOnSeekFailure() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("play", arg: nil)
+        let player = fixture.players[0]
+        player.simulatePosition(4)
+        player.holdSeeks = true
+        var states: [String] = []
+        service.onStateChanged = { [weak service] in
+            if let state = service?.snapshot()["state"] as? String { states.append(state) }
+        }
+        let stop = Task { @MainActor in try await service.command("stop", arg: nil) }
+        defer { stop.cancel() }
+        try await eventually { player.pendingSeek != nil }
+        XCTAssertEqual(states.last, "stopped", "Stop is already visible while its rewind is pending.")
+        let commands = MPRemoteCommandCenter.shared()
+        XCTAssertFalse(commands.pauseCommand.isEnabled)
+        XCTAssertFalse(commands.stopCommand.isEnabled)
+        XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyPlaybackRate] as? Float, 0)
+        player.completeSeek(success: false)
+        do {
+            try await stop.value
+            XCTFail("The failed rewind must still reject the command.")
+        } catch let failure as NativeFailure { XCTAssertEqual(failure.code, "local_seek_failed") }
+        XCTAssertEqual(service.snapshot()["state"] as? String, "stopped")
+        XCTAssertEqual(service.snapshot()["position"] as? Double, 4, "A failed rewind must not claim that it reached zero.")
+        XCTAssertFalse(commands.pauseCommand.isEnabled)
+        XCTAssertFalse(commands.stopCommand.isEnabled)
+    }
+
+    @MainActor
+    func testBackgroundPublicationStopsAndForegroundReceivesLatestStateAndFailures() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let suite = "nostalgify-publication-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set("local", forKey: "nostalgify.provider")
+        let coordinator = NativePlayback(defaults: defaults, localService: fixture.service!)
+        coordinator.becameActive()
+        let id = UUID()
+        defer { coordinator.unsubscribe(id: id) }
+        var delivered: [[String: Any]] = []
+        coordinator.subscribe(id: id) { delivered.append($0) }
+        XCTAssertEqual(delivered.count, 1)
+        try await coordinator.command("play", arg: nil, requestID: nil)
+        await settleNotifications()
+        coordinator.becameInactive()
+        let beforeBackground = delivered.count
+        let sequenceBeforeBackground = try XCTUnwrap(delivered.last?["sequence"] as? Int)
+        let player = fixture.players[0]
+        for position in [0.5, 1.0, 1.5] {
+            player.simulatePosition(position)
+            player.periodicCallback?(player.currentTime())
+            await settleNotifications()
+        }
+        try await coordinator.command("seek", arg: 4, requestID: nil)
+        XCTAssertEqual(coordinator.snapshot()["position"] as? Double, 4, "Direct command/getState replies remain current in the background.")
+        XCTAssertEqual(MPNowPlayingInfoCenter.default().nowPlayingInfo?[MPNowPlayingInfoPropertyElapsedPlaybackTime] as? Double, 4,
+                       "Background seeks still update native Now Playing.")
+        XCTAssertEqual(delivered.count, beforeBackground)
+        XCTAssertGreaterThan(try XCTUnwrap(coordinator.snapshot()["sequence"] as? Int), sequenceBeforeBackground)
+        let lateID = UUID()
+        defer { coordinator.unsubscribe(id: lateID) }
+        var late: [[String: Any]] = []
+        coordinator.subscribe(id: lateID) { late.append($0) }
+        XCTAssertTrue(late.isEmpty, "Subscribing while inactive must not push into the hidden WebView.")
+        coordinator.becameActive()
+        XCTAssertEqual(delivered.count, beforeBackground + 1)
+        XCTAssertEqual(delivered.last?["position"] as? Double, 4)
+        XCTAssertEqual(late.count, 1)
+        XCTAssertEqual(late.last?["position"] as? Double, 4)
+        coordinator.becameInactive()
+        fixture.postReset()
+        await settleNotifications()
+        XCTAssertEqual(coordinator.snapshot()["error"] as? String, "audio_services_reset")
+        XCTAssertEqual(delivered.count, beforeBackground + 1)
+        coordinator.becameActive()
+        XCTAssertEqual(delivered.last?["error"] as? String, "audio_services_reset", "Foreground refresh must include background failures.")
+        XCTAssertEqual(late.last?["error"] as? String, "audio_services_reset")
+    }
+
+    @MainActor
     func testRestoredLibraryCanPlayWithoutSelectingARowOrPromptingForImport() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }
@@ -545,6 +827,7 @@ private final class AudioRecoveryFixture {
     var items: [RecoveryProbeItem] = []
     var configurations = 0
     var activations: [Bool] = []
+    var holdSimpleSeeksOnNewPlayers = false
 
     init(storage: LocalAudioStorageActions = .live, seekTimeout: Duration = .seconds(5), ownsPlayerItems: Bool = false) throws {
         directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -568,6 +851,7 @@ private final class AudioRecoveryFixture {
             return item
         }, makePlayer: { [weak self] in
             let player = RecoveryProbePlayer(ownsItems: ownsPlayerItems)
+            player.holdSimpleSeeks = self?.holdSimpleSeeksOnNewPlayers ?? false
             self?.players.append(player)
             return player
         })
@@ -625,20 +909,35 @@ private final class RecoveryProbeItem: AVPlayerItem, @unchecked Sendable {
     }
 }
 
+private final class RecoveryReadCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+    var value: Int { lock.withLock { count } }
+    func increment() { lock.withLock { count += 1 } }
+}
+
 /// Real AVPlayer item/KVO lifecycle with deterministic transport and periodic
 /// callbacks. It never emits audio or depends on simulator route availability.
 private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     private let ownsItems: Bool
     private var ownedItem: AVPlayerItem?
+    private nonisolated let itemReads = RecoveryReadCounter()
+    private nonisolated let timeReads = RecoveryReadCounter()
+    var currentItemReads: Int { itemReads.value }
+    var currentTimeReads: Int { timeReads.value }
     var playCalls = 0
     var periodicAdditions = 0
     var periodicRemovals = 0
     var periodicCallback: (@Sendable (CMTime) -> Void)?
     var holdSeeks = false
+    var holdSimpleSeeks = false
     private var position: CMTime = .zero
+    private var pendingSimplePosition: CMTime?
     private var pendingPosition: CMTime = .zero
     var pendingSeek: (@Sendable (Bool) -> Void)?
     private let periodicID = NSObject()
+    private var simulatedRate: Float?
+    private var simulatedTimeControlStatus: AVPlayer.TimeControlStatus?
 
     init(ownsItems: Bool = false) {
         self.ownsItems = ownsItems
@@ -648,15 +947,54 @@ private final class RecoveryProbePlayer: AVPlayer, @unchecked Sendable {
     // Real AVPlayer may drop an item when the probe changes its status to
     // failed. Opt into stable ownership when testing a still-selected failure;
     // other recovery tests continue using AVPlayer's real item lifecycle.
-    override var currentItem: AVPlayerItem? { ownsItems ? ownedItem : super.currentItem }
+    override var currentItem: AVPlayerItem? {
+        itemReads.increment()
+        return ownsItems ? ownedItem : super.currentItem
+    }
     override func replaceCurrentItem(with item: AVPlayerItem?) {
         if ownsItems { ownedItem = item }
         else { super.replaceCurrentItem(with: item) }
     }
 
-    override func play() { playCalls += 1 }
-    override func currentTime() -> CMTime { position }
-    override func seek(to time: CMTime) { position = time }
+    override var rate: Float {
+        get { simulatedRate ?? super.rate }
+        set {
+            if simulatedRate != nil { simulatePlaybackRate(newValue) }
+            else { super.rate = newValue }
+        }
+    }
+    override var timeControlStatus: AVPlayer.TimeControlStatus {
+        simulatedTimeControlStatus ?? super.timeControlStatus
+    }
+    override func play() {
+        playCalls += 1
+        if simulatedRate != nil { simulatePlaybackRate(1) }
+    }
+    override func pause() {
+        if simulatedRate != nil { simulatePlaybackRate(0) }
+        else { super.pause() }
+    }
+    func simulatePlaybackRate(_ value: Float, status: AVPlayer.TimeControlStatus? = nil) {
+        willChangeValue(forKey: "timeControlStatus")
+        simulatedRate = value
+        simulatedTimeControlStatus = status ?? (value > 0 ? .playing : .paused)
+        didChangeValue(forKey: "timeControlStatus")
+    }
+    func simulatePosition(_ seconds: Double) {
+        position = CMTime(seconds: seconds, preferredTimescale: 600)
+    }
+    override func currentTime() -> CMTime {
+        timeReads.increment()
+        return position
+    }
+    override func seek(to time: CMTime) {
+        if holdSimpleSeeks { pendingSimplePosition = time }
+        else { position = time }
+    }
+    func completeSimpleSeek() {
+        if let pendingSimplePosition { position = pendingSimplePosition }
+        pendingSimplePosition = nil
+    }
 
     override func addPeriodicTimeObserver(forInterval interval: CMTime, queue: DispatchQueue?, using block: @escaping @Sendable (CMTime) -> Void) -> Any {
         periodicAdditions += 1
