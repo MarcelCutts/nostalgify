@@ -17,6 +17,7 @@ $("browser-banner").hidden = native || demo;
 const host = attachSkinStore(createNativeHost(plugin, { debug: demo, onError: showError }));
 window.nostalgify = host;
 let mounted;
+let skinCatalog = { skins: [] };
 let library = [];
 let savedShelf = [];
 let selectedSource = "spotify";
@@ -296,11 +297,18 @@ $("skin-file").addEventListener("change", () => action(async () => {
   const file = $("skin-file").files?.[0]; if (!file) return;
   const skin = await host.importSkin(file); await renderSkins(); $("skin-select").value = skin.id; $("skin-file").value = "";
 }));
-$("skin-select").addEventListener("change", () => action(() => host.selectSkin($("skin-select").value)));
+$("skin-select").addEventListener("change", () => action(async () => {
+  try { await host.selectSkin($("skin-select").value); }
+  catch (error) {
+    // Reflect rollback in the picker without masking the selection failure.
+    await renderSkins().catch(() => {});
+    throw error;
+  }
+  await renderSkins();
+}));
 async function renderSkins() {
-  const { skins } = await host.initSkins();
   const selected = (await host.getPreferences()).skinId || "";
-  $("skin-select").replaceChildren(new Option("Classic Winamp", ""), ...skins.map(skin => new Option(skin.name, skin.id)));
+  $("skin-select").replaceChildren(new Option("Classic Winamp", ""), ...skinCatalog.skins.map(skin => new Option(skin.name, skin.id)));
   $("skin-select").value = selected;
 }
 
@@ -342,6 +350,8 @@ async function start() {
       else reject(new Error("That skin could not be read. Your previous skin is still selected."));
     }
   });
+  // Retain the live catalog: rendering observes it without retrying storage.
+  skinCatalog = await host.initSkins();
   try { await host.restoreSavedSkin(); } catch (error) { showError(error); }
   await renderSkins();
   renderLists(); renderState(host.getCachedState()); resizePlayer();
