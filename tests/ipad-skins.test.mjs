@@ -11,9 +11,9 @@ const file = name => new File([new Uint8Array([80, 75]), name], `${name}.wsz`);
 
 function fixture(t) {
   const records = new Map(), blobs = new Map(), revoked = [], writes = [], errors = [];
-  const loadSteps = [], saveSteps = [], loads = [], changes = [];
+  const loadSteps = [], saveSteps = [], readSteps = [], loads = [], changes = [], storageOperations = [];
   let preferences = { skinId: null, retained: "other preferences" };
-  let visible = null, requested, sequence = 0, failDelete = false, failRead = false;
+  let visible = null, requested, sequence = 0, failDelete = false, failRead = false, storageUnavailable = false;
   const originalIndexedDB = globalThis.indexedDB;
   // Model transaction completion rather than request success: mutations become
   // visible only at commit, and aborts leave the original records intact.
@@ -28,11 +28,16 @@ function fixture(t) {
             tx.objectStore = () => {
               const operation = (name, value) => {
                 const result = {};
-                setImmediate(() => {
-                  if (name === "getAll" && failRead) {
-                    failRead = false;
-                    tx.onabort();
-                    return;
+                storageOperations.push(name);
+                const readStep = name === "getAll" ? readSteps.shift() : null;
+                setImmediate(async () => {
+                  if (name === "getAll") {
+                    await readStep?.();
+                    if (failRead || storageUnavailable) {
+                      failRead = false;
+                      tx.onabort();
+                      return;
+                    }
                   }
                   if (name === "delete" && failDelete) {
                     failDelete = false;
@@ -92,11 +97,12 @@ function fixture(t) {
     return host;
   }
   return {
-    host: createHost(), createHost, records, blobs, revoked, writes, errors, loadSteps, saveSteps, loads, changes,
+    host: createHost(), createHost, records, blobs, revoked, writes, errors, loadSteps, saveSteps, readSteps, loads, changes, storageOperations,
     get preferences() { return preferences; },
     get visible() { return visible; },
     failNextDelete() { failDelete = true; },
     failNextRead() { failRead = true; },
+    setStorageUnavailable(value) { storageUnavailable = value; },
     failNextSave(error = new Error("preferences unavailable")) { saveSteps.push(async () => { throw error; }); return error; },
     failNextLoad(error = new Error("malformed skin")) { loadSteps.push(async () => { throw error; }); return error; },
   };
@@ -302,20 +308,148 @@ test("invalid imports and missing selections do not disturb the saved skin", asy
   assert.deepEqual([...f.records.keys()], [previous.id]);
 });
 
-test("unavailable initial storage cannot overwrite a re-import or reset its saved selection", async t => {
+test("repeated unavailable reads cannot overwrite a re-import or reset any saved selection", async t => {
   const f = fixture(t), archive = file("Saved");
   const previous = await f.host.importSkin(archive);
   const record = structuredClone(f.records.get(previous.id));
   const writes = f.writes.length;
   const reloaded = f.createHost();
-  f.failNextRead();
+  const beforeStorage = f.storageOperations.length;
+  const beforeURLs = f.blobs.size;
+  f.setStorageUnavailable(true);
   assert.deepEqual((await reloaded.initSkins()).skins, []);
-  await assert.rejects(reloaded.importSkin(archive), /Skin storage is unavailable/);
-  await assert.rejects(reloaded.selectSkin(previous.id), /Skin storage is unavailable/);
-  await assert.rejects(reloaded.restoreSavedSkin(), /Skin storage is unavailable/);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(reloaded.importSkin(archive), /Skin storage is unavailable/);
+    await assert.rejects(reloaded.selectSkin(previous.id), /Skin storage is unavailable/);
+    await assert.rejects(reloaded.selectSkin(null), /Skin storage is unavailable/);
+    await assert.rejects(reloaded.restoreSavedSkin(), /Skin storage is unavailable/);
+  }
   assert.deepEqual(f.records.get(previous.id), record);
   assert.equal(f.records.size, 1);
   assert.equal(f.preferences.skinId, previous.id);
   assert.equal(f.writes.length, writes);
+  assert.equal(f.blobs.size, beforeURLs);
+  assert.deepEqual(f.storageOperations.slice(beforeStorage), Array(9).fill("getAll"));
   assert.deepEqual(f.revoked, []);
+});
+
+test("a transient initial read failure permits importing in the same page", async t => {
+  const f = fixture(t);
+  f.failNextRead();
+  const initial = await f.host.initSkins();
+  assert.deepEqual(initial.skins, []);
+  const recovered = await f.host.importSkin(file("Recovered"));
+  assert.deepEqual([...f.records.keys()], [recovered.id]);
+  assert.equal(f.preferences.skinId, recovered.id);
+  assert.equal(f.visible, recovered.url);
+  assert.equal(initial.skins, (await f.host.initSkins()).skins, "initial catalog references stay live after recovery");
+  assert.deepEqual(initial.skins, [recovered]);
+  assert.deepEqual(f.storageOperations, ["getAll", "getAll", "put"]);
+});
+
+test("retry recovers existing archives before re-import rollback without rewriting or deleting them", async t => {
+  const f = fixture(t), archive = file("Saved");
+  const saved = await f.host.importSkin(archive);
+  const record = structuredClone(f.records.get(saved.id));
+  const reloaded = f.createHost();
+  f.failNextRead();
+  const initial = await reloaded.initSkins();
+  const beforeStorage = f.storageOperations.length;
+  const beforeURLs = f.blobs.size;
+  const beforeChanges = f.changes.length;
+  const error = f.failNextSave();
+  await assert.rejects(reloaded.importSkin(archive), value => value === error);
+  const recovered = (await reloaded.initSkins()).skins[0];
+  assert.equal(initial.skins[0], recovered);
+  assert.equal(recovered.id, saved.id);
+  assert.equal(f.visible, recovered.url);
+  assert.equal(f.preferences.skinId, saved.id);
+  assert.deepEqual(f.records.get(saved.id), record);
+  assert.deepEqual(f.storageOperations.slice(beforeStorage), ["getAll"]);
+  assert.equal(f.blobs.size, beforeURLs + 1);
+  assert.deepEqual(f.changes.slice(beforeChanges), [[recovered]], "recovered catalog is published to the mounted renderer");
+  assert.deepEqual(f.revoked, []);
+});
+
+test("concurrent init, import and selection share retry reads and memoize successful catalog URLs", { timeout: 1000 }, async t => {
+  const f = fixture(t), archive = file("Saved");
+  const saved = await f.host.importSkin(archive);
+  const record = structuredClone(f.records.get(saved.id));
+  const reloaded = f.createHost();
+  f.failNextRead();
+  const initial = await reloaded.initSkins();
+  const started = deferred(), gate = deferred();
+  f.readSteps.push(async () => { started.resolve(); await gate.promise; });
+  const beforeStorage = f.storageOperations.length;
+  const beforeURLs = f.blobs.size;
+  const beforeWrites = f.writes.length;
+  const beforeChanges = f.changes.length;
+  const first = reloaded.initSkins(), second = reloaded.initSkins();
+  assert.equal(first, second, "concurrent callers must share the pending read");
+  await started.promise;
+  const importing = reloaded.importSkin(archive);
+  const selecting = reloaded.selectSkin(saved.id);
+  const restoring = reloaded.restoreSavedSkin();
+  assert.equal(reloaded.initSkins(), first);
+  assert.equal(f.writes.length, beforeWrites, "selection and import wait for a complete catalog");
+  assert.deepEqual(f.storageOperations.slice(beforeStorage), ["getAll"]);
+  gate.resolve();
+  const [result, , imported] = await Promise.all([first, second, importing, selecting, restoring]);
+  assert.equal(result.skins, initial.skins);
+  assert.equal(result.skins[0], imported);
+  assert.equal(f.blobs.size, beforeURLs + 1, "each recovered record gets exactly one blob URL");
+  assert.equal(f.visible, imported.url);
+  assert.equal(f.preferences.skinId, saved.id);
+  assert.deepEqual(f.records.get(saved.id), record);
+  assert.deepEqual(f.changes.slice(beforeChanges), [[imported]]);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    assert.equal(reloaded.initSkins(), first, "successful initialization remains memoized");
+    assert.equal(await reloaded.initSkins(), result);
+  }
+  assert.deepEqual(f.storageOperations.slice(beforeStorage), ["getAll"]);
+  assert.equal(f.writes.length, beforeWrites + 2, "only explicit import/select save preferences; restoration does not");
+});
+
+test("concurrent callers share a failed read and can share a later successful retry", { timeout: 1000 }, async t => {
+  const f = fixture(t), started = deferred(), gate = deferred();
+  f.failNextRead();
+  f.readSteps.push(async () => { started.resolve(); await gate.promise; });
+  const first = f.host.initSkins();
+  await started.promise;
+  const second = f.host.initSkins();
+  const selecting = assert.rejects(f.host.selectSkin(null), /Skin storage is unavailable/);
+  assert.equal(first, second);
+  // Let the queued selection join the same in-flight read before it aborts.
+  await Promise.resolve();
+  gate.resolve();
+  await Promise.all([first, second, selecting]);
+  assert.deepEqual(f.storageOperations, ["getAll"]);
+  assert.deepEqual(f.writes, []);
+  const retry = f.host.initSkins();
+  assert.notEqual(retry, first);
+  assert.equal(f.host.initSkins(), retry);
+  await retry;
+  assert.deepEqual(f.storageOperations, ["getAll", "getAll"]);
+  assert.deepEqual(f.errors, ["skin_storage_unavailable"]);
+});
+
+test("a recovery listener failure cannot invalidate successful storage or duplicate URLs", async t => {
+  const f = fixture(t), saved = await f.host.importSkin(file("Saved"));
+  const reloaded = f.createHost();
+  f.failNextRead();
+  await reloaded.initSkins();
+  reloaded.onSkinsChanged(() => { throw new Error("renderer listener failed"); });
+  const notified = [];
+  reloaded.onSkinsChanged(skins => notified.push(skins));
+  const beforeStorage = f.storageOperations.length;
+  const beforeURLs = f.blobs.size;
+  const recovered = await reloaded.initSkins();
+  await reloaded.selectSkin(saved.id);
+  assert.equal(await reloaded.initSkins(), recovered);
+  assert.deepEqual(f.storageOperations.slice(beforeStorage), ["getAll"]);
+  assert.equal(f.blobs.size, beforeURLs + 1);
+  assert.deepEqual(notified, [recovered.skins]);
+  assert.equal(f.visible, recovered.skins[0].url);
+  assert.equal(f.preferences.skinId, saved.id);
+  assert.deepEqual(f.errors, ["skin_storage_unavailable", "skin_load_failed"]);
 });
