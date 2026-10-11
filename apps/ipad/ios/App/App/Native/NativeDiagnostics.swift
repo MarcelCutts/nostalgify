@@ -10,11 +10,17 @@ final class NativeDiagnostics {
     private let signposter = OSSignposter(subsystem: "dev.nostalgify.ipad", category: "Playback")
     private var commandIntervals: [UUID: OSSignpostIntervalState] = [:]
     private var events: [[String: Any]] = []
+    private var sequence: UInt64 = 0
     private let limit = 300
 
     func record(_ event: String, requestId: String? = nil, command: String? = nil,
                 durationMs: Double? = nil, code: String? = nil) {
-        var entry: [String: Any] = ["time": ISO8601DateFormatter().string(from: Date()),
+        sequence &+= 1
+        let timestamp = ISO8601DateFormatter()
+        timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var entry: [String: Any] = ["time": timestamp.string(from: Date()),
+                                    "sequence": sequence,
+                                    "uptimeMs": ProcessInfo.processInfo.systemUptime * 1000,
                                     "event": Self.nativeEvents.contains(event) ? event : "redacted"]
         // A caller cannot accidentally put a URL or user text in a request ID.
         if let value = requestId.flatMap(UUID.init(uuidString:)) { entry["requestId"] = value.uuidString }
@@ -27,8 +33,23 @@ final class NativeDiagnostics {
         let safeCode = entry["code"] as? String ?? "ok"
         let safeID = entry["requestId"] as? String ?? "none"
         let milliseconds = entry["durationMs"] as? Double ?? 0
-        logger.info("event=\(safeEvent, privacy: .public) code=\(safeCode, privacy: .public) request=\(safeID, privacy: .public) duration_ms=\(milliseconds, privacy: .public)")
+        logger.log(level: Self.logLevel(for: safeEvent), "event=\(safeEvent, privacy: .public) code=\(safeCode, privacy: .public) request=\(safeID, privacy: .public) sequence=\(self.sequence, privacy: .public) duration_ms=\(milliseconds, privacy: .public)")
         signpostCommand(event: safeEvent, requestId: safeID, command: entry["command"] as? String)
+    }
+
+    /// Classify known structural events, including Spotify's distinct naming.
+    /// Unknown labels stay at info after record() redacts them.
+    static func logLevel(for event: String) -> OSLogType {
+        switch event {
+        case "command.failed", "local.import_failed", "local.library_read_failed",
+             "local.playback_failed", "local.remote_failed", "local.session_configure_failed",
+             "local.session_deactivate_failed", "spotify_failure", "selfcheck.failed":
+            return .error
+        case "selfcheck.started", "selfcheck.passed":
+            return .default
+        default:
+            return .info
+        }
     }
 
     /// Instruments intervals cover native queue wait and command execution.
