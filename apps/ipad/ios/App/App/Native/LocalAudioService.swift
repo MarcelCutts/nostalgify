@@ -17,6 +17,88 @@ struct LocalAudioSessionActions {
     }
 }
 
+struct LocalAudioStorageActions {
+    var copy: @Sendable (URL, URL) throws -> Void
+    var write: (Data, URL) throws -> Void
+
+    static var live: Self {
+        Self(copy: { source, destination in
+            try FileManager.default.copyItem(at: source, to: destination)
+            try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
+        }, write: { data, destination in try data.write(to: destination, options: .atomic) })
+    }
+}
+
+/// A seek includes waiting for readiness, and always settles exactly once even
+/// if AVFoundation never completes it or delivers a callback after cancellation.
+@MainActor
+private final class LocalAudioSeek {
+    private let player: AVPlayer
+    private let item: AVPlayerItem
+    private let time: CMTime
+    private var continuation: CheckedContinuation<Bool, Error>?
+    private var observation: NSKeyValueObservation?
+    private var deadline: Task<Void, Never>?
+    private var started = false
+
+    init(player: AVPlayer, item: AVPlayerItem, time: CMTime) {
+        self.player = player
+        self.item = item
+        self.time = time
+    }
+
+    func wait(timeout: Duration) async throws -> Bool {
+        try await withTaskCancellationHandler {
+            try Task.checkCancellation()
+            return try await withCheckedThrowingContinuation { continuation in
+                self.continuation = continuation
+                deadline = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(for: timeout) } catch { return }
+                    self?.finish(.failure(NativeFailure(code: "local_seek_timeout", message: "The audio position took too long to change. Press Play and try again.")), cancel: true)
+                }
+                observation = item.observe(\.status, options: [.new]) { [weak self] _, _ in
+                    Task { @MainActor in self?.advance() }
+                }
+                advance()
+            }
+        } onCancel: {
+            Task { @MainActor in self.finish(.failure(CancellationError()), cancel: true) }
+        }
+    }
+
+    func cancel() { finish(.success(false), cancel: true) }
+
+    private func advance() {
+        guard continuation != nil else { return }
+        guard item.status != .failed else { fail(); return }
+        guard !started, item.status == .readyToPlay else { return }
+        started = true
+        player.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { [weak self] completed in
+            Task { @MainActor in
+                guard let self else { return }
+                if completed { self.finish(.success(true)) } else { self.fail() }
+            }
+        }
+    }
+
+    private func fail() {
+        finish(.failure(NativeFailure(code: "local_seek_failed", message: "The audio position could not be changed. Press Play and try again.")), cancel: true)
+    }
+
+    private func finish(_ result: Result<Bool, Error>, cancel: Bool = false) {
+        guard let continuation else { return }
+        self.continuation = nil
+        deadline?.cancel()
+        deadline = nil
+        observation?.invalidate()
+        observation = nil
+        // Clear the continuation before AVFoundation can synchronously invoke
+        // its completion handler while cancelling the underlying operation.
+        if cancel { item.cancelPendingSeeks() }
+        continuation.resume(with: result)
+    }
+}
+
 /// Application-owned playback survives WebView navigation, reloads, and suspension.
 @MainActor
 final class LocalAudioService {
@@ -24,8 +106,12 @@ final class LocalAudioService {
     private(set) var library: [LocalAudioRecord] = []
     private var player: AVPlayer
     private let makePlayer: () -> AVPlayer
+    private let makeItem: (URL) -> AVPlayerItem
+    private let seekTimeout: Duration
+    private var pendingSeek: LocalAudioSeek?
     private let notificationCenter: NotificationCenter
     private let session: LocalAudioSessionActions
+    private let storage: LocalAudioStorageActions
     private let diagnostics: NativeDiagnostics
     private let directory: URL
     private var queue = LocalQueue()
@@ -50,11 +136,17 @@ final class LocalAudioService {
     init(diagnostics: NativeDiagnostics, directory storageDirectory: URL? = nil,
          notificationCenter: NotificationCenter = .default,
          session: LocalAudioSessionActions = .live,
+         storage: LocalAudioStorageActions = .live,
+         seekTimeout: Duration = .seconds(5),
+         makeItem: @escaping (URL) -> AVPlayerItem = { AVPlayerItem(url: $0) },
          makePlayer: @escaping () -> AVPlayer = { AVPlayer() }) {
         self.diagnostics = diagnostics
         self.notificationCenter = notificationCenter
         self.session = session
         self.makePlayer = makePlayer
+        self.makeItem = makeItem
+        self.seekTimeout = seekTimeout
+        self.storage = storage
         player = makePlayer()
         directory = storageDirectory ?? FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Audio", isDirectory: true)
@@ -65,6 +157,7 @@ final class LocalAudioService {
                 let decoded = try JSONDecoder().decode([LocalAudioRecord].self, from: Data(contentsOf: url))
                 library = decoded.filter { $0.isSafe && FileManager.default.fileExists(atPath: directory.appendingPathComponent($0.filename).path) }
             }
+            if !library.isEmpty { message = "" }
         } catch {
             self.error = "library_read_failed"
             message = "The local library could not be read. Your audio files have not been deleted."
@@ -120,6 +213,8 @@ final class LocalAudioService {
 
     private func cancelPlaybackIntent() {
         playbackRevision &+= 1
+        pendingSeek?.cancel()
+        pendingSeek = nil
         wantsPlayback = false
         resumeAfterInterruption = false
         player.pause()
@@ -218,6 +313,7 @@ final class LocalAudioService {
     func importFiles(_ urls: [URL]) async throws -> (items: [LocalAudioRecord], skipped: Int) {
         var imported: [LocalAudioRecord] = []
         var skipped = 0
+        var storageFailure: NativeFailure?
         for source in urls {
             let id = UUID().uuidString.lowercased()
             let ext = source.pathExtension.lowercased()
@@ -228,9 +324,9 @@ final class LocalAudioService {
             defer { if accessed { source.stopAccessingSecurityScopedResource() } }
             do {
                 // File Provider can download large items; keep copy I/O off the UI thread.
+                let copy = storage.copy
                 try await Task.detached(priority: .userInitiated) {
-                    try FileManager.default.copyItem(at: source, to: destination)
-                    try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: destination.path)
+                    try copy(source, destination)
                 }.value
                 let asset = AVURLAsset(url: destination)
                 guard try await asset.load(.isPlayable) else {
@@ -256,21 +352,42 @@ final class LocalAudioService {
                 imported.append(record)
             } catch {
                 try? FileManager.default.removeItem(at: destination)
+                if let failure = Self.importStorageFailure(error) {
+                    storageFailure = failure
+                    diagnostics.record("local.import_failed", code: failure.code)
+                    break
+                }
                 skipped += 1
                 diagnostics.record("local.import_failed", code: "unsupported_or_unreadable")
             }
         }
         if !imported.isEmpty {
             queue.reset(library.map(\.id), startingAt: queue.current, shuffled: shuffle)
-            error = nil
-            message = skipped > 0 ? "Some files could not be imported." : ""
+            // Import notices belong to this operation's result, not playback.
+            // Preserve an existing playback failure until playback recovers.
+            if error == nil { message = "" }
             diagnostics.record("local.import_completed")
             changed()
         }
+        if let storageFailure { throw storageFailure }
         if imported.isEmpty && !urls.isEmpty {
             throw NativeFailure(code: "import_failed", message: "No files could be imported. Choose unprotected audio files downloaded in Files and try again.")
         }
         return (imported, skipped)
+    }
+
+    private static func importStorageFailure(_ error: Error) -> NativeFailure? {
+        if let failure = error as? NativeFailure, failure.code == "library_write_failed" { return failure }
+        let error = error as NSError
+        let writeCodes: Set<Int> = [NSFileWriteUnknownError, NSFileWriteNoPermissionError,
+            NSFileWriteInvalidFileNameError, NSFileWriteFileExistsError,
+            NSFileWriteOutOfSpaceError, NSFileWriteVolumeReadOnlyError]
+        if (error.domain == NSCocoaErrorDomain && writeCodes.contains(error.code)) ||
+            (error.domain == NSPOSIXErrorDomain && [Int(ENOSPC), Int(EDQUOT), Int(EROFS)].contains(error.code)) {
+            return NativeFailure(code: "library_write_failed", message: "The library could not be saved. Check available iPad storage.")
+        }
+        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? Error { return importStorageFailure(underlying) }
+        return nil
     }
 
     func remove(id: String) throws {
@@ -298,7 +415,7 @@ final class LocalAudioService {
 
     private func save(_ records: [LocalAudioRecord]) throws {
         do {
-            try JSONEncoder().encode(records).write(to: directory.appendingPathComponent("library.json"), options: .atomic)
+            try storage.write(JSONEncoder().encode(records), directory.appendingPathComponent("library.json"))
         } catch {
             throw NativeFailure(code: "library_write_failed", message: "The library could not be saved. Check available iPad storage.")
         }
@@ -313,19 +430,19 @@ final class LocalAudioService {
             if wantsPlayback { cancelPlaybackIntent() } else { try play() }
         case "stop":
             cancelPlaybackIntent(); stopped = true
-            await seek(0)
+            try await seek(0)
         case "seek":
             guard let record = current else { throw NativeFailure(code: "no_track", message: "Choose a local audio file first.") }
             let seconds = try PlaybackValue.number(arg)
             if player.currentItem == nil { load(record) }
-            let completed = await seek(seconds)
+            let completed = try await seek(seconds)
             // An explicit scrub selects the next playback position even after
             // Stop or natural completion. Stop's internal seek keeps stopped.
             if completed { stopped = false }
         case "volume": player.volume = Float(PlaybackValue.volume(try PlaybackValue.number(arg)) / 100)
         case "next": try skip(1)
         case "previous":
-            if elapsed > 3 { await seek(0) } else { try skip(-1) }
+            if elapsed > 3 { try await seek(0) } else { try skip(-1) }
         case "shuffle":
             guard let value = arg as? Bool else { throw NativeFailure(code: "invalid_argument", message: "Shuffle requires true or false.") }
             shuffle = value
@@ -349,7 +466,7 @@ final class LocalAudioService {
     private func load(_ record: LocalAudioRecord) {
         cancelPlaybackIntent()
         statusObservation?.invalidate()
-        let item = AVPlayerItem(url: directory.appendingPathComponent(record.filename))
+        let item = makeItem(directory.appendingPathComponent(record.filename))
         statusObservation = item.observe(\.status, options: [.new]) { [weak self] item, _ in
             Task { @MainActor in
                 guard let self, item === self.player.currentItem else { return }
@@ -364,6 +481,9 @@ final class LocalAudioService {
 
     private func play() throws {
         guard !library.isEmpty else { throw NativeFailure(code: "empty_library", message: "Import audio from Files first.") }
+        playbackRevision &+= 1
+        pendingSeek?.cancel()
+        pendingSeek = nil
         if current == nil { queue.reset(library.map(\.id), startingAt: nil, shuffled: shuffle) }
         if player.currentItem == nil, let record = current { load(record) }
         if player.currentItem?.status == .failed, let record = current { load(record) }
@@ -381,19 +501,22 @@ final class LocalAudioService {
         wantsPlayback = true
         // A fresh Play supersedes any old interruption's eventual ended event.
         interruptionInProgress = false
+        resumeAfterInterruption = false
         player.play()
     }
 
     @discardableResult
-    private func seek(_ seconds: Double) async -> Bool {
+    private func seek(_ seconds: Double) async throws -> Bool {
         playbackRevision &+= 1
+        pendingSeek?.cancel()
         let revision = playbackRevision
         let seekingPlayer = player
         guard let seekingItem = player.currentItem else { return false }
         let time = CMTime(seconds: PlaybackValue.position(seconds, duration: current?.duration ?? 0), preferredTimescale: 600)
-        let completed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            seekingPlayer.seek(to: time, toleranceBefore: .zero, toleranceAfter: .zero) { continuation.resume(returning: $0) }
-        }
+        let operation = LocalAudioSeek(player: seekingPlayer, item: seekingItem, time: time)
+        pendingSeek = operation
+        defer { if pendingSeek === operation { pendingSeek = nil } }
+        let completed = try await operation.wait(timeout: seekTimeout)
         // Reset, deletion, or a source change can supersede this asynchronous seek.
         return completed && revision == playbackRevision && seekingPlayer === player && seekingItem === player.currentItem
     }
@@ -425,8 +548,14 @@ final class LocalAudioService {
         guard active, let raw = note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
               let type = AVAudioSession.InterruptionType(rawValue: raw) else { return }
         if type == .began {
+            if !interruptionInProgress { resumeAfterInterruption = wantsPlayback }
             interruptionInProgress = true
-            resumeAfterInterruption = wantsPlayback
+            playbackRevision &+= 1
+            pendingSeek?.cancel()
+            pendingSeek = nil
+            // The toggle now represents the observed pause. The separate
+            // resume flag remembers intent only for a matching ended event.
+            wantsPlayback = false
             player.pause()
             diagnostics.record("local.interruption_began")
         } else {
