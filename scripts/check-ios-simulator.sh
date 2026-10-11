@@ -160,8 +160,10 @@ trap 'cancel_validation 143 TERM' TERM
 
 bounded_command manifest 35 python3 scripts/ios-ci-diagnostics.py manifest --output "$NOSTALGIFY_IOS_RESULTS" || true
 
-bounded_logged_command xcode-version 10 "$NOSTALGIFY_IOS_RESULTS/xcode.log" xcodebuild -version
-bounded_command sdk-inventory 10 xcodebuild -showsdks > "$NOSTALGIFY_IOS_RESULTS/sdks.log"
+# These inventories are evidence only; capability and exact-runtime checks below
+# remain required even if collecting the version text fails.
+best_effort_logged_command xcode-version 10 "$NOSTALGIFY_IOS_RESULTS/xcode.log" xcodebuild -version
+best_effort_command sdk-inventory 10 xcodebuild -showsdks > "$NOSTALGIFY_IOS_RESULTS/sdks.log"
 # Check the selected toolchain's interface before opting out of its expensive
 # system-wide post-failure collection. Test results and our own captures remain.
 bounded_command xcode-help 20 python3 - "$NOSTALGIFY_IOS_RESULTS/xcodebuild-help.log" <<'PY'
@@ -309,8 +311,6 @@ for ((NOSTALGIFY_ATTEMPT = 0; NOSTALGIFY_ATTEMPT < 60; NOSTALGIFY_ATTEMPT++)); d
   if [ -f "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" ]; then break; fi
   sleep 1
 done
-# Capture the mounted UI even when the self-check fails or times out.
-bounded_command preflight-screenshot 10 xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/launch.png"
 cp "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck.json" "$NOSTALGIFY_IOS_RESULTS/native-selfcheck.json"
 cp "$NOSTALGIFY_APP_DATA/Documents/native-selfcheck-progress.json" "$NOSTALGIFY_IOS_RESULTS/" 2>/dev/null || true
 python3 - "$NOSTALGIFY_IOS_RESULTS/native-selfcheck.json" <<'PY'
@@ -323,6 +323,10 @@ if result.get('libraryCount') != 2 or result.get('provider') != 'local' or resul
     raise SystemExit('Native self-check produced an unexpected final library/playback state.')
 print('Native import, queue advancement, persistence, mounted UI, and Capacitor bridge self-check passed.')
 PY
+# Capture only after validating the self-check so collection cannot extend its
+# result wait. Cleanup captures failures separately. Successful hosted captures
+# have exceeded ten seconds; allow thirty without making evidence a test gate.
+best_effort_command preflight-screenshot 30 xcrun simctl io "$NOSTALGIFY_SIMULATOR_ID" screenshot "$NOSTALGIFY_IOS_RESULTS/launch.png"
 # Do not leave the self-check process alive for the unit/UI test launches.
 bounded_command preflight-terminate 30 xcrun simctl terminate "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad
 python3 scripts/ios-ci-diagnostics.py run --output "$NOSTALGIFY_IOS_RESULTS" \
