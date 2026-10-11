@@ -388,6 +388,10 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     enum Scenario { case normal, missing, throwing, foreignPrompt, foreignGetter }
     enum PromptProperty { case data, ownAccessor, inheritedAccessor, immutableAccessor }
     let webView: WKWebView
+    private let fixtureScripts: [WKUserScript]
+    private var loadIdentifier: String?
+    private var documentStarted: XCTestExpectation?
+    private var documentStartedAt: TimeInterval?
     private var report: [String: Any]?
     private var reportReady: XCTestExpectation?
     private var navigationReady: XCTestExpectation?
@@ -514,6 +518,7 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
           const state = window.__bootstrapTest;
           const descriptor = Object.getOwnPropertyDescriptor(window, 'prompt');
           window.webkit.messageHandlers.bootstrapResult.postMessage({
+            navigationID: window.__bootstrapFixtureNavigation,
             configCalls: state.configCalls,
             bridgeReady: typeof window.Capacitor.nativePromise === 'function',
             cookiesPatched: Object.prototype.hasOwnProperty.call(document, 'cookie'),
@@ -538,10 +543,13 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
           });
         })();
         """, at: .atDocumentEnd)
+        // Copy into independent Swift storage before mutating the controller's scripts.
+        fixtureScripts = content.userScripts.map { $0 }
         webView = WKWebView(frame: .zero, configuration: configuration)
         super.init()
         content.add(self, name: "bridge")
         content.add(self, name: "bootstrapResult")
+        content.add(self, name: "bootstrapStarted")
         content.add(self, name: "bootstrapPromptPhase")
         webView.uiDelegate = self
         webView.navigationDelegate = self
@@ -565,19 +573,56 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
     func load(in test: XCTestCase) async throws -> [String: Any] {
         report = nil
         navigationResult = nil
-        let ready = test.expectation(description: "bootstrap document script completed")
-        let navigated = test.expectation(description: "bootstrap navigation finished")
+        documentStartedAt = nil
+        let identifier = UUID().uuidString
+        loadIdentifier = identifier
+        let loadStartedAt = ProcessInfo.processInfo.systemUptime
+        let started = XCTestExpectation(description: "bootstrap fixture document execution started")
+        let ready = XCTestExpectation(description: "bootstrap document script completed")
+        let navigated = XCTestExpectation(description: "bootstrap navigation finished")
+        documentStarted = started
         reportReady = ready
         navigationReady = navigated
         defer {
+            let startup = documentStartedAt.map { String(format: "%.3f", $0 - loadStartedAt) } ?? "not observed"
+            let state = "startupSeconds=\(startup), startupLimitSeconds=30, completionLimitSeconds=10, reportReceived=\(report != nil), navigationResultReceived=\(navigationResult != nil)"
+            XCTContext.runActivity(named: "Bootstrap fixture readiness") { activity in
+                let attachment = XCTAttachment(string: state)
+                attachment.name = "Bootstrap fixture readiness"
+                attachment.lifetime = .keepAlways
+                activity.add(attachment)
+            }
+            loadIdentifier = nil
+            documentStarted = nil
             reportReady = nil
             navigationReady = nil
             loadingNavigation = nil
         }
+        // Observe the actual cold test navigation, without a warmup document.
+        // Prefix the first existing script so the marker precedes fixture and
+        // bridge execution, and tag callbacks to reject an earlier document.
+        let first = try XCTUnwrap(fixtureScripts.first)
+        let marker = "window.__bootstrapFixtureNavigation = '\(identifier)'; window.webkit.messageHandlers.bootstrapStarted.postMessage('\(identifier)');\n"
+        let content = webView.configuration.userContentController
+        content.removeAllUserScripts()
+        content.addUserScript(WKUserScript(source: marker + first.source,
+            injectionTime: first.injectionTime, forMainFrameOnly: first.isForMainFrameOnly))
+        for script in fixtureScripts.dropFirst() { content.addUserScript(script) }
         loadingNavigation = try XCTUnwrap(webView.loadHTMLString(
             "<html><body>Bootstrap fixture</body></html>", baseURL: URL(string: "https://bootstrap.invalid/")))
+        // Cold WebContent launch exceeded 12 seconds in CI before this document
+        // could execute. Bound that startup separately; receipt is an observed
+        // execution boundary, not a timestamp of process launch or script start.
+        let startupResult = await XCTWaiter.fulfillment(of: [started], timeout: 30)
+        guard startupResult == .completed else {
+            throw NSError(domain: "BootstrapWebViewFixture", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Document execution did not start within the 30-second fixture startup budget (waiter result: \(startupResult))."
+            ])
+        }
+        if let navigationResult { try navigationResult.get() }
+        _ = try XCTUnwrap(documentStartedAt)
         // A document-end message can arrive before WebKit finishes navigation.
-        // Run the post-load prompt check after both events, within one bound.
+        // Preserve both completion requirements and their 10-second bound.
         await test.fulfillment(of: [ready, navigated], timeout: 10)
         try XCTUnwrap(navigationResult).get()
         return try XCTUnwrap(report)
@@ -600,6 +645,8 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         navigationResult = result
         navigationReady?.fulfill()
         if case .failure = result, report == nil {
+            documentStarted?.fulfill()
+            documentStarted = nil
             reportReady?.fulfill()
             reportReady = nil
         }
@@ -623,8 +670,18 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
             recordPromptPhase(phase)
             return
         }
-        guard message.name == "bootstrapResult", report == nil else { return }
-        report = message.body as? [String: Any]
+        guard message.webView === webView, message.frameInfo.isMainFrame,
+              let loadIdentifier else { return }
+        if message.name == "bootstrapStarted", message.body as? String == loadIdentifier {
+            guard documentStartedAt == nil else { return }
+            documentStartedAt = ProcessInfo.processInfo.systemUptime
+            documentStarted?.fulfill()
+            documentStarted = nil
+            return
+        }
+        guard message.name == "bootstrapResult", report == nil,
+              let value = message.body as? [String: Any], value["navigationID"] as? String == loadIdentifier else { return }
+        report = value
         reportReady?.fulfill()
     }
 
@@ -666,6 +723,7 @@ private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, W
         webView.navigationDelegate = nil
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapResult")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapStarted")
         webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapPromptPhase")
         webView.removeFromSuperview()
     }
