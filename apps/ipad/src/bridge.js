@@ -7,6 +7,12 @@ const ERROR_MESSAGES = {
   spotify_redirect: "Register nostalgify://spotify-login-callback exactly in your Spotify app settings.",
   spotify_not_installed: "Install Spotify on this iPad and sign in, then reconnect.",
   spotify_sdk_missing: "This build needs the Spotify iOS SDK. Follow the Xcode setup guide and rebuild.",
+  spotify_connection_timeout: "Spotify did not respond. Tap Connect Spotify to open Spotify and reconnect.",
+  spotify_connection_cancelled: "Connecting to Spotify was cancelled. Try the playback control again when ready.",
+  spotify_authorization_timeout: "Spotify did not finish connecting. Check your Client ID, registered redirect and allowed account, then reconnect.",
+  spotify_authorization_denied: "Spotify did not authorize this app. Check the registered redirect and allowed account, then reconnect.",
+  spotify_connection_failed: "Open Spotify and start playback, then tap Connect Spotify. Check your Client ID and registered redirect if needed.",
+  spotify_subscription_failed: "Spotify playback updates stopped. Reconnect to restore the controls.",
   spotify_disconnected: "Spotify disconnected. Tap Connect Spotify before using playback controls.",
   spotify_state_unavailable: "Spotify playback state is unavailable. Reconnect and try again.",
   spotify_pause_unconfirmed: "Reconnect to Spotify so it can pause before switching to Files.",
@@ -22,15 +28,29 @@ const ERROR_MESSAGES = {
   not_found: "That audio file is no longer in the library. Import it again.",
   library_write_failed: "The library could not be saved. Check available iPad storage.",
   empty_library: "Import audio from Files first.",
+  local_playback_failed: "This audio file could not be played. Choose another imported file or import it again.",
   no_track: "Choose an imported audio file first.",
+  audio_services_reset: "Audio services restarted. Press Play to continue.",
+  local_seek_failed: "The audio position could not be changed. Press Play and try again.",
+  local_seek_timeout: "The audio position took too long to change. Press Play and try again.",
   audio_session_failed: "The audio output is unavailable. Try Play again.",
   queue_boundary: "You have reached the end of this queue.",
+  picker_unavailable: "The file picker is unavailable. Reopen the app and try importing again.",
   dialog_busy: "Finish the current dialog first.",
   invalid_preferences: "Those settings could not be saved. Please try again.",
   preferences_too_large: "There are too many saved settings. Remove some saved links and try again.",
+  invalid_provider: "Choose Spotify or Local Files before using playback controls.",
+  inactive_provider: "Select Local Files before using this control.",
+  invalid_command: "That playback control is unavailable. Refresh the connection and try again.",
   invalid_argument: "That control received an invalid value. Please try again.",
   native_error: "The player could not complete that action. Check the connection and try again.",
 };
+
+const WEB_ERROR_CODES = new Set(["javascript_error", "unhandled_promise", "startup_failed", "resize_observer_loop",
+  "skin_storage_unavailable", "skin_load_failed", "skin_preference_failed", "invalid_link", "unexpected"]);
+const ERROR_CLASSES = new Set(["Error", "TypeError", "ReferenceError", "SyntaxError", "RangeError", "URIError", "DOMException", "ResizeObserver", "Unknown"]);
+const FAILURE_EVENTS = new Set(["failure", "web_error", "listener_unavailable"]);
+const REQUEST_ID = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 export function createNativeHost(plugin, {
   timeoutMs = 12000,
@@ -51,8 +71,25 @@ export function createNativeHost(plugin, {
   const subscribers = new Set();
   const diagnostics = [];
   const record = (event, details = {}) => {
-    diagnostics.push({ time: new Date().toISOString(), event, ...details });
-    if (diagnostics.length > 150) diagnostics.shift();
+    // Successful polling adds no actionable evidence. Keep at most 150 rows,
+    // evicting ordinary activity before failures; the 151st failure drops the oldest.
+    if (event === "getState") return;
+    const entry = { time: new Date().toISOString(), event };
+    if (typeof details.requestId === "string" && REQUEST_ID.test(details.requestId)) entry.requestId = details.requestId;
+    if (Number.isFinite(details.durationMs)) entry.durationMs = Math.max(0, details.durationMs);
+    if (typeof details.code === "string") entry.code = Object.hasOwn(ERROR_MESSAGES, details.code) || WEB_ERROR_CODES.has(details.code) ? details.code : "unexpected";
+    if (event === "web_error") {
+      if (ERROR_CLASSES.has(details.errorClass)) entry.errorClass = details.errorClass;
+      if (["app.js", "unknown"].includes(details.source)) entry.source = details.source;
+      for (const key of ["line", "column"]) {
+        if (Number.isSafeInteger(details[key]) && details[key] >= 0 && details[key] <= 0x7fffffff) entry[key] = details[key];
+      }
+    }
+    diagnostics.push(entry);
+    if (diagnostics.length > 150) {
+      const activity = diagnostics.findIndex(row => !FAILURE_EVENTS.has(row.event));
+      diagnostics.splice(activity < 0 ? 0 : activity, 1);
+    }
   };
   const requestId = () => crypto.randomUUID();
   function failure(code, message, id) {
@@ -156,9 +193,9 @@ export function createNativeHost(plugin, {
       };
     },
     async removeAudio(id) { await invoke("removeAudio", { id }); return refresh(); },
-    getDiagnostics: async () => ({ version: 1, web: diagnostics.slice(), native: await invoke("getDiagnostics") }),
-    exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.slice() }, null),
-    recordError: (code, details = {}) => record("web_error", { ...details, code: /^[a-z_]{1,40}$/.test(code) ? code : "unexpected" }),
+    getDiagnostics: async () => ({ version: 1, web: diagnostics.map(row => ({ ...row })), native: plugin ? await invoke("getDiagnostics") : null }),
+    exportDiagnostics: () => invoke("exportDiagnostics", { webEvents: diagnostics.map(row => ({ ...row })) }, null),
+    recordError: (code, details = {}) => record("web_error", { ...details, code }),
     close() {}, minimize() {}, layout() {}, resizeStart() {}, resizeEnd() {},
     async dispose() { disposed = true; subscribers.clear(); await listener?.remove?.(); },
   };
