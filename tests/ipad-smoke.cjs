@@ -388,7 +388,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     // A deterministic ZIP containing PLEDIT.TXT exercises real Webamp parsing and IndexedDB bytes.
     const skin = Buffer.from("UEsDBBQAAAAAAAAAIQAf/pkIVQAAAFUAAAAKAAAAUExFRElULlRYVFtUZXh0XQpOb3JtYWw9I0Q4RUM3RgpDdXJyZW50PSNGRkZGRkYKTm9ybWFsQkc9IzEyMTUxNApTZWxlY3RlZEJHPSMzNDNEMzYKRm9udD1BcmlhbApQSwECFAMUAAAAAAAAACEAH/6ZCFUAAABVAAAACgAAAAAAAAAAAAAAgAEAAAAAUExFRElULlRYVFBLBQYAAAAAAQABADgAAAB9AAAAAAA=", "base64");
     await page.locator("#skin-file").setInputFiles({ name: "Probe skin.wsz", mimeType: "application/zip", buffer: skin });
-    await page.waitForFunction(async () => /^[0-9a-f]{64}$/.test((await window.__ipad.host.getPreferences()).skinId || ""));
+    await page.waitForFunction(() => /^[0-9a-f]{64}$/.test(JSON.parse(localStorage.getItem("nostalgify-development-preferences") || "{}").skinId || ""));
     await page.waitForFunction(() => /^[0-9a-f]{64}$/.test(document.getElementById("skin-select").value));
     const stableSkin = await page.locator("#skin-select").inputValue();
     await page.reload();
@@ -414,7 +414,7 @@ execFileSync(process.execPath, ["apps/ipad/scripts/build.mjs", "--outdir", produ
     assert.equal(await page.getByRole("img", { name: "Winamp equalizer", exact: true }).count(), 1);
     assert.equal(await page.getByRole("img", { name: /^Equalizer artwork:/ }).count(), 1);
     await page.locator("#skin-select").selectOption("");
-    await page.waitForFunction(async () => (await window.__ipad.host.getPreferences()).skinId === null);
+    await page.waitForFunction(() => JSON.parse(localStorage.getItem("nostalgify-development-preferences") || "{}").skinId === null);
     await page.locator("#skin-file").setInputFiles({ name: "broken.wsz", mimeType: "application/zip", buffer: Buffer.from([80, 75, 3, 4, 0, 0]) });
     await page.waitForFunction(() => document.getElementById("error-message").textContent.includes("skin could not be read"));
     assert.equal(await page.evaluate(async () => (await window.__ipad.host.getPreferences()).skinId || null), null);
