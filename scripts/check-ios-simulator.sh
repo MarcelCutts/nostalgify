@@ -222,7 +222,7 @@ def executable_images(configuration):
     raise SystemExit(f'Built app executable missing for {configuration}.')
 debug = executable_images('Debug-iphonesimulator')
 release = executable_images('Release-iphoneos')
-markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed', b'UITestStartupDiagnostics']
+markers = [b'--ui-testing', b'dev.nostalgify.ipad.uitests.', b'UI test fixture failed', b'UITestStartupDiagnostics', b'NostalgifyUITestInput']
 debug_fixture = any(markers[1] in image for image in debug.values())
 release_markers = [marker.decode() for marker in markers if any(marker in image for image in release.values())]
 result = {'passed': debug_fixture and not release_markers, 'debugFixturePresent': debug_fixture, 'releaseFixtureMarkers': release_markers, 'debugImages': list(debug), 'releaseImages': list(release)}
