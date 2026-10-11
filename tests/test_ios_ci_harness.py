@@ -39,6 +39,11 @@ class IOSCIHarnessTests(unittest.TestCase):
         return [event for line in path.read_text().splitlines()
                 if (event := json.loads(line))["phase"] == phase]
 
+    def shell_timings(self, phase, directory=None):
+        path = (directory or self.directory) / "shell-timing.log"
+        return [event for line in path.read_text().splitlines()
+                if (event := dict(field.split("=", 1) for field in line.split()))["phase"] == phase]
+
     def shell(self, body, *arguments):
         return subprocess.Popen(
             ["/bin/bash", "-c", SHELL_SETUP + body, "ios-harness-test",
@@ -117,6 +122,9 @@ time.sleep(20)
             self.assertEqual(len(terminal), 1, terminal)
             self.assertEqual(terminal[0]["status"], "cancelled")
             self.assertEqual(terminal[0]["exitCode"], 128 + signum)
+            timings = self.shell_timings(phase)
+            self.assertEqual([event["boundary"] for event in timings], ["dispatch", "spawned"])
+            self.assertGreater(int(timings[1]["pid"]), 0)
             deadline = time.monotonic() + 2
             while self.process_is_running(pid) and time.monotonic() < deadline:
                 time.sleep(0.02)
@@ -156,6 +164,85 @@ bounded_logged_command build 5 "$NOSTALGIFY_IOS_RESULTS/build.log" \
         self.assertEqual((self.directory / "build.log").read_text(), stdout)
         terminal = self.events("build")[-1]
         self.assertEqual((terminal["status"], terminal["exitCode"]), ("command-failed", 17))
+        self.assertEqual(self.shell_timings("build")[-1]["exit"], "17")
+
+    def test_shell_timings_precede_delayed_supervisor_start_and_preserve_failure(self):
+        binaries = self.directory / "delayed-bin"
+        binaries.mkdir()
+        ready, release = self.directory / "startup-ready", self.directory / "startup-release"
+        supervisor = binaries / "python3"
+        # Hold the supervisor before importing the real diagnostics script.
+        # The fixture is finite even when an assertion prevents its release.
+        supervisor.write_text("#!" + sys.executable + "\n" + r"""
+import os
+import pathlib
+import sys
+import time
+root = pathlib.Path(os.environ['NOSTALGIFY_IOS_RESULTS'])
+(root / 'startup-ready').touch()
+deadline = time.monotonic() + 5
+while not (root / 'startup-release').exists():
+    if time.monotonic() >= deadline:
+        raise SystemExit('Fixture supervisor was not released')
+    time.sleep(0.01)
+os.execv(sys.executable, [sys.executable, *sys.argv[1:]])
+""")
+        supervisor.chmod(0o755)
+        self.environment.update(PATH=str(binaries), PRIVATE_TEST_VALUE="private-environment-value")
+        process = self.shell(r"""
+bounded_command deferred 50 "$TEST_PYTHON" -c 'import sys; sys.exit(17)' private-command-argument
+""")
+        try:
+            deadline = time.monotonic() + 5
+            timing_path = self.directory / "shell-timing.log"
+            while process.poll() is None and time.monotonic() < deadline:
+                if ready.exists() and timing_path.exists() and len(self.shell_timings("deferred")) == 2:
+                    break
+                time.sleep(0.01)
+            self.assertTrue(ready.exists(), "The delayed supervisor did not start")
+            timings = self.shell_timings("deferred")
+            self.assertEqual([event["boundary"] for event in timings], ["dispatch", "spawned"])
+            self.assertFalse((self.directory / "command-events.jsonl").exists())
+            self.assertEqual(timings[0]["requested"], "50")
+            self.assertGreater(int(timings[0]["effective"]), 0)
+            self.assertLessEqual(int(timings[0]["effective"]), 20)
+            self.assertGreater(int(timings[1]["pid"]), 0)
+            release.touch()
+            stdout, stderr = process.communicate(timeout=5)
+            self.assertEqual(process.returncode, 17, stdout + stderr)
+            terminal = self.shell_timings("deferred")[-1]
+            self.assertEqual((terminal["boundary"], terminal["exit"]), ("returned", "17"))
+            self.assertEqual(terminal["pid"], timings[1]["pid"])
+            self.assertEqual(self.events("deferred")[-1]["exitCode"], 17)
+            timing_text = timing_path.read_text()
+            self.assertNotIn("private-command-argument", timing_text)
+            self.assertNotIn("private-environment-value", timing_text)
+        finally:
+            release.touch()
+            self.stop_shell(process)
+
+    def test_shell_timing_helper_uses_no_external_commands(self):
+        status, stdout, stderr = self.run_shell(r"""
+PATH=/nonexistent
+record_shell_phase transition before
+""")
+        self.assertEqual(status, 0, stdout + stderr)
+        self.assertEqual((stdout, stderr), ("", ""))
+        event = self.shell_timings("transition")[0]
+        self.assertEqual(event["boundary"], "before")
+        self.assertEqual(int(event["remaining"]), int(event["deadline"]) - int(event["seconds"]))
+        for field in ("requested", "effective", "pid", "exit"):
+            self.assertEqual(event[field], "-")
+
+    def test_shell_timing_write_failure_does_not_replace_command_verdict(self):
+        (self.directory / "shell-timing.log").mkdir()
+        status, stdout, stderr = self.run_shell(r"""
+record_shell_phase transition before
+bounded_command failure 5 "$TEST_PYTHON" -c 'import sys; sys.exit(17)'
+""")
+        self.assertEqual(status, 17, stdout + stderr)
+        self.assertNotIn("shell-timing.log", stderr)
+        self.assertEqual(self.events("failure")[-1]["exitCode"], 17)
 
     def test_bounded_command_preserves_heredoc_standard_input(self):
         status, stdout, stderr = self.run_shell(r"""
@@ -321,6 +408,16 @@ else:
         self.assertEqual(summary["validationExitCode"], 0)
         self.assertTrue((self.directory / "required-tests-ran").exists())
         self.assertEqual(self.events("tests", directory)[-1]["exitCode"], 0)
+        initial = self.shell_timings("manifest", directory)[0]
+        # The entry fixture has a 20-second outer bound. Allow that startup
+        # interval while distinguishing the 2160-second budget from 1800.
+        self.assertGreaterEqual(int(initial["remaining"]), 2160 - 20)
+        self.assertLessEqual(int(initial["remaining"]), 2160)
+        lookup = self.shell_timings("built-app-lookup", directory)
+        self.assertEqual([event["boundary"] for event in lookup], ["dispatch", "returned"])
+        self.assertEqual(lookup[-1]["exit"], "0")
+        tests = self.shell_timings("tests", directory)[0]
+        self.assertEqual((tests["requested"], tests["effective"]), ("1200", "1200"))
         for phase in ("xcode-version", "sdk-inventory", "preflight-screenshot"):
             self.assertEqual(self.events(phase, directory)[-1]["exitCode"], 17)
             self.assertIn(phase + " diagnostic collection failed (exit 17)", result.stderr)
@@ -448,6 +545,10 @@ bounded_command install 5 "$TEST_PYTHON" -c \
         events = self.events("install")
         self.assertEqual(len(events), 1, events)
         self.assertEqual((events[0]["status"], events[0]["exitCode"]), ("budget-exhausted", 124))
+        timings = self.shell_timings("install")
+        # Refusal remains subject to the caller's existing errexit semantics.
+        self.assertEqual([event["boundary"] for event in timings], ["dispatch"])
+        self.assertEqual(timings[0]["effective"], "0")
 
     def test_resource_cleanup_remains_available_after_collector_budget_exhaustion(self):
         status, stdout, stderr = self.run_shell(r"""
@@ -469,6 +570,8 @@ bounded_command simulator-delete 5 "$TEST_PYTHON" -c \
         self.assertFalse((self.directory / "unexpected").exists())
         collector = self.events("optional-collector")[-1]
         self.assertEqual((collector["status"], collector["exitCode"]), ("budget-exhausted", 124))
+        # The conditional caller continues after refusal and records its return.
+        self.assertEqual(self.shell_timings("optional-collector")[-1]["exit"], "124")
         for phase, marker in [("simulator-shutdown", "shutdown"), ("simulator-delete", "delete")]:
             with self.subTest(phase=phase):
                 self.assertTrue((self.directory / marker).exists())
