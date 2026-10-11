@@ -253,17 +253,21 @@ final class AppUITests: XCTestCase {
             // Inspect a single app snapshot after the check so disappearance is
             // normal, never a failed lookup of the now-absent keyboard query.
             let snapshot = try phase("keyboard.snapshot") { try app.snapshot() }
-            return firstSnapshot(in: snapshot) { element in
-                guard element.elementType == .keyboard else { return false }
-                // iPadOS 27 retains a zero-height keyboard and offscreen preview
-                // buttons after dismissal. Existence alone does not mean open.
-                let visible = element.frame.intersection(snapshot.frame)
-                return !visible.isNull && visible.width > 1 && visible.height > 1
-            } != nil
+            return keyboardIsVisible(in: snapshot)
         } catch {
             XCTFail("Could not inspect the application's keyboard state: \(error)")
             return true // A failed snapshot must never authorize a content tap.
         }
+    }
+
+    private func keyboardIsVisible(in snapshot: XCUIElementSnapshot) -> Bool {
+        firstSnapshot(in: snapshot) { element in
+            guard element.elementType == .keyboard else { return false }
+            // iPadOS 27 retains a zero-height keyboard and offscreen preview
+            // buttons after dismissal. Existence alone does not mean open.
+            let visible = element.frame.intersection(snapshot.frame)
+            return !visible.isNull && visible.width > 1 && visible.height > 1
+        } != nil
     }
 
     private func waitUntil(_ message: String, timeout: TimeInterval = 10,
@@ -307,9 +311,56 @@ final class AppUITests: XCTestCase {
 
     private func playFixture() {
         openFiles()
-        tap(button("", "Play UI Test One"))
+        tapFixturePlay()
         waitForPlaybackAction("Pause", "The real AVPlayer must confirm playing")
         XCTAssertTrue(text("Now playing: UI Test One").waitForExistence(timeout: 10))
+    }
+
+    private func tapFixturePlay(file: StaticString = #filePath, line: UInt = #line) {
+        let label = "Play UI Test One"
+        let element = button("", label)
+        phase("fixture.play") {
+            XCTAssertTrue(phase("fixture.exists") { element.waitForExistence(timeout: 10) },
+                          "Element is missing: \(element)", file: file, line: line)
+            do {
+                // One coherent read supplies keyboard, viewport and target
+                // geometry. Separate AX queries took tens of seconds each in CI.
+                var snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                if keyboardIsVisible(in: snapshot) {
+                    let hideKeyboard = app.keyboards.buttons["Hide keyboard"].firstMatch
+                    XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5), file: file, line: line)
+                    phase("keyboard.dismiss") { hideKeyboard.tap() }
+                    waitUntil("The keyboard must close before tapping content", file: file, line: line) {
+                        !self.keyboardIsVisible
+                    }
+                    snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                }
+                for attempt in 0..<8 {
+                    if attempt > 0 {
+                        snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                    }
+                    // Match the live query within the same first WebView;
+                    // similarly named controls outside it cannot satisfy this.
+                    guard let web = firstSnapshot(in: snapshot, matching: { $0.elementType == .webView }),
+                          let target = firstSnapshot(in: web, matching: { $0.elementType == .button && $0.label == label }) else {
+                        XCTFail("Could not find the fixture control in the application's snapshot.", file: file, line: line)
+                        return
+                    }
+                    let visible = web.frame.intersection(snapshot.frame).insetBy(dx: 0, dy: 25)
+                    let center = CGPoint(x: target.frame.midX, y: target.frame.midY)
+                    if visible.contains(center) {
+                        // tap() computes a live hittable point. Keep that real
+                        // input check without resolving isHittable separately.
+                        phase("control.tap") { element.tap() }
+                        return
+                    }
+                    if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
+                }
+                XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
+            } catch {
+                XCTFail("Could not inspect the fixture screen: \(error)", file: file, line: line)
+            }
+        }
     }
 
     func testSettingsValidationAndRecoveryThroughNativeRefresh() throws {
