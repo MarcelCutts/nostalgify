@@ -10,11 +10,19 @@ final class AppUITests: XCTestCase {
     private var fixtureID: String!
     // XCTest creates a separate case instance for each test method.
     private var launchOrdinal = 0
+    private var phaseSequence = 0
+    private var testStartedUptime = ProcessInfo.processInfo.systemUptime
+    private var lastPhaseRecord: String?
+    private var voiceOverTeardown: (@MainActor () -> String?)?
     // The app owns one WKWebView. Start at its first native wrapper instead of
     // repeatedly searching every nested/auxiliary WebView accessibility node.
     private var webView: XCUIElement { app.webViews.firstMatch }
 
     override func setUpWithError() throws {
+        // Keep lifecycle hooks synchronous: async hooks plus fail-fast assertions
+        // make XCTest restart its runner after failures on Xcode 26 and later.
+        // https://developer.apple.com/forums/thread/809989
+        testStartedUptime = ProcessInfo.processInfo.systemUptime
         continueAfterFailure = false
         // Real keyboard, accessibility and AVPlayer interactions took 116s on
         // the compatibility runner. Keep a bounded allowance for VM variance.
@@ -22,31 +30,88 @@ final class AppUITests: XCTestCase {
         fixtureID = UUID().uuidString
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
-        XCUIDevice.shared.orientation = .portrait
+        phase("setup.orientation") { XCUIDevice.shared.orientation = .portrait }
         launch()
     }
 
     override func tearDownWithError() throws {
-        // hasSucceeded remains false until teardown itself completes.
-        if let app, (testRun?.totalFailureCount ?? 0) > 0 {
-            let screenshot = XCTAttachment(screenshot: app.screenshot())
-            screenshot.name = "Failed app screen"
-            screenshot.lifetime = .keepAlways
-            add(screenshot)
-            let hierarchy = XCTAttachment(string: app.debugDescription)
-            hierarchy.name = "Failed accessibility hierarchy"
-            hierarchy.lifetime = .keepAlways
-            add(hierarchy)
+        // Save runner-side evidence even when termination is the first failure.
+        // This uses cached phase data, never another app or accessibility query.
+        let previousPhase = lastPhaseRecord ?? "No UI phase was recorded."
+        let evidence = XCTAttachment(string: previousPhase)
+        evidence.name = "Last phase before teardown"
+        evidence.lifetime = .keepAlways
+        add(evidence)
+        var cleanupFailure: String?
+        phase("teardown") {
+            // XCTest invokes this synchronous hook after fail-fast interruptions.
+            // Clear the retained closure before invoking it so it cannot run twice
+            // or remain retained by this test if cleanup is interrupted.
+            let cleanupVoiceOver = voiceOverTeardown
+            voiceOverTeardown = nil
+            cleanupFailure = cleanupVoiceOver?()
+            // hasSucceeded remains false until teardown itself completes.
+            if let app, (testRun?.totalFailureCount ?? 0) > 0 {
+                let screenshot = XCTAttachment(screenshot: phase("failure.screenshot") { app.screenshot() })
+                screenshot.name = "Failed app screen"
+                screenshot.lifetime = .keepAlways
+                add(screenshot)
+                let hierarchy = XCTAttachment(string: phase("failure.hierarchy") { app.debugDescription })
+                hierarchy.name = "Failed accessibility hierarchy"
+                hierarchy.lifetime = .keepAlways
+                add(hierarchy)
+            }
+            phase("app.terminate") { app?.terminate() }
+            phase("teardown.orientation") { XCUIDevice.shared.orientation = .portrait }
         }
-        app?.terminate()
-        XCUIDevice.shared.orientation = .portrait
+        if let cleanupFailure { XCTFail(cleanupFailure) }
+    }
+
+    /// Emit a start record before a potentially blocking call. A finished record
+    /// means the call returned; assertion failures remain XCTest's source of truth.
+    private func phase<T>(_ name: String, _ operation: () throws -> T) rethrows -> T {
+        let identifier = UUID().uuidString
+        return try XCTContext.runActivity(named: name) { activity in
+            @MainActor
+            func record(_ status: String) {
+                phaseSequence += 1
+                let timestamp = ISO8601DateFormatter()
+                timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+                let event: [String: Any] = ["version": 1, "testId": self.name,
+                    "fixtureId": fixtureID ?? "uninitialized", "launchOrdinal": launchOrdinal,
+                    "phaseId": identifier, "sequence": phaseSequence, "phase": name, "status": status,
+                    "processId": ProcessInfo.processInfo.processIdentifier,
+                    "utc": timestamp.string(from: Date()),
+                    "elapsedMs": (ProcessInfo.processInfo.systemUptime - testStartedUptime) * 1000]
+                guard let data = try? JSONSerialization.data(withJSONObject: event, options: [.sortedKeys]) else { return }
+                let json = String(decoding: data, as: UTF8.self)
+                lastPhaseRecord = json
+                // Direct stderr output survives loss of buffered test stdout.
+                FileHandle.standardError.write(Data(("NOSTALGIFY_TEST_PHASE " + json + "\n").utf8))
+                let attachment = XCTAttachment(string: json)
+                attachment.name = "\(name) \(status)"
+                attachment.lifetime = .keepAlways
+                activity.add(attachment)
+            }
+            record("started")
+            do {
+                let result = try operation()
+                record("finished")
+                return result
+            } catch {
+                // Swift errors reach this branch; XCTest interruption exceptions
+                // can instead leave a started phase without a matching end.
+                record("threw")
+                throw error
+            }
+        }
     }
 
     private func launch() {
         let started = Date()
         let startUptime = ProcessInfo.processInfo.systemUptime
         launchOrdinal += 1
-        app.launch()
+        phase("app.launch") { app.launch() }
         let launchedUptime = ProcessInfo.processInfo.systemUptime
         // CI recorded 28-second launches for WebKit's renderer, networking and
         // GPU helpers before the page could load. This is a bounded readiness
@@ -57,7 +122,7 @@ final class AppUITests: XCTestCase {
         // preserving one readiness wait rather than polling separate properties.
         let files = webView.switches.matching(
             NSPredicate(format: "label == %@ AND enabled == YES", "Files")).firstMatch
-        let filesReady = files.waitForExistence(timeout: readinessWaitLimit)
+        let filesReady = phase("app.readiness") { files.waitForExistence(timeout: readinessWaitLimit) }
         // Check the real header immediately; there is no second readiness wait.
         let settingsReady = filesReady && button("settings-toggle", "Settings").exists
         let ready = filesReady && settingsReady
@@ -126,7 +191,8 @@ final class AppUITests: XCTestCase {
         // The label changes with native playback state. Query for that state
         // without resolving a required element before its new label is present.
         let expected = webView.buttons.matching(NSPredicate(format: "label == %@", label)).firstMatch
-        XCTAssertTrue(expected.waitForExistence(timeout: 10), message, file: file, line: line)
+        XCTAssertTrue(phase("playback.confirmAction") { expected.waitForExistence(timeout: 10) },
+                      message, file: file, line: line)
     }
 
     private func firstSnapshot(in root: XCUIElementSnapshot,
@@ -141,27 +207,29 @@ final class AppUITests: XCTestCase {
     @discardableResult
     private func reveal(_ element: XCUIElement, file: StaticString = #filePath,
                         line: UInt = #line) -> XCUIElementSnapshot? {
-        XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
-        // A scroll moves content within this viewport; it does not resize the
-        // viewport. Read its bounds once, after any rotation/keyboard dismissal.
-        let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
-        for _ in 0..<8 {
-            let snapshot: XCUIElementSnapshot
-            do {
-                snapshot = try element.snapshot()
-            } catch {
-                XCTFail("Could not inspect the control: \(error)", file: file, line: line)
-                return nil
+        phase("control.reveal") {
+            XCTAssertTrue(element.waitForExistence(timeout: 10), "Element is missing: \(element)", file: file, line: line)
+            // A scroll moves content within this viewport; it does not resize the
+            // viewport. Read its bounds once, after any rotation/keyboard dismissal.
+            let visible = webView.frame.intersection(app.frame).insetBy(dx: 0, dy: 25)
+            for _ in 0..<8 {
+                let snapshot: XCUIElementSnapshot
+                do {
+                    snapshot = try phase("control.snapshot") { try element.snapshot() }
+                } catch {
+                    XCTFail("Could not inspect the control: \(error)", file: file, line: line)
+                    return nil
+                }
+                let frame = snapshot.frame
+                let center = CGPoint(x: frame.midX, y: frame.midY)
+                // Avoid an expensive hit-point query for a known offscreen control.
+                // Return this same snapshot for subsequent frame/label assertions.
+                if visible.contains(center) && element.isHittable { return snapshot }
+                if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
             }
-            let frame = snapshot.frame
-            let center = CGPoint(x: frame.midX, y: frame.midY)
-            // Avoid an expensive hit-point query for a known offscreen control.
-            // Return this same snapshot for subsequent frame/label assertions.
-            if visible.contains(center) && element.isHittable { return snapshot }
-            if center.y < visible.minY { webView.swipeDown() } else { webView.swipeUp() }
+            XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
+            return nil
         }
-        XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
-        return nil
     }
 
     private func tap(_ element: XCUIElement, file: StaticString = #filePath, line: UInt = #line) {
@@ -170,21 +238,21 @@ final class AppUITests: XCTestCase {
         let hideKeyboard = app.keyboards.buttons["Hide keyboard"].firstMatch
         if keyboardIsVisible {
             XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5), file: file, line: line)
-            hideKeyboard.tap()
-            waitUntil("The keyboard must close before tapping content") { !self.keyboardIsVisible }
+            phase("keyboard.dismiss") { hideKeyboard.tap() }
+            waitUntil("The keyboard must close before tapping content", file: file, line: line) { !self.keyboardIsVisible }
         }
         reveal(element, file: file, line: line)
-        element.tap()
+        phase("control.tap") { element.tap() }
     }
 
     private var keyboardIsVisible: Bool {
         // Keep the common no-keyboard path to one cheap existence query.
-        guard app.keyboards.firstMatch.exists else { return false }
+        guard phase("keyboard.exists", { app.keyboards.firstMatch.exists }) else { return false }
         do {
             // The keyboard can disappear between separate exists/frame reads.
             // Inspect a single app snapshot after the check so disappearance is
             // normal, never a failed lookup of the now-absent keyboard query.
-            let snapshot = try app.snapshot()
+            let snapshot = try phase("keyboard.snapshot") { try app.snapshot() }
             return firstSnapshot(in: snapshot) { element in
                 guard element.elementType == .keyboard else { return false }
                 // iPadOS 27 retains a zero-height keyboard and offscreen preview
@@ -198,9 +266,12 @@ final class AppUITests: XCTestCase {
         }
     }
 
-    private func waitUntil(_ message: String, timeout: TimeInterval = 10, _ condition: @escaping () -> Bool) {
+    private func waitUntil(_ message: String, timeout: TimeInterval = 10,
+                           file: StaticString = #filePath, line: UInt = #line,
+                           _ condition: @escaping () -> Bool) {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in condition() }, object: nil)
-        XCTAssertEqual(XCTWaiter.wait(for: [expectation], timeout: timeout), .completed, message)
+        let result = phase("assertion.wait") { XCTWaiter.wait(for: [expectation], timeout: timeout) }
+        XCTAssertEqual(result, .completed, message, file: file, line: line)
     }
 
     private func auditAccessibility() throws {
@@ -245,8 +316,8 @@ final class AppUITests: XCTestCase {
         tap(button("settings-toggle", "Settings"))
         let clientID = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-client-id", "Spotify client ID")).firstMatch
         reveal(clientID)
-        clientID.tap()
-        clientID.typeText("invalid")
+        phase("settings.focus") { clientID.tap() }
+        phase("settings.typeText") { clientID.typeText("invalid") }
         waitUntil("The keyboard must enter the validation input.") { clientID.value as? String == "invalid" }
         tap(button("", "Save connection settings"))
         let error = text("Enter the 32-character client ID from your Spotify developer app.")
@@ -269,7 +340,7 @@ final class AppUITests: XCTestCase {
         waitForPlaybackAction("Play", "Pause must change the available action")
         tap(button("", "Remove UI Test One"))
         waitUntil("Removed audio must leave the library") { !self.button("", "Play UI Test One").exists }
-        app.terminate()
+        phase("relaunch.terminate") { app.terminate() }
         launch()
         openFiles()
         XCTAssertTrue(button("", "Play UI Test Two").waitForExistence(timeout: 10))
@@ -283,9 +354,9 @@ final class AppUITests: XCTestCase {
         tap(webView.switches["Spotify"].firstMatch)
         let link = webView.textFields.matching(NSPredicate(format: "identifier == %@ OR label == %@", "spotify-link", "Add a Spotify track, album or playlist")).firstMatch
         reveal(link)
-        link.tap()
+        phase("spotify.focus") { link.tap() }
         let spotifyURL = "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC"
-        link.typeText(spotifyURL)
+        phase("spotify.typeText") { link.typeText(spotifyURL) }
         // WebKit's accessibility value can trail synthesized keyboard input.
         // Wait for the exact value before saving; never retype or submit a prefix.
         waitUntil("The keyboard must enter the complete Spotify link before saving.") {
@@ -332,7 +403,7 @@ final class AppUITests: XCTestCase {
     func testAccessibleControlsRemainUsableAfterRotation() throws {
         playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
-            XCUIDevice.shared.orientation = orientation
+            phase("rotation.change") { XCUIDevice.shared.orientation = orientation }
             waitUntil("The app and WebView must adopt the requested \(orientation == .portrait ? "portrait" : "landscape") layout") {
                 guard let snapshot = try? self.app.snapshot(),
                       let web = self.firstSnapshot(in: snapshot, matching: { $0.elementType == .webView }) else { return false }
@@ -368,65 +439,92 @@ final class AppUITests: XCTestCase {
         let settings = button("settings-toggle", "Settings")
         reveal(settings)
         XCTAssertFalse(button("settings-close", "Close settings").exists)
-        let settingsFrame = settings.frame
-        let appFrame = app.frame
-        let settingsCenter = app.coordinate(withNormalizedOffset: .zero).withOffset(
-            CGVector(dx: settingsFrame.midX - appFrame.minX, dy: settingsFrame.midY - appFrame.minY))
         let voiceOver = XCUIDevice.shared.voiceOverService
         var trace: [String] = []
+        @MainActor
         func record(_ value: String) {
             if trace.count < 50 { trace.append(String(value.prefix(240))) }
             // Phase-only console breadcrumbs identify a stalled service call.
             // Speech stays in a bounded test attachment, never app diagnostics.
             if value.hasPrefix("phase:") { print("UI_VOICEOVER \(value)") }
         }
-        defer {
+        @MainActor
+        func attachTrace(named name: String) {
             let attachment = XCTAttachment(string: trace.joined(separator: "\n"))
-            attachment.name = "VoiceOver navigation trace"
+            attachment.name = name
             attachment.lifetime = .keepAlways
-            add(attachment)
+            self.add(attachment)
         }
+        // Keep this work in XCTest's synchronous teardown hook: Swift defer
+        // cannot guarantee cleanup across fail-fast Objective-C interruptions.
+        // Save a trace even when enable throws before cleanup can be installed.
+        voiceOverTeardown = {
+            attachTrace(named: "VoiceOver navigation trace")
+            return nil
+        }
+        record("enabled before: \(voiceOver.isEnabled)")
         record("phase:enable")
-        try voiceOver.enable()
-        defer {
+        try phase("voiceover.enable") { try voiceOver.enable() }
+        voiceOverTeardown = {
             record("phase:disable")
+            // Preserve the journey even if the service never returns from
+            // disable. No app or accessibility hierarchy query is needed.
+            attachTrace(named: "VoiceOver trace before cleanup")
+            var cleanupFailure: String?
             do {
-                try voiceOver.disable()
+                try self.phase("voiceover.disable") { try voiceOver.disable() }
                 if voiceOver.isEnabled {
                     record("phase:still-enabled")
-                    XCTFail("VoiceOver remained enabled after the service reported successful cleanup.")
+                    cleanupFailure = "VoiceOver remained enabled after the service reported successful cleanup."
                 } else {
                     record("phase:disabled")
                 }
             } catch {
                 record("phase:disable-failed")
                 record("cleanup error: \(error)")
-                XCTFail("VoiceOver cleanup failed: \(error)")
+                cleanupFailure = "VoiceOver cleanup failed: \(error)"
             }
+            attachTrace(named: "VoiceOver navigation trace")
+            // Report a Swift cleanup error only after the app and orientation
+            // cleanup have had a chance to finish in tearDownWithError.
+            return cleanupFailure
         }
+        record("enabled after: \(voiceOver.isEnabled)")
+        record("service: \(voiceOver.debugDescription)")
+        XCTAssertTrue(voiceOver.isEnabled, "VoiceOver must be enabled before touch exploration.")
+        // Enabling VoiceOver can move focus or scroll the page. Read the target
+        // after that change; enabled state alone does not prove service readiness.
+        let settingsFrame = phase("voiceover.targetFrame") { settings.frame }
+        let appFrame = phase("voiceover.appFrame") { app.frame }
+        record("settings frame after enable: \(settingsFrame); app frame: \(appFrame)")
+        XCTAssertTrue(appFrame.contains(settingsFrame), "Settings must still be onscreen after enabling VoiceOver.")
+        let settingsCenter = app.coordinate(withNormalizedOffset: .zero).withOffset(
+            CGVector(dx: settingsFrame.midX - appFrame.minX, dy: settingsFrame.midY - appFrame.minY))
         // VoiceOver touch exploration selects an item with one tap; activation
         // requires a double tap. Send one physical coordinate event to establish
         // a known focus before testing sequential navigation. This avoids
         // assuming that enabling VoiceOver produced an initial spoken element.
         // https://support.apple.com/guide/ipad/ipad58ced58d/ipados
         record("phase:touch-settings")
-        settingsCenter.tap()
+        phase("voiceover.touchSettings") { settingsCenter.tap() }
+        let opened = phase("voiceover.activationCheck") { button("settings-close", "Close settings").exists }
+        record("settings opened after one touch: \(opened)")
+        XCTAssertFalse(opened, "One VoiceOver touch must select Settings without activating it.")
         record("phase:current-speech")
-        let speech = try voiceOver.currentSpeech().utterance
+        let speech = try phase("voiceover.currentSpeech") { try voiceOver.currentSpeech().utterance }
         record("speech: " + speech)
         func isSettingsButton(_ utterance: String) -> Bool {
             let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return normalized.hasPrefix("settings") && normalized.contains("button")
         }
         XCTAssertTrue(isSettingsButton(speech), "Touch exploration must select Settings and announce it as a button, rather than incidental help text.")
-        XCTAssertFalse(button("settings-close", "Close settings").exists, "One VoiceOver touch must select Settings without activating it.")
         record("phase:leave-settings")
-        let next = try voiceOver.moveForward().utterance
+        let next = try phase("voiceover.moveForward") { try voiceOver.moveForward().utterance }
         record("speech: " + next)
         XCTAssertFalse(next.isEmpty)
         XCTAssertNotEqual(next, speech, "VoiceOver focus must be able to leave the Settings control.")
         record("phase:return-to-settings")
-        let previous = try voiceOver.moveBackward().utterance
+        let previous = try phase("voiceover.moveBackward") { try voiceOver.moveBackward().utterance }
         record("speech: " + previous)
         XCTAssertTrue(isSettingsButton(previous), "Backward navigation must return to the selected Settings button.")
         #else
