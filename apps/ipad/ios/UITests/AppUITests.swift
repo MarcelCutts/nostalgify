@@ -437,11 +437,27 @@ final class AppUITests: XCTestCase {
 
     func testFilesLibraryAccessibilityAudit() throws {
         openFiles()
-        waitUntil("The Files audit must inspect the selected source and its imported library") {
-            self.webView.switches["Files"].firstMatch.value as? String == "1" &&
-                self.button("import-button", "Import from Files").exists &&
-                self.button("", "Play UI Test One").exists &&
-                self.button("", "Play UI Test Two").exists
+        let selectedFiles = webView.switches.matching(
+            NSPredicate(format: "label == %@ AND value == %@", "Files", "1")).firstMatch
+        let readiness: [(phase: String, element: XCUIElement, requirement: String)] = [
+            ("files.audit.selectedSource", selectedFiles, "the selected Files source"),
+            ("files.audit.import", button("import-button", "Import from Files"), "the Import from Files button"),
+            ("files.audit.fixtureOne", button("", "Play UI Test One"), "the first imported track"),
+            ("files.audit.fixtureTwo", button("", "Play UI Test Two"), "the second imported track")
+        ]
+        // Let native queries own the waits instead of resolving properties
+        // inside an outer predicate waiter. All four readiness waits receive
+        // time from one shared budget.
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        for check in readiness {
+            let ready = phase(check.phase) {
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                return remaining > 0 && check.element.waitForExistence(timeout: remaining)
+            }
+            guard ready else {
+                XCTFail("The Files audit must find \(check.requirement) within its shared 10-second readiness deadline.")
+                return
+            }
         }
         // Retain the actual pre-audit screen, including passing runs. When an
         // audit cannot resolve its issue element, this still preserves the
