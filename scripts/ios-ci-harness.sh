@@ -36,6 +36,18 @@ bounded_logged_command() {
     ios-ci-log "$NOSTALGIFY_LOG" "$@"
 }
 
+warn_diagnostic_failure() {
+  printf 'Warning: %s diagnostic collection failed (exit %s); continuing required validation. See command-events.jsonl.\n' "$1" "$2" >&2
+}
+
+best_effort_command() {
+  bounded_command "$@" || warn_diagnostic_failure "$1" "$?"
+}
+
+best_effort_logged_command() {
+  bounded_logged_command "$@" || warn_diagnostic_failure "$1" "$?"
+}
+
 cancel_validation() {
   local NOSTALGIFY_SIGNAL_STATUS=$1 NOSTALGIFY_SIGNAL_NAME=$2
   # A second signal is allowed to stop finalization; incremental events and the
