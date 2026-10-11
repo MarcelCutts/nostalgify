@@ -5,6 +5,50 @@ import UIKit
 @testable import App
 
 final class NativeCoreTests: XCTestCase {
+    #if DEBUG
+    @MainActor
+    func testUITestInputTraceAcceptsOnlyBoundedTypedEvidence() throws {
+        let body: [String: Any] = ["event": "click", "phase": "bubble", "target": "files", "timeMs": 120.25,
+            "x": 903.0, "y": 216.0, "trusted": true, "defaultPrevented": false,
+            "filesDisabled": false, "filesPressed": true, "playLabel": "Pause"]
+        let record = try XCTUnwrap(NativeUITestInputTrace.InputRecord(body))
+        XCTAssertEqual(record.target, "files")
+        XCTAssertEqual(record.x, 903)
+        XCTAssertEqual(record.filesPressed, true)
+        XCTAssertEqual(record.playLabel, "Pause")
+        XCTAssertTrue(record.receivedAtUnixMs.isFinite)
+        for (key, value) in [("event", "private event"), ("target", "private song"),
+                             ("phase", "private phase")] {
+            var invalid = body; invalid[key] = value
+            XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        }
+        let invalidCoordinates: [Any] = [true, Double.infinity, Double.nan, 16_385.0, "903"]
+        for value in invalidCoordinates {
+            var invalid = body; invalid["x"] = value
+            XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        }
+        var invalid = body; invalid["trusted"] = 1
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "numeric one is not a boolean")
+        invalid = body; invalid["url"] = "https://private.invalid"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "unknown fields must not leave the app")
+        invalid = body; invalid["event"] = "pointerup"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "only click has a bubble record")
+        invalid = body; invalid["playLabel"] = "private title"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        var missing = body
+        for key in ["x", "y", "filesDisabled", "filesPressed"] { missing[key] = NSNull() }
+        let empty = try XCTUnwrap(NativeUITestInputTrace.InputRecord(missing))
+        XCTAssertNil(empty.x)
+        XCTAssertNil(empty.filesPressed)
+        var mutation = body
+        mutation["event"] = "play-state"; mutation["phase"] = "mutation"; mutation["target"] = "play"
+        for key in ["x", "y", "trusted", "defaultPrevented"] { mutation[key] = NSNull() }
+        XCTAssertNotNil(NativeUITestInputTrace.InputRecord(mutation))
+        mutation["target"] = "files"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(mutation))
+    }
+    #endif
+
     func testPlaybackValuesRejectBooleansAndNonFiniteNumbers() throws {
         XCTAssertThrowsError(try PlaybackValue.number(true))
         XCTAssertThrowsError(try PlaybackValue.number(Double.nan))
