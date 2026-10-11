@@ -17,7 +17,7 @@
     "build:ipad": "npm run build --workspace=@nostalgify/ipad",
     "start": "npm run build:desktop && electron apps/desktop/dist",
     "test": "node --test tests/*.test.js tests/*.test.mjs",
-    "test:ipad:browser": "node tests/ipad-smoke.cjs",
+    "test:ipad:browser": "node scripts/test-ipad-browser.cjs",
     "check": "node scripts/check-build-boundaries.cjs && node scripts/check-ios-project.cjs",
     "ipad:sync": "npm run sync --workspace=@nostalgify/ipad",
     "ipad:open": "npm run open --workspace=@nostalgify/ipad",

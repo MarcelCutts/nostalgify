@@ -175,5 +175,16 @@ test("document picker and share sheet wait for dismissal beyond the playback RPC
   await new Promise(resolve => setTimeout(resolve, 15));
   assert.equal(picked, false); assert.equal(shared, false);
   picker.resolve({ items: [{ id: "chosen" }] }); share.resolve({ shared: true });
-  assert.equal((await importing)[0].id, "chosen"); assert.equal((await exporting).shared, true);
+  assert.equal((await importing).items[0].id, "chosen"); assert.equal((await exporting).shared, true);
+});
+
+test("partial file imports preserve skipped counts while Spotify remains the active provider", async t => {
+  const imported = { id: "chosen", uri: "local:00000000-0000-0000-0000-000000000001" };
+  const f = fixture({ importAudio: async () => ({ items: [imported], skipped: 2 }) });
+  t.after(() => f.host.dispose()); await f.host.ready;
+  assert.deepEqual(await f.host.importFiles(), { items: [imported], skipped: 2, cancelled: false });
+  assert.equal(f.host.getCachedState().provider, "spotify");
+  assert.equal(f.calls.length, 0, "reporting an import result must not switch or interrupt playback");
+  f.plugin.importAudio = async () => ({ items: [], skipped: 0, cancelled: true });
+  assert.deepEqual(await f.host.importFiles(), { items: [], skipped: 0, cancelled: true });
 });

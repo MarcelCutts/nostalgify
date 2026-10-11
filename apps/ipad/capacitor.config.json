@@ -3,6 +3,6 @@
   "appName": "Nostalgify",
   "webDir": "dist",
   "loggingBehavior": "none",
-  "ios": { "contentInset": "never", "backgroundColor": "#121514", "scrollEnabled": true },
+  "ios": { "contentInset": "never", "backgroundColor": "#121514", "scrollEnabled": true, "initialFocus": false },
   "server": { "iosScheme": "capacitor" }
 }

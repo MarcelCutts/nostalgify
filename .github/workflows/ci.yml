@@ -27,8 +27,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
-      - name: Test native diagnostic watcher
-        run: python3 -B -m unittest discover -s tests -p 'test_ios_startup_watcher.py'
+      - name: Test native diagnostics and command deadlines
+        run: python3 -B -m unittest discover -s tests -p 'test_ios_*.py'
       - run: npm run build
       - run: npm run ipad:sync
       - run: npm run check
@@ -110,6 +110,8 @@ jobs:
       NOSTALGIFY_XCODE_VERSION: ${{ matrix.xcode }}
       NOSTALGIFY_IOS_RUNTIME: ${{ matrix.runtime }}
       NOSTALGIFY_STRICT_CONCURRENCY: ${{ matrix.strict-concurrency }}
+      NOSTALGIFY_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      NOSTALGIFY_PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -139,6 +141,7 @@ jobs:
         run: bash scripts/check-ios-simulator.sh
       - name: Upload native diagnostics
         if: always()
+        id: native_diagnostics
         uses: actions/upload-artifact@v4
         with:
           name: ios-xcode-${{ matrix.xcode }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -147,11 +150,18 @@ jobs:
           path: |
             out/ios-ci/run.*/*.log
             out/ios-ci/run.*/*.json
+            out/ios-ci/run.*/*.jsonl
+            out/ios-ci/run.*/*.md
             out/ios-ci/run.*/*.png
             out/ios-ci/run.*/*.xcresult/**
             out/ios-ci/run.*/Package.resolved
             out/ios-ci/run.*/test-attachments/**
             out/ios-ci/run.*/startup-probes/*.json
+      - name: Link native diagnostics in the job summary
+        if: always() && steps.native_diagnostics.outputs.artifact-url != ''
+        env:
+          NATIVE_ARTIFACT_URL: ${{ steps.native_diagnostics.outputs.artifact-url }}
+        run: printf '\n[Download native diagnostics](%s)\n' "$NATIVE_ARTIFACT_URL" >> "$GITHUB_STEP_SUMMARY"
 
   required:
     name: Required checks

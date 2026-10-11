@@ -78,6 +78,8 @@ input:not([type=range]):not([type=file]), select { color: #eef0e9; background: #
 .skins-panel .section-heading { margin-bottom: 0; }
 .skin-actions { display: flex; flex-wrap: wrap; gap: 9px; }
 .skin-actions select { flex: 1 1 12rem; min-width: min(100%, 12rem); width: 100%; max-width: 100%; font-size: .9375rem; }
+/* WebKit's native popup theme overrides min-height; preserve its picker with an explicit height that follows text size. */
+.skin-actions select { height: max(44px, calc(1.2em + 26px)); }
 .file-button { position: relative; margin: 0; overflow: hidden; }
 .file-button:focus-within { outline: 3px solid var(--accent); outline-offset: 3px; }
 .file-button input { position: absolute; opacity: 0; inset: 0; width: 100%; cursor: pointer; }

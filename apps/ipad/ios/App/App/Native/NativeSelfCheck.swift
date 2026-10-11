@@ -140,12 +140,42 @@ enum NativeSelfCheck {
         }
     }
 
+    /// Poll real native state within a deadline; elapsed media startup time is
+    /// not part of the queue contract. Return only structural failure evidence.
+    static func checkQueue(snapshot: @MainActor () -> [String: Any], lastTrackID: String,
+                           timeout: TimeInterval = 15) async throws -> [String: Any] {
+        let started = ProcessInfo.processInfo.systemUptime
+        while true {
+            try Task.checkCancellation()
+            let value = snapshot()
+            let state = value["state"] as? String ?? "unknown"
+            let selected = (value["track"] as? [String: Any])?["id"] as? String == lastTrackID
+            let hasError = value["error"] is String
+            let elapsed = ProcessInfo.processInfo.systemUptime - started
+            let passed = selected && state == "stopped" && !hasError
+            if passed || hasError || elapsed >= timeout {
+                return ["passed": passed, "expectedTrackSelected": selected, "hasError": hasError,
+                        "state": ["playing", "paused", "stopped"].contains(state) ? state : "unknown",
+                        "elapsedSeconds": elapsed, "waitLimitSeconds": timeout]
+            }
+            try await Task.sleep(for: .milliseconds(50))
+        }
+    }
+
     static func run(webView: @MainActor () -> WKWebView?) async {
         let diagnostics = NativePlayback.shared.diagnostics
         diagnostics.record("selfcheck.started")
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent("native-selfcheck-" + UUID().uuidString, isDirectory: true)
         var result: [String: Any] = ["passed": false, "checks": []]
         var service: LocalAudioService?
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        func progress(_ phase: String) {
+            let value: [String: Any] = ["version": 1, "phase": phase,
+                "utc": ISO8601DateFormatter().string(from: Date()), "diagnostics": diagnostics.snapshot()]
+            try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys])
+                .write(to: documents.appendingPathComponent("native-selfcheck-progress.json"), options: .atomic)
+        }
+        progress("import")
         do {
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let source = folder.appendingPathComponent("fixture.wav")
@@ -159,26 +189,29 @@ enum NativeSelfCheck {
             }
             try local.setActive(true)
             try await local.command("volume", arg: 0)
+            progress("queue.play")
             try await local.command("playShelf", arg: "local:" + a.id)
             // AVPlayer's end observer owns queue advancement, with no JavaScript timer.
-            try await Task.sleep(nanoseconds: 3_000_000_000)
-            let snapshot = local.snapshot()
-            let track = snapshot["track"] as? [String: Any]
-            guard track?["id"] as? String == b.id, snapshot["state"] as? String == "stopped" else {
+            progress("queue.completion")
+            let queueReport = try await checkQueue(snapshot: { local.snapshot() }, lastTrackID: b.id)
+            result["queue"] = queueReport
+            guard queueReport["passed"] as? Bool == true else {
                 throw NativeFailure(code: "selfcheck_queue", message: "Native queue did not finish both fixtures.")
             }
+            progress("persistence")
             try local.setActive(false)
             let reloaded = LocalAudioService(diagnostics: diagnostics, directory: folder.appendingPathComponent("library"))
             guard reloaded.library.map(\.id) == [a.id, b.id] else {
                 throw NativeFailure(code: "selfcheck_persistence", message: "Library identities did not persist.")
             }
+            progress("webview")
             let webReport = try await checkWebView(webView)
             result["webview"] = webReport
             guard webReport["passed"] as? Bool == true else {
                 throw NativeFailure(code: webReport["code"] as? String ?? "selfcheck_webview_bridge", message: "The bundled player did not pass its startup checks.")
             }
             result = ["passed": true, "checks": ["import", "distinct-identities", "native-queue", "persistence", "webview-bridge"],
-                      "libraryCount": 2, "provider": "local", "state": "stopped", "webview": webReport]
+                      "libraryCount": 2, "provider": "local", "state": "stopped", "webview": webReport, "queue": queueReport]
             diagnostics.record("selfcheck.passed")
         } catch {
             let code = (error as? NativeFailure)?.code ?? "selfcheck_failed"
@@ -189,8 +222,8 @@ enum NativeSelfCheck {
         service = nil
         try? FileManager.default.removeItem(at: folder)
         result["diagnostics"] = diagnostics.snapshot()
-        let output = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("native-selfcheck.json")
+        progress("completed")
+        let output = documents.appendingPathComponent("native-selfcheck.json")
         try? JSONSerialization.data(withJSONObject: result, options: [.prettyPrinted, .sortedKeys]).write(to: output, options: .atomic)
     }
 }

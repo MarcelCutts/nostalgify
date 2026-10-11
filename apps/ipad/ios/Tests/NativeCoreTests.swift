@@ -1,8 +1,54 @@
 import XCTest
 import WebKit
+import Capacitor
+import UIKit
 @testable import App
 
 final class NativeCoreTests: XCTestCase {
+    #if DEBUG
+    @MainActor
+    func testUITestInputTraceAcceptsOnlyBoundedTypedEvidence() throws {
+        let body: [String: Any] = ["event": "click", "phase": "bubble", "target": "files", "timeMs": 120.25,
+            "x": 903.0, "y": 216.0, "trusted": true, "defaultPrevented": false,
+            "filesDisabled": false, "filesPressed": true, "playLabel": "Pause"]
+        let record = try XCTUnwrap(NativeUITestInputTrace.InputRecord(body))
+        XCTAssertEqual(record.target, "files")
+        XCTAssertEqual(record.x, 903)
+        XCTAssertEqual(record.filesPressed, true)
+        XCTAssertEqual(record.playLabel, "Pause")
+        XCTAssertTrue(record.receivedAtUnixMs.isFinite)
+        for (key, value) in [("event", "private event"), ("target", "private song"),
+                             ("phase", "private phase")] {
+            var invalid = body; invalid[key] = value
+            XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        }
+        let invalidCoordinates: [Any] = [true, Double.infinity, Double.nan, 16_385.0, "903"]
+        for value in invalidCoordinates {
+            var invalid = body; invalid["x"] = value
+            XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        }
+        var invalid = body; invalid["trusted"] = 1
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "numeric one is not a boolean")
+        invalid = body; invalid["url"] = "https://private.invalid"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "unknown fields must not leave the app")
+        invalid = body; invalid["event"] = "pointerup"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid), "only click has a bubble record")
+        invalid = body; invalid["playLabel"] = "private title"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(invalid))
+        var missing = body
+        for key in ["x", "y", "filesDisabled", "filesPressed"] { missing[key] = NSNull() }
+        let empty = try XCTUnwrap(NativeUITestInputTrace.InputRecord(missing))
+        XCTAssertNil(empty.x)
+        XCTAssertNil(empty.filesPressed)
+        var mutation = body
+        mutation["event"] = "play-state"; mutation["phase"] = "mutation"; mutation["target"] = "play"
+        for key in ["x", "y", "trusted", "defaultPrevented"] { mutation[key] = NSNull() }
+        XCTAssertNotNil(NativeUITestInputTrace.InputRecord(mutation))
+        mutation["target"] = "files"
+        XCTAssertNil(NativeUITestInputTrace.InputRecord(mutation))
+    }
+    #endif
+
     func testPlaybackValuesRejectBooleansAndNonFiniteNumbers() throws {
         XCTAssertThrowsError(try PlaybackValue.number(true))
         XCTAssertThrowsError(try PlaybackValue.number(Double.nan))
@@ -91,7 +137,7 @@ final class NativeCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let source = folder.appendingPathComponent("seek-fixture.wav")
-        try NativeSelfCheck.fixture(at: source, seconds: 8)
+        try NativeSelfCheck.fixture(at: source, seconds: 30)
         let service = LocalAudioService(diagnostics: NativeDiagnostics(), directory: folder.appendingPathComponent("library"))
         _ = try await service.importFiles([source])
         try service.setActive(true)
@@ -102,12 +148,56 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertEqual(service.snapshot()["state"] as? String, "stopped")
         try await service.command("seek", arg: 4)
         XCTAssertEqual(service.snapshot()["state"] as? String, "paused")
+        XCTAssertEqual(try XCTUnwrap(service.snapshot()["position"] as? Double), 4, accuracy: 0.1)
+        let playing = expectation(description: "AVPlayer resumes after the completed seek")
+        var confirmedPlaying = false
+        service.onStateChanged = {
+            if !confirmedPlaying, service.snapshot()["state"] as? String == "playing" {
+                confirmedPlaying = true
+                playing.fulfill()
+            }
+        }
+        defer { service.onStateChanged = nil }
+        let started = ProcessInfo.processInfo.systemUptime
         try await service.command("play", arg: nil)
-        try await Task.sleep(for: .milliseconds(200))
+        await fulfillment(of: [playing], timeout: 10)
         try await service.command("pause", arg: nil)
         let position = try XCTUnwrap(service.snapshot()["position"] as? Double)
         XCTAssertGreaterThanOrEqual(position, 3.9)
-        XCTAssertLessThan(position, 5)
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertLessThanOrEqual(position, 4 + elapsed + 0.25, "Playback cannot advance beyond elapsed wall time after seeking.")
+    }
+
+    @MainActor
+    func testQueueSelfCheckWaitsForLastTrackToFinish() async throws {
+        var observations = 0
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            observations += 1
+            return ["state": observations == 2 ? "playing" : "stopped",
+                    "track": ["id": observations == 1 ? "first" : "last"]]
+        }, lastTrackID: "last")
+        XCTAssertEqual(observations, 3, "Neither the wrong stopped track nor the playing final track establishes completion.")
+        XCTAssertEqual(result["passed"] as? Bool, true)
+    }
+
+    @MainActor
+    func testQueueSelfCheckTimeoutRetainsLastObservedState() async throws {
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            ["state": "playing", "track": ["id": "last"]]
+        }, lastTrackID: "last", timeout: 0)
+        XCTAssertEqual(result["passed"] as? Bool, false)
+        XCTAssertEqual(result["expectedTrackSelected"] as? Bool, true)
+        XCTAssertEqual(result["state"] as? String, "playing")
+    }
+
+    @MainActor
+    func testQueueSelfCheckRejectsPlaybackErrorWithoutExportingRawText() async throws {
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            ["state": "stopped", "track": ["id": "last"], "error": "private input"]
+        }, lastTrackID: "last")
+        XCTAssertEqual(result["passed"] as? Bool, false)
+        XCTAssertEqual(result["hasError"] as? Bool, true)
+        XCTAssertFalse(String(describing: result).contains("private input"))
     }
 
     @MainActor
@@ -168,6 +258,147 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertNil(errors.first?["message"])
     }
 
+    @MainActor
+    func testBootstrapHostedControllerUsesEffectiveConfigurationAndScriptOrder() throws {
+        let controller = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.flatMap(\.windows)
+            .compactMap { $0.rootViewController as? NostalgifyViewController }.first)
+        let configuration = try XCTUnwrap(controller.bridge?.config)
+        let scripts = try XCTUnwrap(controller.webView).configuration.userContentController.userScripts
+        let prefix = NativeBridgeBootstrap.installationScript(
+            cookiesEnabled: configuration.getPluginConfig("CapacitorCookies").getBoolean("enabled", false),
+            httpEnabled: configuration.getPluginConfig("CapacitorHttp").getBoolean("enabled", false))
+        let resource = try XCTUnwrap(Bundle(for: CAPBridgeViewController.self).url(forResource: "native-bridge", withExtension: "js"))
+        let bridgeSource = try String(contentsOf: resource, encoding: .utf8)
+        let prefixIndex = try XCTUnwrap(scripts.firstIndex { $0.source == prefix.source })
+        let bridgeIndex = try XCTUnwrap(scripts.firstIndex { $0.source == bridgeSource })
+        let pluginIndex = try XCTUnwrap(scripts.lastIndex { $0.source.contains("NostalgifyNative") })
+        let cleanupIndex = try XCTUnwrap(scripts.firstIndex { $0.source == NativeBridgeBootstrap.cleanupScript.source })
+        XCTAssertLessThan(prefixIndex, bridgeIndex)
+        XCTAssertLessThan(bridgeIndex, pluginIndex)
+        XCTAssertLessThan(pluginIndex, cleanupIndex)
+        for index in [prefixIndex, bridgeIndex, cleanupIndex] {
+            XCTAssertEqual(scripts[index].injectionTime, .atDocumentStart)
+            XCTAssertTrue(scripts[index].isForMainFrameOnly)
+        }
+    }
+
+    @MainActor
+    func testBootstrapPreanswersPackagedBridgeConfigurationAndRestoresPrompt() async throws {
+        for cookies in [false, true] {
+            for http in [false, true] {
+                let fixture = try BootstrapWebViewFixture(cookies: cookies, http: http)
+                defer { fixture.close() }
+                // A second document must install a fresh shim and restore it again.
+                for _ in 0..<2 {
+                    let result = try await fixture.load(in: self)
+                    XCTAssertEqual(result["configCalls"] as? Int, 0)
+                    XCTAssertEqual(result["bridgeReady"] as? Bool, true)
+                    XCTAssertEqual(result["cookiesPatched"] as? Bool, cookies)
+                    XCTAssertEqual(result["fetchPatched"] as? Bool, http)
+                    XCTAssertEqual(result["xhrPatched"] as? Bool, http)
+                    XCTAssertEqual(result["wrappedBeforeBridge"] as? Bool, true)
+                    XCTAssertEqual(result["wrappedAfterBridge"] as? Bool, true)
+                    XCTAssertEqual(result["descriptorRestored"] as? Bool, true)
+                    XCTAssertEqual(result["cleanupRemoved"] as? Bool, true)
+                    XCTAssertEqual(result["forwardingPreserved"] as? Bool, true)
+                    XCTAssertEqual(result["exceptionPreserved"] as? Bool, true)
+                    XCTAssertEqual(result["exclusionsPreserved"] as? Bool, true)
+                    XCTAssertTrue(fixture.prompts.isEmpty)
+                }
+            }
+        }
+    }
+
+    @MainActor
+    func testBootstrapBaselineDetectsBothSynchronousConfigurationQueries() async throws {
+        let fixture = try BootstrapWebViewFixture(cookies: false, http: false, installShim: false)
+        defer { fixture.close() }
+        let result = try await fixture.load(in: self)
+        XCTAssertEqual(result["configCalls"] as? Int, 2,
+            "The real packaged bridge must exercise the sentinel; removing the production prefix must fail the zero-call regression.")
+        XCTAssertEqual(result["bridgeReady"] as? Bool, true)
+        XCTAssertTrue(fixture.prompts.isEmpty, "The baseline must not enter the known synchronous IPC stall.")
+    }
+
+    @MainActor
+    func testBootstrapForwardsOrdinaryPromptsAndCookieOperations() async throws {
+        let fixture = try BootstrapWebViewFixture(cookies: true, http: false)
+        defer {
+            fixture.attachPromptTrace()
+            fixture.close()
+        }
+        try fixture.show()
+        _ = try await fixture.load(in: self)
+        let value = try await fixture.evaluate("""
+        (() => {
+          const phase = value => window.webkit.messageHandlers.bootstrapPromptPhase.postMessage(value);
+          window.__bootstrapTest.useNativePrompt = true;
+          phase('ordinary requested');
+          const ordinary = prompt('ordinary', 'prefill');
+          phase('ordinary returned');
+          phase('cancel requested');
+          const cancelled = prompt('cancel');
+          phase('cancel returned');
+          phase('cookie get requested');
+          const cookie = document.cookie;
+          phase('cookie get returned');
+          phase('cookie set requested');
+          document.cookie = 'fixture=updated; domain=localhost';
+          phase('cookie set returned');
+          return {ordinary, cancelled, cookie};
+        })()
+        """, in: self)
+        let result = try XCTUnwrap(value as? [String: Any])
+        XCTAssertEqual(result["ordinary"] as? String, "native reply")
+        XCTAssertTrue(result["cancelled"] is NSNull)
+        XCTAssertEqual(result["cookie"] as? String, "fixture=value")
+        XCTAssertEqual(fixture.prompts.count, 4)
+        guard fixture.prompts.count == 4 else { return }
+        XCTAssertEqual(fixture.prompts[0].message, "ordinary")
+        XCTAssertEqual(fixture.prompts[0].defaultText, "prefill")
+        XCTAssertEqual(fixture.prompts[1].message, "cancel")
+        XCTAssertEqual(fixture.prompts[2].message, #"{"type":"CapacitorCookies.get"}"#)
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(fixture.prompts[3].message.utf8)) as? [String: String])
+        XCTAssertEqual(payload, ["type": "CapacitorCookies.set", "action": "fixture=updated; domain=localhost", "domain": "localhost"])
+    }
+
+    @MainActor
+    func testBootstrapPreservesOwnAndInheritedPromptAccessors() async throws {
+        for property in [BootstrapWebViewFixture.PromptProperty.ownAccessor, .inheritedAccessor, .immutableAccessor] {
+            let fixture = try BootstrapWebViewFixture(cookies: false, http: false, promptProperty: property)
+            defer { fixture.close() }
+            let result = try await fixture.load(in: self)
+            XCTAssertEqual(result["configCalls"] as? Int, property == .immutableAccessor ? 2 : 0)
+            XCTAssertEqual(result["descriptorRestored"] as? Bool, true)
+            XCTAssertEqual(result["setterCalls"] as? Int, 0)
+            XCTAssertEqual(result["cleanupRemoved"] as? Bool, true)
+            XCTAssertEqual(result["exclusionsPreserved"] as? Bool, true)
+            if property == .immutableAccessor {
+                XCTAssertEqual(result["installationGetterReads"] as? Int, 0)
+            }
+            XCTAssertTrue(fixture.prompts.isEmpty)
+        }
+    }
+
+    @MainActor
+    func testBootstrapCleanupHandlesMissingOrThrowingBridgeAndPreservesPromptOwnership() async throws {
+        for scenario in [BootstrapWebViewFixture.Scenario.missing, .throwing, .foreignPrompt, .foreignGetter] {
+            let fixture = try BootstrapWebViewFixture(cookies: false, http: false, scenario: scenario)
+            defer { fixture.close() }
+            let result = try await fixture.load(in: self)
+            XCTAssertEqual(result["configCalls"] as? Int, 0)
+            XCTAssertEqual(result["cleanupRemoved"] as? Bool, true)
+            let hasForeignPrompt = scenario == .foreignPrompt || scenario == .foreignGetter
+            XCTAssertEqual(result["descriptorRestored"] as? Bool, !hasForeignPrompt)
+            XCTAssertEqual(result["foreignPromptPreserved"] as? Bool, hasForeignPrompt)
+            XCTAssertEqual(result["bridgeReady"] as? Bool, hasForeignPrompt)
+            XCTAssertEqual(result["bridgeThrew"] as? Bool, scenario == .throwing)
+            XCTAssertEqual(result["foreignGetterReads"] as? Int, 0)
+            XCTAssertTrue(fixture.prompts.isEmpty)
+        }
+    }
+
     private static func webViewFixture(errors: String) -> String {
         """
         <html data-player-ready="true"><body>
@@ -191,5 +422,353 @@ final class NativeCoreTests: XCTestCase {
         };
         </script></body></html>
         """
+    }
+}
+
+/// The saved-prompt sentinel makes an unpatched bridge fail by a call count,
+/// without entering WebKit's document-start synchronous IPC path in the control.
+@MainActor
+private final class BootstrapWebViewFixture: NSObject, WKScriptMessageHandler, WKUIDelegate, WKNavigationDelegate {
+    enum Scenario { case normal, missing, throwing, foreignPrompt, foreignGetter }
+    enum PromptProperty { case data, ownAccessor, inheritedAccessor, immutableAccessor }
+    let webView: WKWebView
+    private let fixtureScripts: [WKUserScript]
+    private var loadIdentifier: String?
+    private var documentStarted: XCTestExpectation?
+    private var documentStartedAt: TimeInterval?
+    private var report: [String: Any]?
+    private var reportReady: XCTestExpectation?
+    private var navigationReady: XCTestExpectation?
+    private var loadingNavigation: WKNavigation?
+    private var navigationResult: Result<Void, Error>?
+    private var promptTrace: [String] = []
+    private(set) var prompts: [(message: String, defaultText: String?)] = []
+
+    init(cookies: Bool, http: Bool, installShim: Bool = true, scenario: Scenario = .normal,
+         promptProperty: PromptProperty = .data) throws {
+        let bridgeURL = try XCTUnwrap(Bundle(for: CAPBridgeViewController.self).url(forResource: "native-bridge", withExtension: "js"))
+        let bridgeSource = try String(contentsOf: bridgeURL, encoding: .utf8)
+        let configuration = WKWebViewConfiguration()
+        configuration.websiteDataStore = .nonPersistent()
+        // This inline fixture has no remote content to classify. WebKit can
+        // defer native prompt delivery beyond didFinish while a URL reputation
+        // lookup is pending; that service is outside this bridge regression.
+        configuration.preferences.isFraudulentWebsiteWarningEnabled = false
+        let content = configuration.userContentController
+        func add(_ source: String, at time: WKUserScriptInjectionTime = .atDocumentStart) {
+            content.addUserScript(WKUserScript(source: source, injectionTime: time, forMainFrameOnly: true))
+        }
+        add("""
+        (() => {
+          const nativePrompt = window.prompt;
+          const state = window.__bootstrapTest = {
+            fetch: window.fetch, xhr: window.XMLHttpRequest, configCalls: 0,
+            calls: [], exception: {}, bridgeThrew: false, useNativePrompt: false,
+            getterCalls: 0, setterCalls: 0, foreignGetterReads: 0, coercions: 0
+          };
+          function sentinel(message) {
+            if (arguments.length === 1 && message === '{"type":"CapacitorCookies.isEnabled"}') {
+              state.configCalls++; return '\(cookies)';
+            }
+            if (arguments.length === 1 && message === '{"type":"CapacitorHttp"}') {
+              state.configCalls++; return '\(http)';
+            }
+            if (state.useNativePrompt) return Reflect.apply(nativePrompt, this, arguments);
+            state.calls.push({receiver: this, arguments: Array.from(arguments)});
+            if (message === state.exception) throw state.exception;
+            return 'forwarded';
+          }
+          const descriptor = \(promptProperty == .data) ? {
+            value: sentinel, configurable: true, enumerable: false, writable: true
+          } : {
+            configurable: \(promptProperty != .immutableAccessor), enumerable: false,
+            get() { state.getterCalls++; return sentinel; },
+            set(value) { state.setterCalls++; state.assignedPrompt = value; }
+          };
+          if (\(promptProperty == .inheritedAccessor)) {
+            Object.defineProperty(Object.getPrototypeOf(window), 'prompt', descriptor);
+            delete window.prompt;
+          } else Object.defineProperty(window, 'prompt', descriptor);
+          state.savedPrompt = sentinel;
+          state.descriptor = Object.getOwnPropertyDescriptor(window, 'prompt');
+        })();
+        """)
+        if installShim {
+            let prefix = NativeBridgeBootstrap.installationScript(cookiesEnabled: cookies, httpEnabled: http)
+            XCTAssertEqual(prefix.injectionTime, .atDocumentStart)
+            XCTAssertTrue(prefix.isForMainFrameOnly)
+            content.addUserScript(prefix)
+        }
+        add("""
+        (() => {
+          const state = window.__bootstrapTest, receiver = {}, message = {}, defaultText = {}, extra = {};
+          state.installationGetterReads = state.getterCalls;
+          state.wrappedBeforeBridge = window.prompt !== state.savedPrompt;
+          const answer = window.prompt.call(receiver, message, defaultText, extra);
+          const call = state.calls[0];
+          state.forwardingPreserved = answer === 'forwarded' && call.receiver === receiver &&
+            call.arguments.length === 3 && call.arguments[0] === message &&
+            call.arguments[1] === defaultText && call.arguments[2] === extra;
+          try { window.prompt(state.exception); } catch (error) {
+            state.exceptionPreserved = error === state.exception && state.calls.length === 2;
+          }
+          const config = '{"type":"CapacitorHttp"}';
+          const excluded = [
+            [config, defaultText], [config, undefined, extra], [new String(config)],
+            [{toString() { state.coercions++; return config; }}],
+            ['{ "type": "CapacitorHttp" }'], ['{"type":"CapacitorHttp","extra":true}'],
+            ['{"type":"CapacitorCookies.get"}'],
+            ['{"type":"CapacitorCookies.set","action":"a=b","domain":"localhost"}']
+          ];
+          state.exclusionsPreserved = excluded.every(args => {
+            const count = state.calls.length;
+            const answer = Reflect.apply(window.prompt, receiver, args);
+            const call = state.calls[state.calls.length - 1];
+            return answer === 'forwarded' && state.calls.length === count + 1 &&
+              call.receiver === receiver && call.arguments.length === args.length &&
+              args.every((value, index) => call.arguments[index] === value);
+          }) && state.coercions === 0;
+        })();
+        window.Capacitor = {DEBUG: false, isLoggingEnabled: false, Plugins: {}};
+        window.WEBVIEW_SERVER_URL = 'capacitor://localhost';
+        """)
+        if scenario == .throwing {
+            add("""
+            Object.defineProperty(window, 'XMLHttpRequest', {configurable: true, get() {
+              window.__bootstrapTest.bridgeThrew = true;
+              throw new Error('bootstrap fixture');
+            }});
+            """)
+        }
+        if scenario != .missing { add(bridgeSource) }
+        add("window.__bootstrapTest.wrappedAfterBridge = window.prompt !== window.__bootstrapTest.savedPrompt;")
+        if scenario == .foreignPrompt {
+            add("window.prompt = window.__bootstrapTest.foreignPrompt = function () { return 'foreign'; };")
+        }
+        if scenario == .foreignGetter {
+            add("""
+            window.__bootstrapTest.foreignGetter = function () {
+              window.__bootstrapTest.foreignGetterReads++; return function () {};
+            };
+            Object.defineProperty(window, 'prompt', {configurable: true, get: window.__bootstrapTest.foreignGetter});
+            """)
+        }
+        let cleanup = NativeBridgeBootstrap.cleanupScript
+        XCTAssertEqual(cleanup.injectionTime, .atDocumentStart)
+        XCTAssertTrue(cleanup.isForMainFrameOnly)
+        content.addUserScript(cleanup)
+        add("""
+        (() => {
+          const state = window.__bootstrapTest;
+          const descriptor = Object.getOwnPropertyDescriptor(window, 'prompt');
+          window.webkit.messageHandlers.bootstrapResult.postMessage({
+            navigationID: window.__bootstrapFixtureNavigation,
+            configCalls: state.configCalls,
+            bridgeReady: typeof window.Capacitor.nativePromise === 'function',
+            cookiesPatched: Object.prototype.hasOwnProperty.call(document, 'cookie'),
+            fetchPatched: window.fetch !== state.fetch,
+            xhrPatched: !state.bridgeThrew && window.XMLHttpRequest !== state.xhr,
+            wrappedBeforeBridge: state.wrappedBeforeBridge,
+            wrappedAfterBridge: state.wrappedAfterBridge,
+            descriptorRestored: state.descriptor === undefined
+              ? descriptor === undefined && window.prompt === state.savedPrompt
+              : !!descriptor && ['value', 'writable', 'enumerable', 'configurable', 'get', 'set']
+                .every(key => descriptor[key] === state.descriptor[key]),
+            cleanupRemoved: !Object.prototype.hasOwnProperty.call(window, '__nostalgifyRestoreBootstrapPrompt'),
+            forwardingPreserved: state.forwardingPreserved,
+            exceptionPreserved: state.exceptionPreserved === true,
+            exclusionsPreserved: state.exclusionsPreserved,
+            setterCalls: state.setterCalls,
+            installationGetterReads: state.installationGetterReads,
+            foreignGetterReads: state.foreignGetterReads,
+            foreignPromptPreserved: (!!state.foreignPrompt && descriptor.value === state.foreignPrompt) ||
+              (!!state.foreignGetter && descriptor.get === state.foreignGetter),
+            bridgeThrew: state.bridgeThrew
+          });
+        })();
+        """, at: .atDocumentEnd)
+        // Copy into independent Swift storage before mutating the controller's scripts.
+        fixtureScripts = content.userScripts.map { $0 }
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        super.init()
+        content.add(self, name: "bridge")
+        content.add(self, name: "bootstrapResult")
+        content.add(self, name: "bootstrapStarted")
+        content.add(self, name: "bootstrapPromptPhase")
+        webView.uiDelegate = self
+        webView.navigationDelegate = self
+    }
+
+    func show() throws {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }.first { $0.activationState == .foregroundActive })
+        let window = try XCTUnwrap(scene.windows.first { $0.isKeyWindow })
+        webView.frame = window.bounds
+        webView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        // Use the existing host window without replacing its controller or focus.
+        window.addSubview(webView)
+        window.layoutIfNeeded()
+        XCTAssertTrue(webView.window === window)
+        XCTAssertFalse(window.isHidden)
+        XCTAssertGreaterThan(webView.bounds.width, 0)
+        XCTAssertGreaterThan(webView.bounds.height, 0)
+    }
+
+    func load(in test: XCTestCase) async throws -> [String: Any] {
+        report = nil
+        navigationResult = nil
+        documentStartedAt = nil
+        let identifier = UUID().uuidString
+        loadIdentifier = identifier
+        let loadStartedAt = ProcessInfo.processInfo.systemUptime
+        let started = XCTestExpectation(description: "bootstrap fixture document execution started")
+        let ready = XCTestExpectation(description: "bootstrap document script completed")
+        let navigated = XCTestExpectation(description: "bootstrap navigation finished")
+        documentStarted = started
+        reportReady = ready
+        navigationReady = navigated
+        defer {
+            let startup = documentStartedAt.map { String(format: "%.3f", $0 - loadStartedAt) } ?? "not observed"
+            let state = "startupSeconds=\(startup), startupLimitSeconds=30, completionLimitSeconds=10, reportReceived=\(report != nil), navigationResultReceived=\(navigationResult != nil)"
+            XCTContext.runActivity(named: "Bootstrap fixture readiness") { activity in
+                let attachment = XCTAttachment(string: state)
+                attachment.name = "Bootstrap fixture readiness"
+                attachment.lifetime = .keepAlways
+                activity.add(attachment)
+            }
+            loadIdentifier = nil
+            documentStarted = nil
+            reportReady = nil
+            navigationReady = nil
+            loadingNavigation = nil
+        }
+        // Observe the actual cold test navigation, without a warmup document.
+        // Prefix the first existing script so the marker precedes fixture and
+        // bridge execution, and tag callbacks to reject an earlier document.
+        let first = try XCTUnwrap(fixtureScripts.first)
+        let marker = "window.__bootstrapFixtureNavigation = '\(identifier)'; window.webkit.messageHandlers.bootstrapStarted.postMessage('\(identifier)');\n"
+        let content = webView.configuration.userContentController
+        content.removeAllUserScripts()
+        content.addUserScript(WKUserScript(source: marker + first.source,
+            injectionTime: first.injectionTime, forMainFrameOnly: first.isForMainFrameOnly))
+        for script in fixtureScripts.dropFirst() { content.addUserScript(script) }
+        loadingNavigation = try XCTUnwrap(webView.loadHTMLString(
+            "<html><body>Bootstrap fixture</body></html>", baseURL: URL(string: "https://bootstrap.invalid/")))
+        // Cold WebContent launch exceeded 12 seconds in CI before this document
+        // could execute. Bound that startup separately; receipt is an observed
+        // execution boundary, not a timestamp of process launch or script start.
+        let startupResult = await XCTWaiter.fulfillment(of: [started], timeout: 30)
+        guard startupResult == .completed else {
+            throw NSError(domain: "BootstrapWebViewFixture", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Document execution did not start within the 30-second fixture startup budget (waiter result: \(startupResult))."
+            ])
+        }
+        if let navigationResult { try navigationResult.get() }
+        _ = try XCTUnwrap(documentStartedAt)
+        // A document-end message can arrive before WebKit finishes navigation.
+        // Preserve both completion requirements and their 10-second bound.
+        await test.fulfillment(of: [ready, navigated], timeout: 10)
+        try XCTUnwrap(navigationResult).get()
+        return try XCTUnwrap(report)
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        finishNavigation(navigation, result: .success(()))
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        finishNavigation(navigation, result: .failure(error))
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        finishNavigation(navigation, result: .failure(error))
+    }
+
+    private func finishNavigation(_ navigation: WKNavigation?, result: Result<Void, Error>) {
+        guard navigation === loadingNavigation, navigationResult == nil, navigationReady != nil else { return }
+        navigationResult = result
+        navigationReady?.fulfill()
+        if case .failure = result, report == nil {
+            documentStarted?.fulfill()
+            documentStarted = nil
+            reportReady?.fulfill()
+            reportReady = nil
+        }
+    }
+
+    func evaluate(_ source: String, in test: XCTestCase) async throws -> Any {
+        let ready = test.expectation(description: "bootstrap JavaScript completed")
+        var result: Result<Any, Error>?
+        recordPromptPhase("evaluation requested")
+        webView.evaluateJavaScript(source) { [weak self] value, error in
+            self?.recordPromptPhase(error == nil ? "evaluation completed" : "evaluation failed")
+            result = error.map { .failure($0) } ?? .success(value ?? NSNull())
+            ready.fulfill()
+        }
+        await test.fulfillment(of: [ready], timeout: 10)
+        return try XCTUnwrap(result).get()
+    }
+
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "bootstrapPromptPhase", let phase = message.body as? String {
+            recordPromptPhase(phase)
+            return
+        }
+        guard message.webView === webView, message.frameInfo.isMainFrame,
+              let loadIdentifier else { return }
+        if message.name == "bootstrapStarted", message.body as? String == loadIdentifier {
+            guard documentStartedAt == nil else { return }
+            documentStartedAt = ProcessInfo.processInfo.systemUptime
+            documentStarted?.fulfill()
+            documentStarted = nil
+            return
+        }
+        guard message.name == "bootstrapResult", report == nil,
+              let value = message.body as? [String: Any], value["navigationID"] as? String == loadIdentifier else { return }
+        report = value
+        reportReady?.fulfill()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String,
+                 defaultText: String?, initiatedByFrame frame: WKFrameInfo,
+                 completionHandler: @escaping @MainActor (String?) -> Void) {
+        prompts.append((prompt, defaultText))
+        let index = prompts.count
+        recordPromptPhase("native prompt \(index) received")
+        defer { recordPromptPhase("native prompt \(index) completed") }
+        switch prompt {
+        case "cancel": completionHandler(nil)
+        case #"{"type":"CapacitorCookies.get"}"#: completionHandler("fixture=value")
+        case #"{"type":"CapacitorCookies.isEnabled"}"#, #"{"type":"CapacitorHttp"}"#:
+            XCTFail("Configuration queries must not reach native prompt IPC")
+            completionHandler("false")
+        default: completionHandler("native reply")
+        }
+    }
+
+    private func recordPromptPhase(_ phase: String) {
+        promptTrace.append(phase)
+        print("BOOTSTRAP_PROMPT \(phase)")
+    }
+
+    func attachPromptTrace() {
+        let state = "nativePrompts=\(prompts.count), loading=\(webView.isLoading), attached=\(webView.window != nil)"
+        XCTContext.runActivity(named: "Bootstrap native prompt transport") { activity in
+            let attachment = XCTAttachment(string: (promptTrace + [state]).joined(separator: "\n"))
+            attachment.name = "Bootstrap prompt phases"
+            attachment.lifetime = .keepAlways
+            activity.add(attachment)
+        }
+    }
+
+    func close() {
+        webView.stopLoading()
+        webView.uiDelegate = nil
+        webView.navigationDelegate = nil
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bridge")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapResult")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapStarted")
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: "bootstrapPromptPhase")
+        webView.removeFromSuperview()
     }
 }
