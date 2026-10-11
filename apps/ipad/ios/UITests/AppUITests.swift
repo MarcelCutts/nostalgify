@@ -574,18 +574,46 @@ final class AppUITests: XCTestCase {
         record("enabled after: \(voiceOver.isEnabled)")
         record("service: \(voiceOver.debugDescription)")
         XCTAssertTrue(voiceOver.isEnabled, "VoiceOver must be enabled before touch exploration.")
-        // Enabling VoiceOver can move focus or scroll the page. Read the target
-        // after that change; enabled state alone does not prove service readiness.
+        func isSettingsButton(_ utterance: String) -> Bool {
+            let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized.hasPrefix("settings") && normalized.contains("button")
+        }
+        // Establish working navigation and speech without assuming enable gave
+        // VoiceOver an initial spoken focus. This tests touch after navigation;
+        // it does not establish that VoiceOver will intercept the next touch.
+        // https://developer.apple.com/documentation/xcuiautomation/xcuivoiceoverservice
+        record("phase:establish-focus")
+        var preTouchSpeech = try phase("voiceover.establishFocus") { try voiceOver.moveForward().utterance }
+        record("focus before touch: " + preTouchSpeech)
+        XCTAssertFalse(preTouchSpeech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       "VoiceOver navigation must produce speech before touch exploration.")
+        if isSettingsButton(preTouchSpeech) {
+            // Leave a preselected target once so the touch must select Settings.
+            // A failed operation or a second Settings result remains a failure.
+            record("phase:leave-preselected-settings")
+            preTouchSpeech = try phase("voiceover.leavePreselectedSettings") { try voiceOver.moveForward().utterance }
+            record("focus before touch: " + preTouchSpeech)
+            XCTAssertFalse(preTouchSpeech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           "Leaving preselected Settings must produce speech.")
+        }
+        XCTAssertFalse(isSettingsButton(preTouchSpeech),
+                       "VoiceOver focus must be away from Settings before the touch selects it.")
+        let openedBeforeTouch = phase("voiceover.preTouchActivationCheck") {
+            button("settings-close", "Close settings").exists
+        }
+        record("settings opened before touch: \(openedBeforeTouch)")
+        XCTAssertFalse(openedBeforeTouch, "VoiceOver focus setup must leave Settings closed.")
+        // Enabling and navigating VoiceOver can scroll the page. Read both
+        // frames after focus setup, before sending the single coordinate touch.
         let settingsFrame = phase("voiceover.targetFrame") { settings.frame }
         let appFrame = phase("voiceover.appFrame") { app.frame }
-        record("settings frame after enable: \(settingsFrame); app frame: \(appFrame)")
-        XCTAssertTrue(appFrame.contains(settingsFrame), "Settings must still be onscreen after enabling VoiceOver.")
+        record("settings frame after focus setup: \(settingsFrame); app frame: \(appFrame)")
+        XCTAssertTrue(appFrame.contains(settingsFrame), "Settings must still be onscreen after VoiceOver focus setup.")
         let settingsCenter = app.coordinate(withNormalizedOffset: .zero).withOffset(
             CGVector(dx: settingsFrame.midX - appFrame.minX, dy: settingsFrame.midY - appFrame.minY))
         // VoiceOver touch exploration selects an item with one tap; activation
-        // requires a double tap. Send one physical coordinate event to establish
-        // a known focus before testing sequential navigation. This avoids
-        // assuming that enabling VoiceOver produced an initial spoken element.
+        // requires a double tap. Send one physical coordinate event to select
+        // Settings from the non-Settings focus established above.
         // https://support.apple.com/guide/ipad/ipad58ced58d/ipados
         record("phase:touch-settings")
         phase("voiceover.touchSettings") { settingsCenter.tap() }
@@ -595,10 +623,6 @@ final class AppUITests: XCTestCase {
         record("phase:current-speech")
         let speech = try phase("voiceover.currentSpeech") { try voiceOver.currentSpeech().utterance }
         record("speech: " + speech)
-        func isSettingsButton(_ utterance: String) -> Bool {
-            let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return normalized.hasPrefix("settings") && normalized.contains("button")
-        }
         XCTAssertTrue(isSettingsButton(speech), "Touch exploration must select Settings and announce it as a button, rather than incidental help text.")
         record("phase:leave-settings")
         let next = try phase("voiceover.moveForward") { try voiceOver.moveForward().utterance }
