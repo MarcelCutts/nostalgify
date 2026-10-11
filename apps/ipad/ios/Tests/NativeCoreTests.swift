@@ -126,6 +126,46 @@ final class NativeCoreTests: XCTestCase {
     }
 
     @MainActor
+    func testNativeDiagnosticsClassifyFailuresWithoutPromotingArbitraryLabels() {
+        for event in ["command.failed", "local.import_failed", "local.library_read_failed",
+                      "local.playback_failed", "local.remote_failed", "local.session_configure_failed",
+                      "local.session_deactivate_failed", "spotify_failure", "selfcheck.failed"] {
+            XCTAssertEqual(NativeDiagnostics.logLevel(for: event), .error, event)
+        }
+        for event in ["selfcheck.started", "selfcheck.passed"] {
+            XCTAssertEqual(NativeDiagnostics.logLevel(for: event), .default, event)
+        }
+        for event in ["command.started", "command.completed", "spotify_connected",
+                      "redacted", "private_token_failed", "selfcheck.private_token"] {
+            XCTAssertEqual(NativeDiagnostics.logLevel(for: event), .info, event)
+        }
+    }
+
+    @MainActor
+    func testNativeDiagnosticsKeepOrderedTimesAfterBufferEviction() throws {
+        let log = NativeDiagnostics()
+        for _ in 0..<305 { log.record("command.completed") }
+        let data = try JSONSerialization.data(withJSONObject: log.snapshot())
+        let report = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let events = try XCTUnwrap(report["events"] as? [[String: Any]])
+        XCTAssertEqual(events.count, 300)
+        XCTAssertEqual(events.compactMap { ($0["sequence"] as? NSNumber)?.uint64Value },
+                       Array(UInt64(6)...UInt64(305)))
+        let timestamp = ISO8601DateFormatter()
+        timestamp.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        var previousUptime = 0.0
+        for event in events {
+            let time = try XCTUnwrap(event["time"] as? String)
+            let date = try XCTUnwrap(timestamp.date(from: time))
+            XCTAssertEqual(timestamp.string(from: date), time)
+            let uptime = try XCTUnwrap(event["uptimeMs"] as? Double)
+            XCTAssertTrue(uptime.isFinite)
+            XCTAssertGreaterThanOrEqual(uptime, previousUptime)
+            previousUptime = uptime
+        }
+    }
+
+    @MainActor
     func testWebErrorExportKeepsOnlyFixedCodesAndStructuralLocations() {
         let valid = NativeDiagnostics.sanitizedWebError(["code": "resize_observer_loop", "errorClass": "ResizeObserver",
             "source": "app.js", "line": 42, "column": 8, "message": "private song title", "stack": "private URL"])
