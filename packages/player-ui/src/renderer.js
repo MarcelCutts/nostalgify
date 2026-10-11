@@ -331,7 +331,12 @@ export async function mountPlayer(host, { target = document.getElementById("app"
     const soundcloud = s.provider === "soundcloud";
 
     if (host.platform === "ios" || s.provider === "local") {
-      if (s.error || !s.track) return showMessage(s.message || (s.error ? "Playback is unavailable. Try again." : "Choose music to begin"));
+      if (!s.track) {
+        // The same message can first accompany a live track and later a disconnect.
+        // Make that transition stop the transport once, even if its text is unchanged.
+        if (currentTrackId != null) shownMessage = null;
+        return showMessage(s.message || (s.error ? "Playback is unavailable. Try again." : "Choose music to begin"));
+      }
     } else if (!soundcloud) {
       if (s.error === "permission") {
         return showMessage("Allow Nostalgify to control Spotify in System Settings > Privacy > Automation");

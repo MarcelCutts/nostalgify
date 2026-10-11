@@ -44,7 +44,7 @@ enum SpotifyInput {
     static func isAuthorizationCallback(_ url: URL) -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
         return components.scheme == "nostalgify" && components.host == "spotify-login-callback"
-            && components.path.isEmpty && components.port == nil
+            && (components.path.isEmpty || components.path == "/") && components.port == nil
             && components.user == nil && components.password == nil
     }
 
@@ -53,16 +53,70 @@ enum SpotifyInput {
             throw NativeFailure(code: "invalid_argument", message: "Seek position must be a number of seconds.")
         }
         let seconds = number.doubleValue
-        guard seconds.isFinite, seconds >= 0, duration.isFinite, duration > 0 else {
+        guard seconds.isFinite, duration.isFinite, duration > 0 else {
             throw NativeFailure(code: "invalid_argument", message: "Choose a valid position in the current track.")
         }
-        let milliseconds = (min(seconds, duration) * 1000).rounded(.down)
+        let milliseconds = (min(max(0, seconds), duration) * 1000).rounded(.down)
         // Double(Int.max) rounds upward on 64-bit platforms; converting that value traps.
         guard milliseconds.isFinite, milliseconds < Double(Int.max) else {
             throw NativeFailure(code: "invalid_argument", message: "That seek position is out of range.")
         }
         return Int(milliseconds)
     }
+}
+
+/// Stores user intent only, never tokens. A callback can recover after suspension or
+/// process death, but only for this configuration and for ten minutes after Connect.
+/// App Remote supplies no OAuth state value; this is an acceptance window, not proof
+/// of callback provenance while an explicitly requested authorization is outstanding.
+final class SpotifyAuthorizationIntent {
+    private struct Pending: Codable {
+        let clientID: String
+        let redirectURI: String
+        let startedAt: Date
+    }
+    private static let key = "nostalgify.spotify.pending-authorization"
+    private let defaults: UserDefaults
+    private let now: () -> Date
+    static let lifetime: TimeInterval = 600
+
+    init(defaults: UserDefaults, now: @escaping () -> Date = Date.init) {
+        self.defaults = defaults
+        self.now = now
+    }
+
+    func begin(clientID: String, redirectURI: String) {
+        let pending = Pending(clientID: clientID, redirectURI: redirectURI, startedAt: now())
+        defaults.set(try? JSONEncoder().encode(pending), forKey: Self.key)
+    }
+
+    func isPending(clientID: String, redirectURI: String) -> Bool {
+        guard let data = defaults.data(forKey: Self.key),
+              let pending = try? JSONDecoder().decode(Pending.self, from: data) else {
+            invalidate()
+            return false
+        }
+        let age = now().timeIntervalSince(pending.startedAt)
+        guard pending.clientID == clientID, pending.redirectURI == redirectURI,
+              age >= 0, age < Self.lifetime else {
+            invalidate()
+            return false
+        }
+        return true
+    }
+
+    func invalidate() { defaults.removeObject(forKey: Self.key) }
+}
+
+/// Dependency seams keep recovery tests off the real Spotify app and Keychain.
+struct SpotifyRemoteDependencies {
+    var makeRemote: (SPTConfiguration) -> SPTAppRemote = { SPTAppRemote(configuration: $0, logLevel: .none) }
+    var readToken: () throws -> String? = { try SpotifyTokenStore.read() }
+    var writeToken: (String) throws -> Void = { try SpotifyTokenStore.write($0) }
+    var deleteToken: () throws -> Void = { try SpotifyTokenStore.delete() }
+    var now: () -> Date = Date.init
+    var authorizationTimeoutNanoseconds: UInt64 = 120_000_000_000
+    var requestTimeoutNanoseconds: UInt64 = 12_000_000_000
 }
 
 /// Awaits an SDK connection event without polling, blocking the main actor, or
@@ -109,18 +163,37 @@ final class SpotifyConnectionWaiter {
     }
 }
 
+/// The SDK's state callback has no sender. Each subscription needs its own
+/// receiver, including when the same App Remote instance reconnects. Retirement
+/// also rejects queued callbacks that still retain an old, otherwise weak delegate.
+@MainActor
+private final class SpotifyPlayerStateDelegate: NSObject, SPTAppRemotePlayerStateDelegate {
+    private var receive: ((SPTAppRemotePlayerState) -> Void)?
+
+    init(receive: @escaping (SPTAppRemotePlayerState) -> Void) { self.receive = receive }
+    func retire() { receive = nil }
+    func playerStateDidChange(_ playerState: SPTAppRemotePlayerState) { receive?(playerState) }
+}
+
 /// Spotify remains the audio owner. This service never opens an AVAudioSession,
 /// manufactures audio, or pauses Spotify merely because Nostalgify backgrounds.
 @MainActor
-final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePlayerStateDelegate {
+final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate {
     var onStateChanged: (() -> Void)?
 
     private let diagnostics: NativeDiagnostics
     private let defaults: UserDefaults
+    private let dependencies: SpotifyRemoteDependencies
+    private let authorizationIntent: SpotifyAuthorizationIntent
     private var remote: SPTAppRemote?
     private var clientID: String?
     private var redirectURL: URL?
     private var playerState: SPTAppRemotePlayerState?
+    private var playerStateDelegate: SpotifyPlayerStateDelegate?
+    // Track observation history separately from metadata cleared by logout/configuration.
+    private var hasEstablishedConnection = false
+    private var stateRevision = 0
+    private var stateReadID = UUID()
     private var positionReceivedAt = ProcessInfo.processInfo.systemUptime
     private var artworkURI: String?
     private var artworkDataURL = ""
@@ -134,6 +207,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     private let connectionWaiter = SpotifyConnectionWaiter()
     private var authorizationTimeout: Task<Void, Never>?
     private var failure: NativeFailure?
+    private var failureClearsOnStateUpdate = false
     private var statusMessage = "Add your Spotify Client ID in Settings, then connect."
 
     private struct PendingRequest {
@@ -144,13 +218,16 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     private static let clientIDKey = "nostalgify.spotify.client-id"
     private static let redirectKey = "nostalgify.spotify.redirect-uri"
 
-    init(diagnostics: NativeDiagnostics, defaults: UserDefaults = .standard) {
+    init(diagnostics: NativeDiagnostics, defaults: UserDefaults = .standard,
+         dependencies: SpotifyRemoteDependencies = SpotifyRemoteDependencies()) {
         self.diagnostics = diagnostics
         self.defaults = defaults
+        self.dependencies = dependencies
+        authorizationIntent = SpotifyAuthorizationIntent(defaults: defaults, now: dependencies.now)
         super.init()
         if let identifier = defaults.string(forKey: Self.clientIDKey) {
             do {
-                try configure(clientId: identifier, redirectURI: defaults.string(forKey: Self.redirectKey) ?? SpotifyInput.redirectURI)
+                try configure(clientId: identifier, redirectURI: defaults.string(forKey: Self.redirectKey) ?? SpotifyInput.redirectURI, restoringAuthorization: true)
             } catch let error as NativeFailure {
                 setFailure(error.code, error.message)
             } catch {
@@ -160,68 +237,86 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     }
 
     func configure(clientId: String, redirectURI: String) throws {
+        try configure(clientId: clientId, redirectURI: redirectURI, restoringAuthorization: false)
+    }
+
+    private func configure(clientId: String, redirectURI: String, restoringAuthorization: Bool) throws {
         let (identifier, redirect) = try SpotifyInput.configuration(clientID: clientId, redirectURI: redirectURI)
         if clientID == identifier, redirectURL == redirect, remote != nil { return }
         let savedID = defaults.string(forKey: Self.clientIDKey)
         let savedRedirect = defaults.string(forKey: Self.redirectKey)
         if (savedID != nil && savedID != identifier) || (savedRedirect != nil && savedRedirect != redirectURI) {
-            try SpotifyTokenStore.delete()
+            authorizationIntent.invalidate()
+            try dependencies.deleteToken()
         }
-        disconnect()
+        disconnect(preserveAuthorizationIntent: restoringAuthorization)
         remote = nil
         playerState = nil
         artworkURI = nil
         artworkDataURL = ""
         let configuration = SPTConfiguration(clientID: identifier, redirectURL: redirect)
         // SDK diagnostics may contain URLs or metadata. Only our fixed event codes are recorded.
-        let instance = SPTAppRemote(configuration: configuration, logLevel: .none)
+        let instance = dependencies.makeRemote(configuration)
         instance.delegate = self
-        instance.connectionParameters.accessToken = try SpotifyTokenStore.read()
+        instance.connectionParameters.accessToken = try dependencies.readToken()
         clientID = identifier
         redirectURL = redirect
         remote = instance
         defaults.set(identifier, forKey: Self.clientIDKey)
         defaults.set(redirectURI, forKey: Self.redirectKey)
-        wantsConnection = instance.connectionParameters.accessToken != nil
+        let pending = authorizationIntent.isPending(clientID: identifier, redirectURI: redirectURI)
+        wantsConnection = instance.connectionParameters.accessToken != nil || pending
+        authorizing = pending
+        if pending { mayHaveActivePlayback = true }
         failure = nil
-        statusMessage = "Connect to Spotify. Spotify may open briefly and resume your music."
+        statusMessage = pending ? "Finish connecting in Spotify, or tap Connect to try again."
+            : "Connect to Spotify. Spotify may open briefly and resume your music."
+        if pending { scheduleAuthorizationTimeout() }
         notify()
     }
 
     /// Explicit user action: authorization can switch apps and start Spotify playback.
     func connect() throws {
-        guard let remote else {
+        guard let previousRemote = remote, let clientID, let redirectURL else {
             throw NativeFailure(code: "spotify_configuration", message: "Add your Spotify Client ID in Settings first.")
         }
-        guard !authorizing else { return }
-        if remote.isConnected { return }
+        // Reconnect must renew a live transport; an unfinished authorization can be
+        // explicitly retried rather than silently ignored for the timeout interval.
+        let wasConnected = previousRemote.isConnected
+        let token = previousRemote.connectionParameters.accessToken
         closeTransport()
+        // Disconnect is asynchronous. A new instance prevents its late delegate
+        // events or still-true isConnected flag from cancelling this recovery.
+        let remote = dependencies.makeRemote(SPTConfiguration(clientID: clientID, redirectURL: redirectURL))
+        remote.connectionParameters.accessToken = token
+        remote.delegate = self
+        self.remote = remote
         wantsConnection = true
         foreground = true
+        failure = nil
+        if wasConnected, remote.connectionParameters.accessToken != nil {
+            cancelAuthorization()
+            connectTransport()
+            return
+        }
         authorizing = true
         connecting = false
-        failure = nil
         statusMessage = "Finish connecting in Spotify, then return to Nostalgify."
         let attempt = UUID()
         generation = attempt
+        let previousPlaybackUncertainty = mayHaveActivePlayback
         mayHaveActivePlayback = true
+        authorizationIntent.begin(clientID: clientID, redirectURI: redirectURL.absoluteString)
         diagnostics.record("spotify_authorization_started")
-        authorizationTimeout?.cancel()
-        authorizationTimeout = Task { @MainActor [weak self] in
-            do { try await Task.sleep(nanoseconds: 120_000_000_000) } catch { return }
-            guard let self, self.generation == attempt, self.authorizing else { return }
-            self.authorizing = false
-            self.setFailure("spotify_authorization_timeout", "Spotify did not finish connecting. Check your Client ID, redirect and allowed Spotify account, then reconnect.")
-        }
+        scheduleAuthorizationTimeout()
         remote.authorizeAndPlayURI("") { [weak self] installed in
             // Cross the Objective-C callback boundary with value types only.
-            // A delayed availability result must not replace completed auth.
             Task { @MainActor [weak self] in
                 guard let self, self.generation == attempt, self.authorizing else { return }
                 if !installed {
-                    self.authorizing = false
-                    self.mayHaveActivePlayback = false
-                    self.authorizationTimeout?.cancel()
+                    self.cancelAuthorization()
+                    // Failing to open Spotify cannot undo prior playback uncertainty.
+                    self.mayHaveActivePlayback = previousPlaybackUncertainty
                     self.setFailure("spotify_not_installed", "Install Spotify on this iPad and sign in, then connect again.")
                 }
             }
@@ -229,19 +324,42 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         notify()
     }
 
+    private func scheduleAuthorizationTimeout() {
+        authorizationTimeout?.cancel()
+        let attempt = generation
+        let timeout = dependencies.authorizationTimeoutNanoseconds
+        authorizationTimeout = Task { @MainActor [weak self] in
+            do { try await Task.sleep(nanoseconds: timeout) } catch { return }
+            guard let self, self.generation == attempt, self.authorizing else { return }
+            self.authorizing = false
+            // Keep the bounded intent: login/2FA may legitimately outlast UI waiting.
+            self.setFailure("spotify_authorization_timeout", "Spotify did not finish connecting. Return from Spotify to finish, or tap Connect to try again.")
+        }
+    }
+
+    private func cancelAuthorization() {
+        authorizing = false
+        authorizationTimeout?.cancel()
+        authorizationIntent.invalidate()
+    }
+
+    /// A provider decision cancels callbacks even when a safe pause cannot yet be
+    /// confirmed. It must not erase the possibility that Spotify started playback.
+    func cancelPendingAuthorization() { cancelAuthorization() }
+
     func handleURL(_ url: URL) -> Bool {
         guard SpotifyInput.isAuthorizationCallback(url) else { return false }
         // Ignore stale callbacks after logout/provider switch, and unsolicited custom-scheme URLs.
-        guard authorizing, wantsConnection, let remote else { return true }
-        authorizing = false
-        authorizationTimeout?.cancel()
+        guard wantsConnection, let remote, let clientID, let redirectURL,
+              authorizationIntent.isPending(clientID: clientID, redirectURI: redirectURL.absoluteString) else { return true }
+        cancelAuthorization()
         guard let token = remote.authorizationParameters(from: url)?[SPTAppRemoteAccessTokenKey],
               !token.isEmpty, token.utf8.count <= 16_384 else {
             setFailure("spotify_authorization_denied", "Spotify did not authorize this app. Check the registered redirect and allowed account, then connect again.")
             return true
         }
         do {
-            try SpotifyTokenStore.write(token)
+            try dependencies.writeToken(token)
             remote.connectionParameters.accessToken = token
             failure = nil
             diagnostics.record("spotify_authorization_completed")
@@ -253,10 +371,13 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         return true
     }
 
-    func disconnect() {
+    func disconnect() { disconnect(preserveAuthorizationIntent: false) }
+
+    private func disconnect(preserveAuthorizationIntent: Bool) {
         wantsConnection = false
         authorizing = false
         authorizationTimeout?.cancel()
+        if !preserveAuthorizationIntent { authorizationIntent.invalidate() }
         closeTransport()
         statusMessage = "Spotify disconnected. Playback remains controlled by Spotify."
         notify()
@@ -268,7 +389,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         playerState = nil
         artworkURI = nil
         artworkDataURL = ""
-        do { try SpotifyTokenStore.delete() } catch {
+        do { try dependencies.deleteToken() } catch {
             setFailure("spotify_token_storage", "Spotify disconnected, but its saved authorization could not be removed. Unlock the iPad and retry disconnecting your account.")
             throw error
         }
@@ -279,8 +400,10 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     }
 
     func suspend() {
+        // A lifecycle gap lets Spotify change playback without our observing it,
+        // even if an earlier provider handoff confirmed a pause.
+        if hasEstablishedConnection { mayHaveActivePlayback = true }
         foreground = false
-        if remote?.isConnected == true { mayHaveActivePlayback = true }
         closeTransport(preserveAuthorization: true)
     }
 
@@ -322,6 +445,8 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
 
     func command(_ command: String, arg: Any?) async throws {
         var playbackMayHaveStarted = false
+        // A pre-command state read must not overwrite the command's later state.
+        stateReadID = UUID()
         do {
             switch command {
             case "connect": try connect(); return
@@ -380,34 +505,47 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
             }
             failure = nil
             statusMessage = ""
-            refreshState()
+            // A seek acknowledgement is not a player-state result. Wait for its
+            // bounded read before releasing the UI's pending-seek guard. Other
+            // controls keep their existing latency and command-queue budget.
+            if command == "seek" { try await refreshStateAfterCommand() }
+            else { refreshState() }
         } catch let error as NativeFailure {
             if playbackMayHaveStarted { mayHaveActivePlayback = true }
-            setFailure(error.code, error.message)
+            setFailure(error.code, error.message, recoverableOnState: true)
             throw error
         } catch {
             if playbackMayHaveStarted { mayHaveActivePlayback = true }
             let safe = NativeFailure(code: "spotify_command_failed", message: "Spotify could not complete that action. Open Spotify to check playback or reconnect.")
-            setFailure(safe.code, safe.message)
+            setFailure(safe.code, safe.message, recoverableOnState: true)
             throw safe
         }
     }
 
-    /// A switch must not start a second provider until Spotify acknowledges a pause.
+    /// Confirm a pause and retire observation together, before enabling the next
+    /// provider. Only this completed handoff may preserve the confirmed pause.
     func pauseBeforeProviderSwitch() async throws {
         guard remote?.isConnected == true else {
             if mayHaveActivePlayback || authorizing {
                 throw NativeFailure(code: "spotify_pause_unconfirmed", message: "Reconnect to Spotify so Nostalgify can pause it before switching to local files.")
             }
+            suspendAfterProviderSwitch()
             return
         }
+        let session = generation
+        stateReadID = UUID()
         _ = try await request { $0.pause($1) }
-        guard let state = try await request({ $0.getPlayerState($1) }) as? SPTAppRemotePlayerState,
-              state.isPaused else {
+        try await refreshStateAfterCommand()
+        guard generation == session, foreground, remote?.isConnected == true,
+              playerState?.isPaused == true, !mayHaveActivePlayback else {
             throw NativeFailure(code: "spotify_pause_unconfirmed", message: "Spotify has not confirmed it paused. Try switching again after pausing Spotify.")
         }
-        accept(state)
-        mayHaveActivePlayback = false
+        suspendAfterProviderSwitch()
+    }
+
+    private func suspendAfterProviderSwitch() {
+        foreground = false
+        closeTransport(preservePausedPlayback: true)
     }
 
     func snapshot() -> [String: Any] {
@@ -458,14 +596,22 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         notify()
     }
 
-    private func closeTransport(preserveAuthorization: Bool = false) {
+    private func closeTransport(preserveAuthorization: Bool = false, preservePausedPlayback: Bool = false) {
         if !preserveAuthorization || !authorizing { generation = UUID() }
+        stateReadID = UUID()
         connecting = false
         connectionTimeout?.cancel()
         connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
         cancelPendingRequests()
+        retirePlayerStateDelegate(preservePausedPlayback: preservePausedPlayback)
         // App Remote releases its APIs on disconnect; their delegate is weak and nonnull in the SDK.
         remote?.disconnect()
+    }
+
+    private func retirePlayerStateDelegate(preservePausedPlayback: Bool = false) {
+        if playerStateDelegate != nil, !preservePausedPlayback { mayHaveActivePlayback = true }
+        playerStateDelegate?.retire()
+        playerStateDelegate = nil
     }
 
     private func cancelPendingRequests() {
@@ -485,7 +631,7 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         return try await withCheckedThrowingContinuation { continuation in
             let id = UUID()
             let timeout = Task { @MainActor [weak self] in
-                do { try await Task.sleep(nanoseconds: 12_000_000_000) } catch { return }
+                do { try await Task.sleep(nanoseconds: self?.dependencies.requestTimeoutNanoseconds ?? 12_000_000_000) } catch { return }
                 self?.finishRequest(id, result: .failure(NativeFailure(code: "spotify_command_timeout", message: "Spotify did not confirm that action. Check Spotify before trying again.")))
             }
             requests[id] = PendingRequest(continuation: continuation, timeout: timeout)
@@ -509,15 +655,45 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
     private func refreshState() {
         guard let remote, remote.isConnected else { return }
         let session = generation
+        let revision = stateRevision
+        let readID = UUID()
+        stateReadID = readID
         remote.playerAPI?.getPlayerState { [weak self, weak remote] result, error in
-            guard let self, let remote, self.remote === remote, self.generation == session, remote.isConnected else { return }
+            guard let self, let remote, self.remote === remote, self.generation == session,
+                  remote.isConnected, self.stateReadID == readID, self.stateRevision == revision else { return }
             if let state = result as? SPTAppRemotePlayerState, error == nil { self.accept(state) }
+        }
+    }
+
+    private func refreshStateAfterCommand() async throws {
+        let revision = stateRevision
+        let readID = UUID()
+        stateReadID = readID
+        let result = try await request { api, callback in
+            api.getPlayerState { [weak self] result, error in
+                // Accept synchronously at the SDK callback, before resuming the caller.
+                // A subscription update received since the read began takes precedence.
+                if let self, self.stateReadID == readID, self.stateRevision == revision,
+                   let state = result as? SPTAppRemotePlayerState, error == nil {
+                    self.accept(state)
+                }
+                callback(result, error)
+            }
+        }
+        guard result is SPTAppRemotePlayerState else {
+            throw NativeFailure(code: "spotify_state_unavailable", message: "Spotify playback state is unavailable. Reconnect and try again.")
         }
     }
 
     private func accept(_ state: SPTAppRemotePlayerState) {
         guard remote?.isConnected == true, foreground, wantsConnection else { return }
+        stateRevision += 1
         playerState = state
+        if failureClearsOnStateUpdate {
+            failure = nil
+            failureClearsOnStateUpdate = false
+            statusMessage = ""
+        }
         positionReceivedAt = ProcessInfo.processInfo.systemUptime
         mayHaveActivePlayback = !state.isPaused
         if artworkURI != state.track.uri {
@@ -541,10 +717,19 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         connectionTimeout?.cancel()
         connecting = false
         authorizing = false
+        // A successful transport without a state cannot yet prove playback paused.
+        mayHaveActivePlayback = true
+        hasEstablishedConnection = true
         failure = nil
         statusMessage = ""
-        appRemote.playerAPI?.delegate = self
         let session = generation
+        retirePlayerStateDelegate()
+        let delegate = SpotifyPlayerStateDelegate { [weak self, weak appRemote] state in
+            guard let self, let appRemote, self.remote === appRemote, self.generation == session else { return }
+            self.accept(state)
+        }
+        playerStateDelegate = delegate
+        appRemote.playerAPI?.delegate = delegate
         appRemote.playerAPI?.subscribe(toPlayerState: { [weak self, weak appRemote] _, error in
             guard let self, let appRemote, self.remote === appRemote, self.generation == session else { return }
             if error != nil {
@@ -566,6 +751,8 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
 
     func appRemote(_ appRemote: SPTAppRemote, didDisconnectWithError error: Error?) {
         guard remote === appRemote else { return }
+        retirePlayerStateDelegate()
+        stateReadID = UUID()
         connecting = false
         connectionTimeout?.cancel()
         connectionWaiter.complete(.failure(NativeFailure(code: "spotify_disconnected", message: "Spotify disconnected. Tap Connect Spotify before using playback controls.")))
@@ -576,8 +763,6 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         }
         notify()
     }
-
-    func playerStateDidChange(_ playerState: SPTAppRemotePlayerState) { accept(playerState) }
 
     private func require(_ capability: Bool) throws {
         guard remote?.isConnected == true else {
@@ -597,7 +782,8 @@ final class SpotifyRemoteService: NSObject, SPTAppRemoteDelegate, SPTAppRemotePl
         NativeFailure(code: "invalid_argument", message: "That playback control received an invalid value.")
     }
 
-    private func setFailure(_ code: String, _ message: String) {
+    private func setFailure(_ code: String, _ message: String, recoverableOnState: Bool = false) {
+        failureClearsOnStateUpdate = recoverableOnState
         failure = NativeFailure(code: code, message: message)
         statusMessage = message
         diagnostics.record("spotify_failure", code: code)
