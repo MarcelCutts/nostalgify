@@ -302,7 +302,10 @@ final class AppUITests: XCTestCase {
 
     // WebKit exposes HTML aria-pressed controls as native accessibility switches.
     private func openFiles() {
-        tap(webView.switches["Files"].firstMatch)
+        let files = webView.switches.matching(NSPredicate(format: "label == %@", "Files")).firstMatch
+        tapUsingSnapshot(files, phasePrefix: "files", action: "select") {
+            $0.elementType == .switch && $0.label == "Files"
+        }
         let selectedFiles = webView.switches.matching(
             NSPredicate(format: "label == %@ AND value == %@", "Files", "1")).firstMatch
         XCTAssertTrue(selectedFiles.waitForExistence(timeout: 10),
@@ -318,14 +321,21 @@ final class AppUITests: XCTestCase {
 
     private func tapFixturePlay(file: StaticString = #filePath, line: UInt = #line) {
         let label = "Play UI Test One"
-        let element = button("", label)
-        phase("fixture.play") {
-            XCTAssertTrue(phase("fixture.exists") { element.waitForExistence(timeout: 10) },
+        tapUsingSnapshot(button("", label), phasePrefix: "fixture", action: "play", file: file, line: line) {
+            $0.elementType == .button && $0.label == label
+        }
+    }
+
+    private func tapUsingSnapshot(_ element: XCUIElement, phasePrefix: String, action: String,
+                                  file: StaticString = #filePath, line: UInt = #line,
+                                  matching predicate: (XCUIElementSnapshot) -> Bool) {
+        phase("\(phasePrefix).\(action)") {
+            XCTAssertTrue(phase("\(phasePrefix).exists") { element.waitForExistence(timeout: 10) },
                           "Element is missing: \(element)", file: file, line: line)
             do {
                 // One coherent read supplies keyboard, viewport and target
                 // geometry. Separate AX queries took tens of seconds each in CI.
-                var snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                var snapshot = try phase("\(phasePrefix).snapshot") { try app.snapshot() }
                 if keyboardIsVisible(in: snapshot) {
                     let hideKeyboard = app.keyboards.buttons["Hide keyboard"].firstMatch
                     XCTAssertTrue(hideKeyboard.waitForExistence(timeout: 5), file: file, line: line)
@@ -333,17 +343,18 @@ final class AppUITests: XCTestCase {
                     waitUntil("The keyboard must close before tapping content", file: file, line: line) {
                         !self.keyboardIsVisible
                     }
-                    snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                    snapshot = try phase("\(phasePrefix).snapshot") { try app.snapshot() }
                 }
                 for attempt in 0..<8 {
                     if attempt > 0 {
-                        snapshot = try phase("fixture.snapshot") { try app.snapshot() }
+                        snapshot = try phase("\(phasePrefix).snapshot") { try app.snapshot() }
                     }
-                    // Match the live query within the same first WebView;
-                    // similarly named controls outside it cannot satisfy this.
+                    // The caller mirrors its live query in this predicate.
+                    // Scope both lookups to the same first WebView, without
+                    // extra live label/identifier reads to infer the target.
                     guard let web = firstSnapshot(in: snapshot, matching: { $0.elementType == .webView }),
-                          let target = firstSnapshot(in: web, matching: { $0.elementType == .button && $0.label == label }) else {
-                        XCTFail("Could not find the fixture control in the application's snapshot.", file: file, line: line)
+                          let target = firstSnapshot(in: web, matching: predicate) else {
+                        XCTFail("Could not find the control in the application's snapshot.", file: file, line: line)
                         return
                     }
                     let visible = web.frame.intersection(snapshot.frame).insetBy(dx: 0, dy: 25)
@@ -358,7 +369,7 @@ final class AppUITests: XCTestCase {
                 }
                 XCTFail("Element is inaccessible after scrolling: \(element)", file: file, line: line)
             } catch {
-                XCTFail("Could not inspect the fixture screen: \(error)", file: file, line: line)
+                XCTFail("Could not inspect the control screen: \(error)", file: file, line: line)
             }
         }
     }
