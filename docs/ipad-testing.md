@@ -80,11 +80,13 @@ This covers touch exploration after successful programmatic navigation, rather t
 
 CI inspects both compiled executables: the Debug binary must contain the fixture storage marker, and the Release binary must exclude the UI-test launch flag and fixture markers. The result is saved as `release-fixture-check.json`.
 
-The native suite currently contains 31 tests, including ten audio-recovery tests, plus seven application UI tests; the compatibility lane runs six UI tests and explicitly skips the VoiceOver service test. These are expected test counts, not evidence that a particular run passed.
+Native test counts vary with each draft's feature scope. Verify the exact native and UI test identities in `test-tree.json`; the compatibility lane's only expected skip is the VoiceOver service test. Expected counts alone are not evidence that a run passed.
 
 On UI-test failure, `tests.xcresult` includes the app screenshot and accessibility hierarchy; cleanup exports attachments under `test-attachments` for inspection without Xcode, recording any export failure in `attachment-export.log`. Every failed validation also attempts a separate `failure-screen.png`, preserving the earlier preflight screenshot in `launch.png`.
 
 Debug UI-test launches also write bounded, sanitized startup probe JSON under `Documents/UITestStartupDiagnostics`. Cleanup exports these as `startup-probes/*.json` even when tests fail. Each filename contains the fixture and launch UUID, retaining cold-launch and persistence-relaunch evidence separately. Scheduled/requested/completed phases distinguish a stalled JavaScript callback from a callback that reports an unready document; no URLs, script contents, user metadata or raw error messages are exported.
+
+Alongside startup probes, Debug UI-test fixtures write a passive, sanitized `*-input.json` trace containing up to 32 input and state-change records. `receivedAtUnixMs` records native receipt time as UTC Unix milliseconds; `timeMs` records page-relative `performance.now()` milliseconds. Neither is the original HID timestamp. Recording stops at the cap, and asynchronous file writes may remain unfinished when the app terminates, so later actions and final records are not guaranteed to appear.
 
 During XCTest, a diagnostic watcher can sample one stalled startup per run. It watches the existing 20-second probe, allows two seconds for its callback, and only considers a still-loading document. An unready completed callback remains eligible. Because XCTest can reinstall the app, the watcher refreshes this bundle's current data-container location at most once every 15 seconds, with a five-second lookup timeout. Its summary distinguishes unseen probes, unmatched stall conditions and rejected process identities using fixed statuses and counts.
 
