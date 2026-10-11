@@ -17,8 +17,9 @@ NOSTALGIFY_UI_TESTS_STARTED=false
 NOSTALGIFY_STARTUP_WATCHER_ID=''
 NOSTALGIFY_APP_LOG_ID=''
 NOSTALGIFY_ACTIVE_COMMAND_ID=''
-# Leave time inside the 45-minute job for finalization and artifact upload.
-NOSTALGIFY_COMMAND_DEADLINE=$((SECONDS + 1800))
+# A hosted run spent 928.766s before tests; 30 minutes clipped their 1200s cap
+# to 872s. Leave the separate 240s cleanup budget and upload inside the 45m job.
+NOSTALGIFY_COMMAND_DEADLINE=$((SECONDS + 2160))
 NOSTALGIFY_PROJECT="$PWD/apps/ipad/ios/App/App.xcodeproj"
 NOSTALGIFY_DERIVED_DATA="$NOSTALGIFY_IOS_RESULTS/DerivedData"
 NOSTALGIFY_PACKAGE_LOCK="$NOSTALGIFY_PROJECT/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
@@ -292,6 +293,7 @@ python3 scripts/ios-ci-diagnostics.py run --output "$NOSTALGIFY_IOS_RESULTS" \
   > "$NOSTALGIFY_IOS_RESULTS/app-events.log" 2>&1 &
 NOSTALGIFY_APP_LOG_ID=$!
 
+record_shell_phase built-app-lookup dispatch
 NOSTALGIFY_BUILT_APP=$(python3 - "$NOSTALGIFY_DERIVED_DATA/Build/Products/Debug-iphonesimulator" <<'PY'
 import pathlib, plistlib, sys
 for app in pathlib.Path(sys.argv[1]).glob('*.app'):
@@ -302,6 +304,7 @@ for app in pathlib.Path(sys.argv[1]).glob('*.app'):
 raise SystemExit('Built Nostalgify iPad app was not found.')
 PY
 )
+record_shell_phase built-app-lookup returned - - - 0
 bounded_command install 480 xcrun simctl install "$NOSTALGIFY_SIMULATOR_ID" "$NOSTALGIFY_BUILT_APP"
 bounded_logged_command preflight-launch 120 "$NOSTALGIFY_IOS_RESULTS/launch.log" xcrun simctl launch --terminate-running-process "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad --native-local-selfcheck
 bounded_command preflight-container-lookup 90 xcrun simctl get_app_container "$NOSTALGIFY_SIMULATOR_ID" dev.nostalgify.ipad data \
