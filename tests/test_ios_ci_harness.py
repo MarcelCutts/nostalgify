@@ -172,6 +172,178 @@ PY
         terminal = self.events("warning-collector")[-1]
         self.assertEqual((terminal["status"], terminal["exitCode"]), ("completed", 0))
 
+    def test_optional_capture_timeout_preserves_event_and_required_verdict(self):
+        status, stdout, stderr = self.run_shell(r"""
+best_effort_command preflight-screenshot 1 "$TEST_PYTHON" -c 'import time; time.sleep(20)'
+bounded_command tests 5 "$TEST_PYTHON" -c 'import sys; print("required tests ran"); sys.exit(17)'
+""")
+        self.assertEqual(status, 17, stdout + stderr)
+        self.assertIn("required tests ran", stdout)
+        self.assertIn("preflight-screenshot diagnostic collection failed (exit 124)", stderr)
+        terminal = self.events("preflight-screenshot")[-1]
+        self.assertEqual((terminal["status"], terminal["exitCode"]), ("timed-out", 124))
+        self.assertTrue(terminal["processGroupCleanup"]["leaderReaped"])
+        self.assertEqual(self.events("tests")[-1]["exitCode"], 17)
+
+    def run_stubbed_validation(self, *, screenshot_status, test_status=0,
+                               selfcheck_passed=True, inventory_status=0):
+        repository = self.directory / "validation-repository"
+        scripts = repository / "scripts"
+        scripts.mkdir(parents=True)
+        for name in ("check-ios-simulator.sh", "ios-ci-harness.sh", "ios-ci-diagnostics.py"):
+            shutil.copy2(ROOT / "scripts" / name, scripts / name)
+        # Startup sampling has its own suite. Keep every native/diagnostic
+        # fixture finite even if an entry-script regression bypasses cleanup.
+        (scripts / "capture-ios-startup-stall.py").write_text("# No startup probes in this fixture.\n")
+        lock = repository / "apps/ipad/ios/App/App.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved"
+        lock.parent.mkdir(parents=True)
+        lock.write_text('{}\n')
+        app_data = self.directory / "app-data"
+        documents = app_data / "Documents"
+        documents.mkdir(parents=True)
+        (documents / "native-selfcheck.json").write_text(json.dumps({
+            "passed": selfcheck_passed, "libraryCount": 2,
+            "provider": "local", "state": "stopped",
+            "checks": ["import", "distinct-identities", "native-queue",
+                       "persistence", "webview-bridge"]}))
+        binaries = self.directory / "validation-bin"
+        binaries.mkdir()
+        # Only these portable utilities can reach the host. Every native tool
+        # is a local fixture, so the actual entry script cannot launch Xcode.
+        for name in ("dirname", "mkdir", "mktemp", "tee", "cp", "cat", "date"):
+            executable = shutil.which(name)
+            self.assertIsNotNone(executable, name)
+            (binaries / name).symlink_to(executable)
+        (binaries / "bash").symlink_to("/bin/bash")
+        (binaries / "python3").symlink_to(sys.executable)
+        stub_source = "#!" + sys.executable + "\n" + r"""
+import json
+import os
+import pathlib
+import plistlib
+import sys
+
+name, args = pathlib.Path(sys.argv[0]).name, sys.argv[1:]
+root = pathlib.Path(os.environ['HARNESS_STUB_DIRECTORY'])
+if name == 'uname':
+    print('Darwin')
+elif name == 'git':
+    if args == ['rev-parse', 'HEAD']:
+        print('0' * 40)
+elif name in ('node', 'sw_vers', 'uuidgen'):
+    print('portable-test-stub')
+elif name == 'xcodebuild':
+    if args in (['-version'], ['-showsdks']):
+        print('portable toolchain inventory')
+        raise SystemExit(int(os.environ['HARNESS_INVENTORY_STATUS']))
+    elif args == ['-help']:
+        print('-collect-test-diagnostics')
+    elif args[0] == '-resolvePackageDependencies':
+        pass
+    elif args[0] == 'build':
+        configuration = args[args.index('-configuration') + 1]
+        products = pathlib.Path(args[args.index('-derivedDataPath') + 1]) / 'Build/Products'
+        app = products / (configuration + ('-iphonesimulator' if configuration == 'Debug' else '-iphoneos')) / 'App.app'
+        app.mkdir(parents=True)
+        (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': 'dev.nostalgify.ipad', 'CFBundleExecutable': 'App'}))
+        (app / 'App').write_bytes(b'dev.nostalgify.ipad.uitests.' if configuration == 'Debug' else b'release')
+    elif args[0] == 'test':
+        (root / 'required-tests-ran').touch()
+        print('fixture XCTest verdict')
+        raise SystemExit(int(os.environ['HARNESS_TEST_STATUS']))
+    else:
+        raise SystemExit('Unexpected Xcode invocation: ' + repr(args))
+elif name == 'xcrun':
+    if args == ['--version']:
+        print('portable xcrun')
+    elif args[:3] == ['simctl', 'list', '--json']:
+        runtime = 'com.apple.CoreSimulator.SimRuntime.iOS-27-0'
+        print(json.dumps({'runtimes': [{'identifier': runtime, 'version': '27.0', 'isAvailable': True}], 'devices': {runtime: [{'name': 'iPad fixture', 'isAvailable': True, 'deviceTypeIdentifier': 'fixture-ipad'}]}}))
+    elif args[:2] == ['simctl', 'create']:
+        print('fixture-simulator')
+    elif args[:2] == ['simctl', 'get_app_container']:
+        print(root / 'app-data')
+    elif args[:2] == ['simctl', 'io']:
+        raise SystemExit(int(os.environ['HARNESS_SCREENSHOT_STATUS']))
+    elif args[:2] == ['simctl', 'launch']:
+        # A failed test may request a best-effort comparison, never another test.
+        if '--ui-testing' in args:
+            raise SystemExit(2)
+        print('dev.nostalgify.ipad: 123')
+    elif args[:2] in (['simctl', 'boot'], ['simctl', 'bootstatus'],
+                      ['simctl', 'install'], ['simctl', 'terminate'],
+                      ['simctl', 'shutdown'], ['simctl', 'delete'],
+                      ['simctl', 'spawn']):
+        pass
+    else:
+        raise SystemExit('Unexpected simulator invocation: ' + repr(args))
+else:
+    raise SystemExit('Unexpected tool in portable fixture: ' + name)
+"""
+        for name in ("uname", "git", "sw_vers", "xcrun", "node", "xcodebuild", "uuidgen"):
+            stub = binaries / name
+            stub.write_text(stub_source)
+            stub.chmod(0o755)
+        environment = {**self.environment, "PATH": str(binaries),
+                       "HARNESS_STUB_DIRECTORY": str(self.directory),
+                       "HARNESS_SCREENSHOT_STATUS": str(screenshot_status),
+                       "HARNESS_TEST_STATUS": str(test_status),
+                       "HARNESS_INVENTORY_STATUS": str(inventory_status),
+                       "NOSTALGIFY_IOS_RUNTIME": "27.0"}
+        stdout_path, stderr_path = repository / "entry.stdout", repository / "entry.stderr"
+        # Files avoid inherited PIPEs blocking a test after the entry exits.
+        with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+            process = subprocess.Popen(
+                ["/bin/bash", str(scripts / "check-ios-simulator.sh")],
+                cwd=repository, env=environment, stdout=stdout, stderr=stderr,
+                start_new_session=True)
+            try:
+                process.wait(timeout=20)
+            finally:
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        self.stop_shell(process)
+        result = subprocess.CompletedProcess(process.args, process.returncode,
+                                             stdout_path.read_text(), stderr_path.read_text())
+        directories = list((repository / "out/ios-ci").glob("run.*"))
+        self.assertEqual(len(directories), 1, result.stdout + result.stderr)
+        directory = directories[0]
+        summary = json.loads((directory / "validation-summary.json").read_text())
+        return result, directory, summary
+
+    def test_entry_diagnostic_failures_do_not_prevent_required_tests(self):
+        result, directory, summary = self.run_stubbed_validation(
+            screenshot_status=17, inventory_status=17)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(summary["validationExitCode"], 0)
+        self.assertTrue((self.directory / "required-tests-ran").exists())
+        self.assertEqual(self.events("tests", directory)[-1]["exitCode"], 0)
+        for phase in ("xcode-version", "sdk-inventory", "preflight-screenshot"):
+            self.assertEqual(self.events(phase, directory)[-1]["exitCode"], 17)
+            self.assertIn(phase + " diagnostic collection failed (exit 17)", result.stderr)
+            self.assertTrue(any(issue["phase"] == phase for issue in summary["commandIssues"]))
+
+    def test_entry_capture_failure_does_not_replace_native_failure(self):
+        result, directory, summary = self.run_stubbed_validation(
+            screenshot_status=124, test_status=17)
+        self.assertEqual(result.returncode, 17, result.stdout + result.stderr)
+        self.assertEqual(summary["validationExitCode"], 17)
+        self.assertTrue((self.directory / "required-tests-ran").exists())
+        self.assertEqual(self.events("tests", directory)[-1]["exitCode"], 17)
+        self.assertEqual(self.events("preflight-screenshot", directory)[-1]["exitCode"], 124)
+
+    def test_entry_failed_selfcheck_still_prevents_tests_and_optional_capture(self):
+        result, directory, summary = self.run_stubbed_validation(
+            screenshot_status=17, selfcheck_passed=False)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(summary["validationExitCode"], 1)
+        self.assertIn("Native local-file self-check failed", result.stderr)
+        self.assertFalse((self.directory / "required-tests-ran").exists())
+        self.assertEqual(self.events("preflight-screenshot", directory), [])
+
     def test_actual_script_entry_term_preserves_cancellation_summary(self):
         repository = self.directory / "fake-repository"
         scripts = repository / "scripts"
