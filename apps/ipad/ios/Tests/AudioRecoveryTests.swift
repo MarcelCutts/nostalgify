@@ -5,6 +5,28 @@ import XCTest
 
 final class AudioRecoveryTests: XCTestCase {
     @MainActor
+    func testPlayAfterStoppedSeekDoesNotRewindThePlayer() async throws {
+        let fixture = try AudioRecoveryFixture()
+        defer { fixture.cleanup() }
+        let service = fixture.service!
+        try service.setActive(true)
+        try await service.command("playShelf", arg: "local:" + fixture.records[0].id)
+        let player = fixture.players[0]
+        try await service.command("stop", arg: nil)
+        XCTAssertEqual(player.currentTime().seconds, 0, accuracy: 0.01)
+        try await service.command("seek", arg: 4)
+        XCTAssertEqual(player.currentTime().seconds, 4, accuracy: 0.01)
+
+        let plays = player.playCalls
+        try await service.command("play", arg: nil)
+        XCTAssertEqual(player.playCalls, plays + 1)
+        // This probe never advances its clock: scheduler delays cannot conceal
+        // an incorrect rewind by allowing playback to catch up to four seconds.
+        XCTAssertEqual(player.currentTime().seconds, 4, accuracy: 0.01)
+        XCTAssertEqual(try XCTUnwrap(service.snapshot()["position"] as? Double), 4, accuracy: 0.01)
+    }
+
+    @MainActor
     func testBackgroundPostedResetIsHandledOnMainActorBeforePostingCompletes() async throws {
         let fixture = try AudioRecoveryFixture()
         defer { fixture.cleanup() }

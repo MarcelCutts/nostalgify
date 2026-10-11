@@ -93,7 +93,7 @@ final class NativeCoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: folder) }
         let source = folder.appendingPathComponent("seek-fixture.wav")
-        try NativeSelfCheck.fixture(at: source, seconds: 8)
+        try NativeSelfCheck.fixture(at: source, seconds: 30)
         let service = LocalAudioService(diagnostics: NativeDiagnostics(), directory: folder.appendingPathComponent("library"))
         _ = try await service.importFiles([source])
         try service.setActive(true)
@@ -104,12 +104,56 @@ final class NativeCoreTests: XCTestCase {
         XCTAssertEqual(service.snapshot()["state"] as? String, "stopped")
         try await service.command("seek", arg: 4)
         XCTAssertEqual(service.snapshot()["state"] as? String, "paused")
+        XCTAssertEqual(try XCTUnwrap(service.snapshot()["position"] as? Double), 4, accuracy: 0.1)
+        let playing = expectation(description: "AVPlayer resumes after the completed seek")
+        var confirmedPlaying = false
+        service.onStateChanged = {
+            if !confirmedPlaying, service.snapshot()["state"] as? String == "playing" {
+                confirmedPlaying = true
+                playing.fulfill()
+            }
+        }
+        defer { service.onStateChanged = nil }
+        let started = ProcessInfo.processInfo.systemUptime
         try await service.command("play", arg: nil)
-        try await Task.sleep(for: .milliseconds(200))
+        await fulfillment(of: [playing], timeout: 10)
         try await service.command("pause", arg: nil)
         let position = try XCTUnwrap(service.snapshot()["position"] as? Double)
         XCTAssertGreaterThanOrEqual(position, 3.9)
-        XCTAssertLessThan(position, 5)
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        XCTAssertLessThanOrEqual(position, 4 + elapsed + 0.25, "Playback cannot advance beyond elapsed wall time after seeking.")
+    }
+
+    @MainActor
+    func testQueueSelfCheckWaitsForLastTrackToFinish() async throws {
+        var observations = 0
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            observations += 1
+            return ["state": observations == 2 ? "playing" : "stopped",
+                    "track": ["id": observations == 1 ? "first" : "last"]]
+        }, lastTrackID: "last")
+        XCTAssertEqual(observations, 3, "Neither the wrong stopped track nor the playing final track establishes completion.")
+        XCTAssertEqual(result["passed"] as? Bool, true)
+    }
+
+    @MainActor
+    func testQueueSelfCheckTimeoutRetainsLastObservedState() async throws {
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            ["state": "playing", "track": ["id": "last"]]
+        }, lastTrackID: "last", timeout: 0)
+        XCTAssertEqual(result["passed"] as? Bool, false)
+        XCTAssertEqual(result["expectedTrackSelected"] as? Bool, true)
+        XCTAssertEqual(result["state"] as? String, "playing")
+    }
+
+    @MainActor
+    func testQueueSelfCheckRejectsPlaybackErrorWithoutExportingRawText() async throws {
+        let result = try await NativeSelfCheck.checkQueue(snapshot: {
+            ["state": "stopped", "track": ["id": "last"], "error": "private input"]
+        }, lastTrackID: "last")
+        XCTAssertEqual(result["passed"] as? Bool, false)
+        XCTAssertEqual(result["hasError"] as? Bool, true)
+        XCTAssertFalse(String(describing: result).contains("private input"))
     }
 
     @MainActor
