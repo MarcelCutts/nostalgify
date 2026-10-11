@@ -24,9 +24,10 @@ final class AppUITests: XCTestCase {
         // https://developer.apple.com/forums/thread/809989
         testStartedUptime = ProcessInfo.processInfo.systemUptime
         continueAfterFailure = false
-        // Real keyboard, accessibility and AVPlayer interactions took 116s on
-        // the compatibility runner. Keep a bounded allowance for VM variance.
-        executionTimeAllowance = 180
+        // Different hosted UI journeys reached the three-minute guard amid
+        // cumulative accessibility latency or XCTest completion overhead.
+        // Keep a bounded hang guard; interaction assertions retain their limits.
+        executionTimeAllowance = 240
         fixtureID = UUID().uuidString
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
@@ -479,10 +480,6 @@ final class AppUITests: XCTestCase {
     }
 
     func testAccessibleControlsRemainUsableAfterRotation() throws {
-        // Hosted CI recorded 173s through teardown, followed by XCTest's
-        // pending-crash-log collection, with a 203s result. Allow this longer
-        // scenario to finish; every interaction still has its existing bound.
-        executionTimeAllowance = 240
         playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             phase("rotation.change") { XCUIDevice.shared.orientation = orientation }
