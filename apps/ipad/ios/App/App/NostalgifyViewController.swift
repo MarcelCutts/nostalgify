@@ -20,6 +20,12 @@ final class NostalgifyViewController: CAPBridgeViewController {
         // This hook sees its final controller, before the SDK exports its bridge.
         configuration.userContentController.addUserScript(NativeBridgeBootstrap.installationScript(
             cookiesEnabled: bootstrapCookiesEnabled, httpEnabled: bootstrapHttpEnabled))
+        #if DEBUG
+        if let fixture = NativeUITestFixture.configuration {
+            NativeUITestInputTrace.install(on: configuration.userContentController,
+                                          fixture: fixture, launchID: uiTestLaunchID)
+        }
+        #endif
         return super.webView(with: frame, configuration: configuration)
     }
 
@@ -35,6 +41,7 @@ final class NostalgifyViewController: CAPBridgeViewController {
 
     #if DEBUG
     private var startupProbeScheduled = false
+    private let uiTestLaunchID = UUID().uuidString
 
     /// This probe observes the normal Capacitor setup without replacing its
     /// navigation delegate, retrying navigation, or extending UI-test deadlines.
@@ -42,7 +49,7 @@ final class NostalgifyViewController: CAPBridgeViewController {
         guard !startupProbeScheduled, let fixture = NativeUITestFixture.configuration else { return }
         startupProbeScheduled = true
         let fixtureID = fixture.identifier.uuidString
-        let launchID = UUID().uuidString
+        let launchID = uiTestLaunchID
         let started = ProcessInfo.processInfo.systemUptime
         writeStartupProbe(startupRecord(phase: "scheduled", fixtureID: fixtureID, launchID: launchID, started: started))
         Task { @MainActor [weak self] in

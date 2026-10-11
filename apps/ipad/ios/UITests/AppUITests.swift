@@ -115,7 +115,7 @@ final class AppUITests: XCTestCase {
         let launchedUptime = ProcessInfo.processInfo.systemUptime
         // CI recorded 28-second launches for WebKit's renderer, networking and
         // GPU helpers before the page could load. This is a bounded readiness
-        // allowance after app.launch(), within the unchanged 180-second case.
+        // allowance after app.launch(), within the bounded test-case allowance.
         let readinessWaitLimit: TimeInterval = 60
         // Source browsing becomes enabled after startup's final library render.
         // Evaluate the enabled attribute within XCTest's native element query,
@@ -437,11 +437,27 @@ final class AppUITests: XCTestCase {
 
     func testFilesLibraryAccessibilityAudit() throws {
         openFiles()
-        waitUntil("The Files audit must inspect the selected source and its imported library") {
-            self.webView.switches["Files"].firstMatch.value as? String == "1" &&
-                self.button("import-button", "Import from Files").exists &&
-                self.button("", "Play UI Test One").exists &&
-                self.button("", "Play UI Test Two").exists
+        let selectedFiles = webView.switches.matching(
+            NSPredicate(format: "label == %@ AND value == %@", "Files", "1")).firstMatch
+        let readiness: [(phase: String, element: XCUIElement, requirement: String)] = [
+            ("files.audit.selectedSource", selectedFiles, "the selected Files source"),
+            ("files.audit.import", button("import-button", "Import from Files"), "the Import from Files button"),
+            ("files.audit.fixtureOne", button("", "Play UI Test One"), "the first imported track"),
+            ("files.audit.fixtureTwo", button("", "Play UI Test Two"), "the second imported track")
+        ]
+        // Let native queries own the waits instead of resolving properties
+        // inside an outer predicate waiter. All four readiness waits receive
+        // time from one shared budget.
+        let deadline = ProcessInfo.processInfo.systemUptime + 10
+        for check in readiness {
+            let ready = phase(check.phase) {
+                let remaining = deadline - ProcessInfo.processInfo.systemUptime
+                return remaining > 0 && check.element.waitForExistence(timeout: remaining)
+            }
+            guard ready else {
+                XCTFail("The Files audit must find \(check.requirement) within its shared 10-second readiness deadline.")
+                return
+            }
         }
         // Retain the actual pre-audit screen, including passing runs. When an
         // audit cannot resolve its issue element, this still preserves the
@@ -463,6 +479,10 @@ final class AppUITests: XCTestCase {
     }
 
     func testAccessibleControlsRemainUsableAfterRotation() throws {
+        // Hosted CI recorded 173s through teardown, followed by XCTest's
+        // pending-crash-log collection, with a 203s result. Allow this longer
+        // scenario to finish; every interaction still has its existing bound.
+        executionTimeAllowance = 240
         playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             phase("rotation.change") { XCUIDevice.shared.orientation = orientation }
@@ -554,18 +574,46 @@ final class AppUITests: XCTestCase {
         record("enabled after: \(voiceOver.isEnabled)")
         record("service: \(voiceOver.debugDescription)")
         XCTAssertTrue(voiceOver.isEnabled, "VoiceOver must be enabled before touch exploration.")
-        // Enabling VoiceOver can move focus or scroll the page. Read the target
-        // after that change; enabled state alone does not prove service readiness.
+        func isSettingsButton(_ utterance: String) -> Bool {
+            let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return normalized.hasPrefix("settings") && normalized.contains("button")
+        }
+        // Establish working navigation and speech without assuming enable gave
+        // VoiceOver an initial spoken focus. This tests touch after navigation;
+        // it does not establish that VoiceOver will intercept the next touch.
+        // https://developer.apple.com/documentation/xcuiautomation/xcuivoiceoverservice
+        record("phase:establish-focus")
+        var preTouchSpeech = try phase("voiceover.establishFocus") { try voiceOver.moveForward().utterance }
+        record("focus before touch: " + preTouchSpeech)
+        XCTAssertFalse(preTouchSpeech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                       "VoiceOver navigation must produce speech before touch exploration.")
+        if isSettingsButton(preTouchSpeech) {
+            // Leave a preselected target once so the touch must select Settings.
+            // A failed operation or a second Settings result remains a failure.
+            record("phase:leave-preselected-settings")
+            preTouchSpeech = try phase("voiceover.leavePreselectedSettings") { try voiceOver.moveForward().utterance }
+            record("focus before touch: " + preTouchSpeech)
+            XCTAssertFalse(preTouchSpeech.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                           "Leaving preselected Settings must produce speech.")
+        }
+        XCTAssertFalse(isSettingsButton(preTouchSpeech),
+                       "VoiceOver focus must be away from Settings before the touch selects it.")
+        let openedBeforeTouch = phase("voiceover.preTouchActivationCheck") {
+            button("settings-close", "Close settings").exists
+        }
+        record("settings opened before touch: \(openedBeforeTouch)")
+        XCTAssertFalse(openedBeforeTouch, "VoiceOver focus setup must leave Settings closed.")
+        // Enabling and navigating VoiceOver can scroll the page. Read both
+        // frames after focus setup, before sending the single coordinate touch.
         let settingsFrame = phase("voiceover.targetFrame") { settings.frame }
         let appFrame = phase("voiceover.appFrame") { app.frame }
-        record("settings frame after enable: \(settingsFrame); app frame: \(appFrame)")
-        XCTAssertTrue(appFrame.contains(settingsFrame), "Settings must still be onscreen after enabling VoiceOver.")
+        record("settings frame after focus setup: \(settingsFrame); app frame: \(appFrame)")
+        XCTAssertTrue(appFrame.contains(settingsFrame), "Settings must still be onscreen after VoiceOver focus setup.")
         let settingsCenter = app.coordinate(withNormalizedOffset: .zero).withOffset(
             CGVector(dx: settingsFrame.midX - appFrame.minX, dy: settingsFrame.midY - appFrame.minY))
         // VoiceOver touch exploration selects an item with one tap; activation
-        // requires a double tap. Send one physical coordinate event to establish
-        // a known focus before testing sequential navigation. This avoids
-        // assuming that enabling VoiceOver produced an initial spoken element.
+        // requires a double tap. Send one physical coordinate event to select
+        // Settings from the non-Settings focus established above.
         // https://support.apple.com/guide/ipad/ipad58ced58d/ipados
         record("phase:touch-settings")
         phase("voiceover.touchSettings") { settingsCenter.tap() }
@@ -575,10 +623,6 @@ final class AppUITests: XCTestCase {
         record("phase:current-speech")
         let speech = try phase("voiceover.currentSpeech") { try voiceOver.currentSpeech().utterance }
         record("speech: " + speech)
-        func isSettingsButton(_ utterance: String) -> Bool {
-            let normalized = utterance.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return normalized.hasPrefix("settings") && normalized.contains("button")
-        }
         XCTAssertTrue(isSettingsButton(speech), "Touch exploration must select Settings and announce it as a button, rather than incidental help text.")
         record("phase:leave-settings")
         let next = try phase("voiceover.moveForward") { try voiceOver.moveForward().utterance }
