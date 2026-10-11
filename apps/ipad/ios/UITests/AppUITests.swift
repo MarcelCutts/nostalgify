@@ -115,7 +115,7 @@ final class AppUITests: XCTestCase {
         let launchedUptime = ProcessInfo.processInfo.systemUptime
         // CI recorded 28-second launches for WebKit's renderer, networking and
         // GPU helpers before the page could load. This is a bounded readiness
-        // allowance after app.launch(), within the unchanged 180-second case.
+        // allowance after app.launch(), within the bounded test-case allowance.
         let readinessWaitLimit: TimeInterval = 60
         // Source browsing becomes enabled after startup's final library render.
         // Evaluate the enabled attribute within XCTest's native element query,
@@ -463,6 +463,10 @@ final class AppUITests: XCTestCase {
     }
 
     func testAccessibleControlsRemainUsableAfterRotation() throws {
+        // Hosted CI recorded 173s through teardown, followed by XCTest's
+        // pending-crash-log collection, with a 203s result. Allow this longer
+        // scenario to finish; every interaction still has its existing bound.
+        executionTimeAllowance = 240
         playFixture()
         for orientation in [UIDeviceOrientation.landscapeLeft, .portrait] {
             phase("rotation.change") { XCUIDevice.shared.orientation = orientation }

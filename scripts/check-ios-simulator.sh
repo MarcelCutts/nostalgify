@@ -343,7 +343,7 @@ bounded_logged_command tests 1200 "$NOSTALGIFY_IOS_RESULTS/tests.log" xcodebuild
   -parallel-testing-enabled NO \
   -test-timeouts-enabled YES \
   -default-test-execution-time-allowance 120 \
-  -maximum-test-execution-time-allowance 180 \
+  -maximum-test-execution-time-allowance 240 \
   -collect-test-diagnostics never \
   -derivedDataPath "$NOSTALGIFY_DERIVED_DATA" \
   -clonedSourcePackagesDirPath "$NOSTALGIFY_IOS_RESULTS/SourcePackages" \
