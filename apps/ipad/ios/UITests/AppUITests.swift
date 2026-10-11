@@ -24,10 +24,10 @@ final class AppUITests: XCTestCase {
         // https://developer.apple.com/forums/thread/809989
         testStartedUptime = ProcessInfo.processInfo.systemUptime
         continueAfterFailure = false
-        // Different hosted UI journeys reached the three-minute guard amid
-        // cumulative accessibility latency or XCTest completion overhead.
-        // Keep a bounded hang guard; interaction assertions retain their limits.
-        executionTimeAllowance = 240
+        // Use XCTest's documented default hang guard for complete UI journeys,
+        // including launch, accessibility queries and teardown. Individual
+        // assertions and the outer test-command budget keep their own limits.
+        executionTimeAllowance = 600
         fixtureID = UUID().uuidString
         app = XCUIApplication()
         app.launchArguments = ["--ui-testing", fixtureID, "-AppleLanguages", "(en)", "-AppleLocale", "en_US"]
